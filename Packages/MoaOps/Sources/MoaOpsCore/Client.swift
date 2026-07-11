@@ -77,6 +77,7 @@ public actor MoaOpsClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(instruction.requestID, forHTTPHeaderField: "X-Request-ID")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
         request.httpBody = try JSONEncoder.moaOps.encode(instruction)
         let (data, response) = try await data(for: request)
         guard let http = response as? HTTPURLResponse else { throw MoaOpsClientError.invalidResponse }

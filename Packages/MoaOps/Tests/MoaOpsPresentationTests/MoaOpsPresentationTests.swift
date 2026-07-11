@@ -30,7 +30,11 @@ final class MoaOpsPresentationTests: XCTestCase {
     }
 
     func testErrorMappingDoesNotExposeServerDetails() {
-        XCTAssertEqual(PresentationMapper.userMessage(for: MoaOpsClientError.httpStatus(code: 500, retryAfter: nil)), "Could not reach the server. Check the address and try again.")
+        XCTAssertEqual(PresentationMapper.userMessage(for: MoaOpsClientError.httpStatus(code: 401, retryAfter: nil)), "The server requires authentication. Check your access and try again.")
+        XCTAssertEqual(PresentationMapper.userMessage(for: MoaOpsClientError.httpStatus(code: 403, retryAfter: nil)), "The server did not authorize this request. Check authentication and request authorization.")
+        XCTAssertEqual(PresentationMapper.userMessage(for: MoaOpsClientError.httpStatus(code: 404, retryAfter: nil)), "This server does not support the requested Ops API.")
+        XCTAssertEqual(PresentationMapper.userMessage(for: MoaOpsClientError.httpStatus(code: 429, retryAfter: nil)), "The server is rate limiting requests. Try again shortly.")
+        XCTAssertEqual(PresentationMapper.userMessage(for: MoaOpsClientError.httpStatus(code: 500, retryAfter: nil)), "The server refused the request. Try again later.")
         XCTAssertEqual(PresentationMapper.userMessage(for: NSError(domain: "private-server-detail", code: 1)), "Could not reach the server. Check the address and try again.")
     }
 

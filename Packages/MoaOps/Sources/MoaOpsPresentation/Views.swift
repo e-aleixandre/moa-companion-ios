@@ -19,7 +19,7 @@ public struct MoaOpsRootView: View {
                     }
                 }
             }
-            .navigationTitle("Moa Ops")
+            .navigationTitle("Ops dashboard")
         } detail: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
@@ -29,6 +29,7 @@ public struct MoaOpsRootView: View {
                         Label(message, systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.red)
                     }
+                    AskMoaView(model: model)
                     SitrepView(sitrep: model.sitrep, blockers: model.blockers)
                     if let detail = model.selectedSessionDetail {
                         SessionDetailView(detail: detail)
@@ -39,12 +40,102 @@ public struct MoaOpsRootView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Operations")
+            .navigationTitle("Ask Moa")
             .toolbar {
                 Button("Refresh") { Task { await model.refresh() } }
                     .disabled(model.isLoading || model.isTestingConnection)
             }
         }
+    }
+}
+
+public struct AskMoaView: View {
+    @ObservedObject private var model: MoaOpsAppModel
+
+    public init(model: MoaOpsAppModel) { self.model = model }
+
+    public var body: some View {
+        GroupBox("Ask Moa") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Ask for verified Ops information. Moa does not generate answers.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                HStack(alignment: .bottom, spacing: 10) {
+                    TextField("Ask a verified Ops question", text: $model.askText, axis: .vertical)
+                        .lineLimit(1...4)
+                        .accessibilityLabel("Question for Moa")
+                    Button(model.isAsking ? "Asking…" : "Ask") {
+                        Task { await model.ask() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isAsking || model.askText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Suggested verified prompts")
+                        .font(.footnote.weight(.semibold))
+                    ForEach(model.suggestedAskPrompts, id: \.self) { prompt in
+                        Button(prompt) { model.useSuggestedAskPrompt(prompt) }
+                            .font(.footnote)
+                            .buttonStyle(.bordered)
+                    }
+                }
+                if let feedback = model.askFeedback {
+                    Label(feedback.message, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+                if !model.askHistory.isEmpty {
+                    Divider()
+                    Text("Recent verified answers")
+                        .font(.headline)
+                    ForEach(model.askHistory) { entry in
+                        AskHistoryEntryView(entry: entry)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct AskHistoryEntryView: View {
+    let entry: OpsAskHistoryEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.question)
+                .font(.subheadline.weight(.semibold))
+            HStack(spacing: 8) {
+                Label("Source: verified Ops API", systemImage: "checkmark.seal")
+                Text("Status: \(entry.statusLabel)")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if let resolution = entry.resolution, entry.kind == .status {
+                Text("Resolved target: \(resolution.target)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let sessions = entry.briefing.sessions, !sessions.isEmpty {
+                ForEach(sessions, id: \.id) { session in
+                    Text("\(session.title): \(PresentationMapper.label(for: session.verification))")
+                        .font(.footnote)
+                }
+            }
+            if !entry.briefing.blockers.isEmpty {
+                ForEach(entry.briefing.blockers, id: \.sessionID) { blocker in
+                    Text("\(blocker.title): \(blocker.kind.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)")
+                        .font(.footnote)
+                }
+            }
+            if (entry.briefing.sessions ?? []).isEmpty && entry.briefing.blockers.isEmpty {
+                Text("No verified items were reported.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -184,6 +275,16 @@ public struct DirectedInstructionComposer: View {
                     }
                 }
                 .disabled(model.instructionTargetID == nil || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if let receipt = model.instructionReceipt {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(receipt.message, systemImage: "checkmark.circle")
+                            .foregroundStyle(.green)
+                        Text(receipt.completionNotice)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
             }
         }
     }

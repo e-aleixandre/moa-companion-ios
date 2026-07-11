@@ -54,6 +54,31 @@ final class MoaOpsCoreTests: XCTestCase {
         XCTAssertEqual(object?["request_id"], "retry-id")
     }
 
+    func testAskRequestEncodingContainsOnlyQuestionText() throws {
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder.moaOps.encode(OpsAskRequest(text: "Give me a sitrep."))) as? [String: String]
+
+        XCTAssertEqual(object, ["text": "Give me a sitrep."])
+    }
+
+    func testAskResponseAcceptsOptionalResolutionAndBriefing() throws {
+        let data = Data("""
+        {"kind":"sitrep","briefing":{"sessions":[],"blockers":[],"spoken":"No sessions."}}
+        """.utf8)
+
+        let response = try JSONDecoder.moaOps.decode(OpsAskResponse.self, from: data)
+
+        XCTAssertEqual(response.kind, .sitrep)
+        XCTAssertNil(response.resolution)
+        XCTAssertEqual(response.briefing?.blockers, [])
+    }
+
+    func testAskResponseMapsUnknownKindSafely() throws {
+        let response = try JSONDecoder.moaOps.decode(OpsAskResponse.self, from: Data(#"{"kind":"future_answer"}"#.utf8))
+
+        XCTAssertEqual(response.kind, .unknown)
+        XCTAssertNil(response.briefing)
+    }
+
     func testSubmitInstructionIncludesCSRFHeaderAndJSONBody() async throws {
         let recorder = RequestRecorder()
         RequestCapturingURLProtocol.handler = { request in
@@ -83,6 +108,35 @@ final class MoaOpsCoreTests: XCTestCase {
         let body = try XCTUnwrap(request.httpBody)
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: String])
         XCTAssertEqual(object, ["target": "session-1", "text": "continue", "request_id": "retry-id"])
+    }
+
+    func testAskIncludesCSRFHeaderAndTextOnlyJSONBody() async throws {
+        let recorder = RequestRecorder()
+        RequestCapturingURLProtocol.handler = { request in
+            recorder.record(request)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data("""
+            {"kind":"blockers","briefing":{"sessions":null,"blockers":[],"spoken":"No blockers."}}
+            """.utf8))
+        }
+        defer { RequestCapturingURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestCapturingURLProtocol.self]
+        let client = try MoaOpsClient(baseURL: URL(string: "https://ops.example")!, session: URLSession(configuration: configuration))
+
+        _ = try await client.ask(.init(text: "What is blocked?"))
+
+        let request = try XCTUnwrap(recorder.request)
+        XCTAssertEqual(request.url?.path, "/api/ops/ask")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Moa-Request"), "1")
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(object, ["text": "What is blocked?"])
     }
 
     func testReconnectPolicyIsBounded() {

@@ -5,6 +5,7 @@ public protocol MoaOpsPresentationService: Sendable {
     func loadOverview() async throws -> OpsSnapshot
     func loadSitrep() async throws -> OpsBriefing
     func loadBlockers() async throws -> OpsBriefing
+    func ask(_ question: OpsAskRequest) async throws -> OpsAskResponse
     func submitInstruction(_ instruction: OpsInstructionRequest) async throws -> OpsInstructionResponse
     func startUpdates() async
     func stopUpdates() async
@@ -24,6 +25,7 @@ public actor MoaOpsLiveService: MoaOpsPresentationService {
     public func loadOverview() async throws -> OpsSnapshot { try await client.overview() }
     public func loadSitrep() async throws -> OpsBriefing { try await client.sitrep() }
     public func loadBlockers() async throws -> OpsBriefing { try await client.blockers() }
+    public func ask(_ question: OpsAskRequest) async throws -> OpsAskResponse { try await client.ask(question) }
     public func submitInstruction(_ instruction: OpsInstructionRequest) async throws -> OpsInstructionResponse {
         try await client.submitInstruction(instruction)
     }

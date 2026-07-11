@@ -7,12 +7,12 @@ final class CompanionPresentationTests: XCTestCase {
     func testSelectionDefaultsToActiveThenRecentAndIsBoundedByExactIDs() {
         let now = Date()
         let sessions = [
-            CompanionSession(id: "saved", title: "Guardada", state: "idle", updated: now),
+            CompanionSession(id: "saved", title: "Guardada", state: "saved", updated: now),
             CompanionSession(id: "live", title: "Activa", state: "running", updated: now.addingTimeInterval(-100)),
             CompanionSession(id: "third", title: "Tercera", state: "idle", updated: now.addingTimeInterval(-200)),
             CompanionSession(id: "fourth", title: "Cuarta", state: "idle", updated: now.addingTimeInterval(-300)),
         ]
-        XCTAssertEqual(CompanionMapper.defaultSelection(in: sessions), ["live", "saved", "third"])
+        XCTAssertEqual(CompanionMapper.defaultSelection(in: sessions), ["live", "third", "fourth"])
         XCTAssertEqual(CompanionMapper.toggling(sessionID: "fourth", selected: ["live", "saved", "third"]), ["live", "saved", "third"])
         XCTAssertEqual(CompanionMapper.toggling(sessionID: "saved", selected: ["live", "saved"]), ["live"])
     }

@@ -395,7 +395,10 @@ public final class MoaCompanionAppModel: ObservableObject {
     private func isAmbiguousSendFailure(_ error: Error) -> Bool {
         guard let error = error as? MoaOpsClientError else { return true }
         switch error {
-        case .transport, .invalidResponse: return true
+        // A successful `/send` status with an undecodable receipt is also
+        // ambiguous: the server may have accepted the non-idempotent send
+        // before its response was corrupted or incompatible.
+        case .transport, .invalidResponse, .decoding: return true
         default: return false
         }
     }

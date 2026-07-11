@@ -96,6 +96,26 @@ final class CompanionAppModelTests: XCTestCase {
         XCTAssertEqual(model.userMessage, "No se confirmó la entrega. Comprueba la conversación antes de enviar de nuevo.")
     }
 
+    func testMalformedAcceptedChatReceiptIsAlsoUnconfirmedAndClearsDraft() async throws {
+        let session = activeSession()
+        let service = CompanionServiceStub(sessions: [session], pages: [.success(page(sessionID: "s1", newestFirst: [], cursor: nil))])
+        // MoaOpsClient maps a 202 body it cannot decode to `.decoding`. Since
+        // `/send` is non-idempotent, this must not be presented as retryable.
+        service.sendResults = [.failure(.decoding)]
+        let model = model(service)
+        await model.connect()
+        await model.openConversation(session)
+        model.chatText = "continúa"
+
+        await model.sendChat()
+
+        XCTAssertEqual(service.sentChats.map { "\($0.0):\($0.1)" }, ["s1:continúa"])
+        XCTAssertEqual(model.chatText, "")
+        XCTAssertTrue(model.chatDeliveryUnconfirmed)
+        XCTAssertNil(model.chatReceipt)
+        XCTAssertEqual(model.userMessage, "No se confirmó la entrega. Comprueba la conversación antes de enviar de nuevo.")
+    }
+
     func testSuggestedActionUses1024UnicodeScalarLimitAndKeepsIdempotentRetry() async throws {
         let session = activeSession(id: "exact")
         let service = CompanionServiceStub(sessions: [session], pages: [])

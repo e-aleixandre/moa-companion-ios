@@ -200,6 +200,49 @@ final class MoaOpsCoreTests: XCTestCase {
         {"action":"sent","target":{"id":"s1"}}
         """.utf8)))
     }
+
+    func testConversationSendUsesCanonicalHeadersAndTextOnlyAttachments() async throws {
+        let recorder = RequestRecorder()
+        RequestCapturingURLProtocol.handler = { request in
+            recorder.record(request)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (response, Data(#"{"action":"steer"}"#.utf8))
+        }
+        defer { RequestCapturingURLProtocol.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestCapturingURLProtocol.self]
+        let client = try MoaOpsClient(baseURL: URL(string: "https://ops.example")!, session: URLSession(configuration: configuration))
+
+        let response = try await client.sendConversation(sessionID: "session-1", text: "continúa")
+
+        XCTAssertEqual(response.action, .steer)
+        let request = try XCTUnwrap(recorder.request)
+        XCTAssertEqual(request.url?.path, "/api/sessions/session-1/send")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Moa-Request"), "1")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(object["text"] as? String, "continúa")
+        XCTAssertEqual(object["attachments"] as? [String], [])
+    }
+
+    func testConversationCursorBadRequestMapsToSafeReload() async throws {
+        RequestCapturingURLProtocol.handler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        defer { RequestCapturingURLProtocol.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestCapturingURLProtocol.self]
+        let client = try MoaOpsClient(baseURL: URL(string: "https://ops.example")!, session: URLSession(configuration: configuration))
+        do {
+            _ = try await client.conversation(sessionID: "s1", cursor: "expired")
+            XCTFail("Expected reset")
+        } catch let error as MoaOpsClientError {
+            XCTAssertEqual(error, .conversationResetRequired)
+        }
+    }
 }
 
 private final class RequestRecorder {

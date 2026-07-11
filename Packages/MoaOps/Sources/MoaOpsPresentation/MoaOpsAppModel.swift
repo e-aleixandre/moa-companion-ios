@@ -321,6 +321,8 @@ public final class MoaOpsAppModel: ObservableObject {
             return "La sesión cambió. Abre de nuevo la tarjeta antes de enviar la instrucción."
         case .pulseResetRequired:
             return "El historial de cambios ya no está disponible."
+        case .conversationResetRequired:
+            return "La conversación cambió; vuelve a cargarla para ver el historial actual."
         case .decoding:
             return "El servidor envió una respuesta no compatible."
         default:

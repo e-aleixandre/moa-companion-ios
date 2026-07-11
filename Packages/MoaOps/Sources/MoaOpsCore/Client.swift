@@ -5,6 +5,7 @@ public enum MoaOpsClientError: Error, Equatable, Sendable {
     case invalidResponse
     case httpStatus(code: Int, retryAfter: TimeInterval?)
     case pulseResetRequired
+    case conversationResetRequired
     case instructionConflict(candidates: [OpsInstructionTarget])
     case decoding
     case transport
@@ -58,6 +59,59 @@ public actor MoaOpsClient {
 
     public func overview() async throws -> OpsSnapshot {
         try await get(path: "api/ops/overview", as: OpsSnapshot.self)
+    }
+
+    public func sessions() async throws -> [CompanionSession] {
+        try await get(path: "api/sessions", as: [CompanionSession].self)
+    }
+
+    /// Loads the canonical, oldest-first owner display transcript page. The
+    /// cursor is opaque and may cease to be valid after a restart or branch
+    /// change; callers receive `conversationResetRequired` and must reload
+    /// from the first page rather than infer a replacement cursor.
+    public func conversation(sessionID: String, limit: Int = 50, cursor: String? = nil) async throws -> ConversationPage {
+        guard (1...100).contains(limit) else { throw MoaOpsClientError.decoding }
+        var components = URLComponents(url: try sessionEndpoint(sessionID, suffix: "messages"), resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor, !cursor.isEmpty { items.append(URLQueryItem(name: "cursor", value: cursor)) }
+        components?.queryItems = items
+        guard let url = components?.url else { throw MoaOpsClientError.invalidBaseURL }
+        try await ensureAuthenticated()
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-ID")
+        let (data, response) = try await data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MoaOpsClientError.invalidResponse }
+        if http.statusCode == 400, cursor != nil { throw MoaOpsClientError.conversationResetRequired }
+        try validate(http)
+        return try decode(ConversationPage.self, from: data)
+    }
+
+    public func sendConversation(sessionID: String, text: String) async throws -> ConversationSendResponse {
+        try await ensureAuthenticated()
+        var request = try makeRequest(url: sessionEndpoint(sessionID, suffix: "send"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = try JSONEncoder.moaOps.encode(ConversationSendRequest(text: text))
+        let (data, response) = try await data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MoaOpsClientError.invalidResponse }
+        try validate(http)
+        return try decode(ConversationSendResponse.self, from: data)
+    }
+
+    public func opsBriefing(sessionIDs: [String]) async throws -> ConversationBriefing {
+        guard sessionIDs.count <= 3, Set(sessionIDs).count == sessionIDs.count else { throw MoaOpsClientError.decoding }
+        try await ensureAuthenticated()
+        var request = try makeRequest(path: "api/briefings/ops")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = try JSONEncoder.moaOps.encode(OpsBriefingRequest(sessionIDs: sessionIDs))
+        let (data, response) = try await data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MoaOpsClientError.invalidResponse }
+        try validate(http)
+        return try decode(ConversationBriefing.self, from: data)
     }
 
     /// Loads one server-selected Pulse page. `cursor` is opaque: an absent
@@ -165,7 +219,11 @@ public actor MoaOpsClient {
     }
 
     private func makeRequest(path: String) throws -> URLRequest {
-        var request = URLRequest(url: try endpoint(path: path))
+        try makeRequest(url: endpoint(path: path))
+    }
+
+    private func makeRequest(url: URL) throws -> URLRequest {
+        var request = URLRequest(url: url)
         request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-ID")
         return request
     }
@@ -175,6 +233,11 @@ public actor MoaOpsClient {
             throw MoaOpsClientError.invalidBaseURL
         }
         return url
+    }
+
+    private func sessionEndpoint(_ id: String, suffix: String) throws -> URL {
+        guard !id.isEmpty, !suffix.isEmpty else { throw MoaOpsClientError.invalidBaseURL }
+        return baseURL.appendingPathComponent("api").appendingPathComponent("sessions").appendingPathComponent(id).appendingPathComponent(suffix)
     }
 
     private func data(for request: URLRequest) async throws -> (Data, URLResponse) {

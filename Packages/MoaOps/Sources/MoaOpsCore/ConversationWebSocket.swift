@@ -125,6 +125,24 @@ private struct ConversationWireEvent: Decodable {
 
     enum CodingKeys: String, CodingKey { case type, data }
 
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        type = try values.decode(String.self, forKey: .type)
+        switch type {
+        case "init":
+            data = .initial(try values.decode(WireInitial.self, forKey: .data))
+        case "text_delta":
+            data = .delta(try values.nestedContainer(keyedBy: DynamicKey.self, forKey: .data).decode(String.self, forKey: DynamicKey("delta")))
+        case "message_end":
+            let message = try values.nestedContainer(keyedBy: DynamicKey.self, forKey: .data)
+            data = .messageEnd(.init(text: try message.decode(String.self, forKey: DynamicKey("text")), id: try message.decodeIfPresent(String.self, forKey: DynamicKey("msg_id"))))
+        case "state_change":
+            data = .state(try values.nestedContainer(keyedBy: DynamicKey.self, forKey: .data).decode(String.self, forKey: DynamicKey("state")))
+        default:
+            data = nil
+        }
+    }
+
     static func decode(_ data: Data) throws -> ConversationLiveEvent? {
         let envelope = try JSONDecoder.moaOps.decode(ConversationWireEvent.self, from: data)
         switch envelope.type {
@@ -145,26 +163,12 @@ private struct ConversationWireEvent: Decodable {
         }
     }
 
-    enum WireData: Decodable {
+    enum WireData {
         case initial(WireInitial)
         case delta(String)
         case messageEnd(WireMessageEnd)
         case state(String)
 
-        init(from decoder: Decoder) throws {
-            let values = try decoder.container(keyedBy: DynamicKey.self)
-            if values.contains(DynamicKey("messages")) {
-                self = .initial(try WireInitial(from: decoder))
-            } else if let delta = try values.decodeIfPresent(String.self, forKey: DynamicKey("delta")) {
-                self = .delta(delta)
-            } else if let text = try values.decodeIfPresent(String.self, forKey: DynamicKey("text")) {
-                self = .messageEnd(.init(text: text, id: try values.decodeIfPresent(String.self, forKey: DynamicKey("msg_id"))))
-            } else if let state = try values.decodeIfPresent(String.self, forKey: DynamicKey("state")) {
-                self = .state(state)
-            } else {
-                throw MoaOpsClientError.decoding
-            }
-        }
     }
 }
 

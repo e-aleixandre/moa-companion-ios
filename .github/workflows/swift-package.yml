@@ -19,3 +19,12 @@ jobs:
       - run: swift --version
       - run: swift build -v
       - run: swift test -v
+      - run: >-
+          xcodebuild
+          -project MoaCompanion.xcodeproj
+          -scheme MoaCompanion
+          -configuration Debug
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO
+          build

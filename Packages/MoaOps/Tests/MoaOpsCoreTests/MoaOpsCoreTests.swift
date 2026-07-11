@@ -87,7 +87,7 @@ final class MoaOpsCoreTests: XCTestCase {
                 url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]
             )!
             return (response, Data("""
-            {"action":"sent","target":{"id":"session-1","title":"Ops","project":"/work/moa"}}
+            {"action":"send","target":{"id":"session-1","title":"Ops","project":"/work/moa"}}
             """.utf8))
         }
         defer { RequestCapturingURLProtocol.handler = nil }
@@ -153,7 +153,7 @@ final class MoaOpsCoreTests: XCTestCase {
 
     func testPulseDecodesExactSafeWireContract() throws {
         let data = Data("""
-        {"generated_at":"2026-07-11T17:00:00Z","summary":{"needs_attention":1,"in_progress":1,"on_track":0,"changes":1},"needs_attention":[{"id":"pulse:attention:s1:permission_needed","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","observed_at":"2026-07-11T16:59:00Z","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","at":"2026-07-11T16:59:00Z","provenance":"observed"}],"directed_instruction":{"target_id":"s1"}}],"in_progress":[{"id":"pulse:active:s2:in_progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"on_track":[],"changes":{"requested":true,"since":"2026-07-11T16:00:00Z","until":"2026-07-11T17:00:00Z","items":[{"id":"pulse:change:s1:run_started:run-1","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","ref_id":"run-1","provenance":"observed"}]}],"truncated":false}}
+        {"generated_at":"2026-07-11T17:00:00Z","summary":{"needs_attention":1,"in_progress":1,"on_track":0,"changes":1},"needs_attention":[{"id":"pulse:attention:s1:permission_needed","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","observed_at":"2026-07-11T16:59:00Z","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","at":"2026-07-11T16:59:00Z","provenance":"observed"}],"directed_instruction":{"target_id":"s1"}}],"in_progress":[{"id":"pulse:active:s2:in_progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"on_track":[],"changes":{"requested":true,"until":"2026-07-11T17:00:00Z","items":[{"id":"pulse:change:s1:run_started:run-1","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","ref_id":"run-1","provenance":"observed"}]}],"next_cursor":"opaque-next-page","has_more":true}}
         """.utf8)
 
         let pulse = try JSONDecoder.moaOps.decode(OpsPulse.self, from: data)
@@ -163,31 +163,40 @@ final class MoaOpsCoreTests: XCTestCase {
         XCTAssertNil(pulse.needsAttention[0].verification)
         XCTAssertEqual(pulse.needsAttention[0].facts.count, 2)
         XCTAssertEqual(pulse.changes.items[0].facts[0].refID, "run-1")
+        XCTAssertEqual(pulse.changes.nextCursor, "opaque-next-page")
+        XCTAssertTrue(pulse.changes.hasMore)
         XCTAssertTrue(pulse.changes.requested)
     }
 
-    func testPulseUsesSinceQueryAndMapsRetentionGap() async throws {
+    func testPulseUsesOpaqueCursorOnlyAndMapsRetentionGap() async throws {
         let recorder = RequestRecorder()
         RequestCapturingURLProtocol.handler = { request in
             recorder.record(request)
             let response = HTTPURLResponse(url: request.url!, statusCode: 410, httpVersion: nil, headerFields: nil)!
-            return (response, Data())
+            return (response, Data("{\"reset\":true}".utf8))
         }
         defer { RequestCapturingURLProtocol.handler = nil }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RequestCapturingURLProtocol.self]
         let client = try MoaOpsClient(baseURL: URL(string: "https://ops.example")!, session: URLSession(configuration: configuration))
-        let cursor = Date(timeIntervalSince1970: 1_783_791_600)
+        let cursor = "opaque-cursor-not-a-timestamp"
 
         do {
-            _ = try await client.pulse(since: cursor)
+            _ = try await client.pulse(cursor: cursor)
             XCTFail("Expected retention status")
         } catch let error as MoaOpsClientError {
-            XCTAssertEqual(error, .httpStatus(code: 410, retryAfter: nil))
+            XCTAssertEqual(error, .pulseResetRequired)
         }
         let request = try XCTUnwrap(recorder.request)
         XCTAssertEqual(request.url?.path, "/api/ops/pulse")
-        XCTAssertEqual(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems?.first?.name, "since")
+        let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query, [URLQueryItem(name: "cursor", value: cursor)])
+    }
+
+    func testUnknownInstructionActionIsRejected() throws {
+        XCTAssertThrowsError(try JSONDecoder.moaOps.decode(OpsInstructionResponse.self, from: Data("""
+        {"action":"sent","target":{"id":"s1"}}
+        """.utf8)))
     }
 }
 

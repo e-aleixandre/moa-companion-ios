@@ -3,6 +3,7 @@ import MoaOpsCore
 
 public struct MoaOpsRootView: View {
     @ObservedObject private var model: MoaOpsAppModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showingConfiguration = false
     @State private var selectedCard: PulseCard?
 
@@ -19,6 +20,8 @@ public struct MoaOpsRootView: View {
                             pulse: pulse,
                             sections: model.pulseSections,
                             historyUnavailable: model.historyUnavailable,
+                            isStale: model.pulseIsStale,
+                            lastSuccessfulRefreshAt: model.lastSuccessfulRefreshAt,
                             onSelect: { selectedCard = $0 }
                         )
                     } else {
@@ -60,6 +63,10 @@ public struct MoaOpsRootView: View {
             .sheet(item: $selectedCard) { card in
                 PulseDetailSheet(card: card, model: model)
                     .presentationDetents([.medium, .large])
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await model.refreshOnForeground() }
             }
         }
     }
@@ -103,6 +110,15 @@ public struct ServerConfigurationView: View {
                 .keyboardType(.URL)
 #endif
                 .autocorrectionDisabled()
+            SecureField("Token de acceso (opcional)", text: $model.accessToken)
+                .textFieldStyle(.roundedBorder)
+#if os(iOS)
+                .textInputAutocapitalization(.never)
+#endif
+                .autocorrectionDisabled()
+            Text("Si tu servidor usa --token, se usa solo para crear la sesión segura y se mantiene únicamente en memoria.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Button(model.isTestingConnection ? "Conectando…" : "Abrir Pulse") {
                 Task { await model.testConnection() }
             }
@@ -118,11 +134,13 @@ private struct PulseHomeView: View {
     let pulse: OpsPulse
     let sections: [PulseSection]
     let historyUnavailable: Bool
+    let isStale: Bool
+    let lastSuccessfulRefreshAt: Date?
     let onSelect: (PulseCard) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            PulseHero(summary: pulse.summary)
+            PulseHero(summary: pulse.summary, isStale: isStale)
             if historyUnavailable {
                 Label("El historial anterior ya no está disponible; se muestra el estado actual.", systemImage: "clock.arrow.circlepath")
                     .font(.footnote)
@@ -130,29 +148,37 @@ private struct PulseHomeView: View {
                     .padding(12)
                     .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            if pulse.changes.requested && pulse.changes.truncated {
-                Label("Se muestran los cambios retenidos más recientes; puede haber más.", systemImage: "rectangle.3.group.bubble")
+            if pulse.changes.hasMore {
+                Label("Hay más cambios retenidos. Actualiza para ver la siguiente página.", systemImage: "rectangle.3.group.bubble")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
             if sections.isEmpty {
-                AllClearView()
+                AllClearView(isStale: isStale)
             } else {
                 ForEach(sections) { section in
                     PulseSectionView(section: section, onSelect: onSelect)
                 }
             }
-            Text("Actualizado ") + Text(pulse.generatedAt, style: .relative)
+            Text("Última actualización correcta ") + Text(lastSuccessfulRefreshAt ?? pulse.generatedAt, style: .relative)
         }
     }
 }
 
 private struct PulseHero: View {
     let summary: OpsPulseSummary
+    let isStale: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if summary.needsAttention > 0 {
+            if isStale {
+                Label("Estado pendiente de actualizar", systemImage: "clock.badge.exclamationmark")
+                    .font(.title3.bold())
+                    .foregroundStyle(.orange)
+                Text("La última actualización puede estar desactualizada. Actualiza Pulse antes de darlo por resuelto.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            } else if summary.needsAttention > 0 {
                 Text("Ahora")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
@@ -183,14 +209,16 @@ private struct PulseHero: View {
 }
 
 private struct AllClearView: View {
+    let isStale: Bool
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "sparkles")
                 .font(.title)
-                .foregroundStyle(.teal)
-            Text("Nada urgente por ahora")
+                .foregroundStyle(isStale ? .orange : .teal)
+            Text(isStale ? "Actualiza para confirmar el estado" : "Nada urgente por ahora")
                 .font(.headline)
-            Text("Pulse te avisará aquí cuando haya una decisión o una comprobación que revisar.")
+            Text(isStale ? "No mostramos una confirmación de todo en orden hasta recibir una actualización correcta." : "Pulse te avisará aquí cuando haya una decisión o una comprobación que revisar.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -337,7 +365,7 @@ private struct PulseDetailSheet: View {
                 }
             }
             .navigationTitle(card.title)
-            .sheet(isPresented: $showingComposer, onDismiss: model.closeInstruction) {
+            .sheet(isPresented: $showingComposer, onDismiss: model.cancelInstruction) {
                 DirectedInstructionSheet(model: model)
                     .presentationDetents([.medium])
             }
@@ -348,7 +376,6 @@ private struct PulseDetailSheet: View {
 private struct DirectedInstructionSheet: View {
     @ObservedObject var model: MoaOpsAppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var text = ""
 
     var body: some View {
         NavigationStack {
@@ -366,7 +393,7 @@ private struct DirectedInstructionSheet: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                TextEditor(text: $text)
+                TextEditor(text: $model.instructionText)
                     .padding(8)
                     .frame(minHeight: 112)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -383,13 +410,12 @@ private struct DirectedInstructionSheet: View {
                 Spacer()
                 Button(model.isSendingInstruction ? "Enviando…" : "Enviar instrucción") {
                     Task {
-                        await model.submitInstruction(text: text)
-                        if model.instructionReceipt != nil { text = "" }
+                        await model.submitInstruction()
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .frame(maxWidth: .infinity)
-                .disabled(model.isSendingInstruction || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(model.isSendingInstruction || model.instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding()
             .navigationTitle("Instrucción dirigida")

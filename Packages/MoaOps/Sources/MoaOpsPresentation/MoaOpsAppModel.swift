@@ -4,15 +4,27 @@ import MoaOpsCore
 
 @MainActor
 public final class MoaOpsAppModel: ObservableObject {
-    public typealias ServiceFactory = @Sendable (URL) throws -> any MoaOpsPresentationService
+    public typealias ServiceFactory = @Sendable (URL, String?) throws -> any MoaOpsPresentationService
 
     @Published public var serverURLText: String
+    /// An optional Serve token held only for this process. It is never written
+    /// to UserDefaults, a URL, a log, or an instruction request.
+    @Published public var accessToken = ""
     @Published public private(set) var pulse: OpsPulse?
     @Published public private(set) var isLoading = false
     @Published public private(set) var isTestingConnection = false
     @Published public private(set) var userMessage: String?
     @Published public private(set) var historyUnavailable = false
+    @Published public private(set) var lastSuccessfulRefreshAt: Date?
     @Published public private(set) var activeInstructionTarget: PulseInstructionTarget?
+    @Published public var instructionText = "" {
+        didSet {
+            if let pendingInstruction,
+               pendingInstruction.text != instructionText.trimmingCharacters(in: .whitespacesAndNewlines) {
+                self.pendingInstruction = nil
+            }
+        }
+    }
     @Published public private(set) var instructionReceipt: OpsInstructionReceipt?
     @Published public private(set) var isSendingInstruction = false
     @Published public var askText = ""
@@ -23,12 +35,20 @@ public final class MoaOpsAppModel: ObservableObject {
     private let serviceFactory: ServiceFactory
     private let cursorStore: PulseCursorStore
     private var service: (any MoaOpsPresentationService)?
-    private let maximumCursorAge: TimeInterval = 31 * 24 * 60 * 60
+    private var pendingInstruction: OpsInstructionRequest?
 
     public init(
         serverURLText: String = "",
         cursorStore: PulseCursorStore = UserDefaultsPulseCursorStore(),
-        serviceFactory: @escaping ServiceFactory = { try MoaOpsLiveService(baseURL: $0) }
+        serviceFactory: @escaping ServiceFactory = { baseURL, accessToken in
+            let authentication: (any MoaOpsAuthenticationBootstrap)?
+            if let accessToken {
+                authentication = CookieTokenBootstrap(token: accessToken)
+            } else {
+                authentication = nil
+            }
+            return try MoaOpsLiveService(baseURL: baseURL, authentication: authentication)
+        }
     ) {
         self.serverURLText = serverURLText
         self.cursorStore = cursorStore
@@ -40,9 +60,8 @@ public final class MoaOpsAppModel: ObservableObject {
         return PresentationMapper.pulseSections(for: pulse)
     }
 
-    public var isAllClear: Bool {
-        guard let pulse else { return false }
-        return pulse.summary.needsAttention == 0
+    public var pulseIsStale: Bool {
+        PresentationMapper.isPulseStale(lastSuccessfulRefreshAt: lastSuccessfulRefreshAt, now: Date())
     }
 
     public func testConnection() async {
@@ -51,9 +70,9 @@ public final class MoaOpsAppModel: ObservableObject {
         isTestingConnection = true
         defer { isTestingConnection = false }
         do {
-            let newService = try serviceFactory(configuration.baseURL)
-            let loadedPulse = try await loadPulseWithRecovery(using: newService)
-            render(loadedPulse)
+            let newService = try serviceFactory(configuration.baseURL, nonEmptyAccessToken)
+            let loadedPulse = try await loadPulsePageWithRecovery(using: newService)
+            try process(loadedPulse)
             service = newService
             userMessage = nil
         } catch {
@@ -70,42 +89,60 @@ public final class MoaOpsAppModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let loadedPulse = try await loadPulseWithRecovery(using: service)
-            render(loadedPulse)
+            let loadedPulse = try await loadPulsePageWithRecovery(using: service)
+            try process(loadedPulse)
             userMessage = nil
         } catch {
+            // A failed page never changes the stored continuation, so retrying
+            // remains gap-free and cannot skip an unconsumed page.
             userMessage = pulseMessage(for: error)
         }
+    }
+
+    /// Pulse does not maintain a background loop. It refreshes when the host
+    /// becomes active, provided it has already rendered a connected Pulse.
+    public func refreshOnForeground() async {
+        guard pulse != nil, service != nil, !isLoading, !isTestingConnection else { return }
+        await refresh()
     }
 
     public func disconnect() {
         service = nil
         pulse = nil
-        activeInstructionTarget = nil
-        instructionReceipt = nil
+        accessToken = ""
+        lastSuccessfulRefreshAt = nil
         historyUnavailable = false
+        cancelInstruction()
     }
 
     /// Opens the composer only when the current server Pulse item supplied an
     /// exact target id. There is no target text field or local matching path.
     public func beginInstruction(for card: PulseCard) {
         guard let target = card.instructionTarget else { return }
+        if activeInstructionTarget != target {
+            instructionText = ""
+            pendingInstruction = nil
+        }
         activeInstructionTarget = target
         instructionReceipt = nil
         userMessage = nil
     }
 
-    public func closeInstruction() {
+    /// Closing the composer is an explicit cancellation, so its in-memory
+    /// text and id are deliberately not reused.
+    public func cancelInstruction() {
         activeInstructionTarget = nil
+        instructionText = ""
+        pendingInstruction = nil
         instructionReceipt = nil
     }
 
-    public func submitInstruction(text: String) async {
+    public func submitInstruction() async {
         guard let service, let target = activeInstructionTarget else {
             userMessage = "Actualiza Pulse y abre una tarjeta con una instrucción disponible."
             return
         }
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedText = instructionText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
             userMessage = "Escribe una instrucción antes de enviarla."
             return
@@ -114,15 +151,36 @@ public final class MoaOpsAppModel: ObservableObject {
             userMessage = "La instrucción debe tener 4.000 caracteres o menos."
             return
         }
+
+        let instruction: OpsInstructionRequest
+        if let pendingInstruction,
+           pendingInstruction.target == target.id,
+           pendingInstruction.text == trimmedText {
+            instruction = pendingInstruction
+        } else {
+            instruction = .init(target: target.id, text: trimmedText)
+            pendingInstruction = instruction
+        }
+
         isSendingInstruction = true
         defer { isSendingInstruction = false }
         do {
-            let response = try await service.submitInstruction(.init(target: target.id, text: trimmedText))
+            let response = try await service.submitInstruction(instruction)
             instructionReceipt = OpsInstructionReceipt(title: target.title, action: response.action)
+            pendingInstruction = nil
+            instructionText = ""
             userMessage = nil
         } catch {
+            // Transport and other uncertain failures intentionally retain this
+            // exact request id, target, and text for a safe explicit retry.
             userMessage = pulseMessage(for: error)
         }
+    }
+
+    /// Convenience for hosts/tests that do not bind directly to `instructionText`.
+    public func submitInstruction(text: String) async {
+        instructionText = text
+        await submitInstruction()
     }
 
     public func ask() async {
@@ -155,45 +213,46 @@ public final class MoaOpsAppModel: ObservableObject {
         userMessage = nil
     }
 
-    private func loadPulseWithRecovery(using service: any MoaOpsPresentationService) async throws -> OpsPulse {
-        let cursor = usableCursor()
+    private var nonEmptyAccessToken: String? {
+        let token = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? nil : token
+    }
+
+    private func loadPulsePageWithRecovery(using service: any MoaOpsPresentationService) async throws -> OpsPulse {
+        let cursor = cursorStore.cursor()
         do {
-            return try await service.loadPulse(since: cursor)
+            return try await service.loadPulse(cursor: cursor)
         } catch let error as MoaOpsClientError {
-            guard case let .httpStatus(code, _) = error, code == 410, cursor != nil else { throw error }
-            // A 410 means the server no longer retains this interval. Retry
-            // once without `since`, then explicitly show that changes were lost.
+            let requiresReset: Bool
+            switch error {
+            case .pulseResetRequired:
+                requiresReset = true
+            case let .httpStatus(code, _):
+                requiresReset = code == 410
+            default:
+                requiresReset = false
+            }
+            guard requiresReset, cursor != nil else { throw error }
+            // 410/reset means the opaque stream can no longer continue. Clear
+            // it and start exactly one replacement page without a cursor.
             cursorStore.clear()
-            let current = try await service.loadPulse(since: nil)
+            let current = try await service.loadPulse(cursor: nil)
             historyUnavailable = true
             return current
         }
     }
 
-    private func render(_ loadedPulse: OpsPulse) {
+    private func process(_ loadedPulse: OpsPulse) throws {
+        // Finalized Pulse always issues a polling continuation, including after
+        // a final page. Without it, retaining an old cursor could duplicate a
+        // page, so leave storage untouched and safely reject the response.
+        guard let nextCursor = loadedPulse.changes.nextCursor, !nextCursor.isEmpty else {
+            throw MoaOpsClientError.decoding
+        }
         pulse = loadedPulse
-        // `pulse` has been installed before the only persisted value is
-        // updated. This is a cursor only, never a response or a secret.
-        if isSafeCursor(loadedPulse.generatedAt) {
-            cursorStore.save(lastSeen: loadedPulse.generatedAt)
-        }
-    }
-
-    private func usableCursor() -> Date? {
-        guard let cursor = cursorStore.lastSeen(), isSafeCursor(cursor) else {
-            if cursorStore.lastSeen() != nil {
-                cursorStore.clear()
-                historyUnavailable = true
-            }
-            return nil
-        }
-        return cursor
-    }
-
-    private func isSafeCursor(_ date: Date) -> Bool {
-        guard !date.timeIntervalSince1970.isNaN else { return false }
-        let now = Date()
-        return date <= now.addingTimeInterval(5 * 60) && now.timeIntervalSince(date) <= maximumCursorAge
+        lastSuccessfulRefreshAt = Date()
+        // The page is rendered before its opaque continuation is committed.
+        cursorStore.save(cursor: nextCursor)
     }
 
     private func validateConfiguration() -> ServerConfiguration? {
@@ -222,6 +281,10 @@ public final class MoaOpsAppModel: ObservableObject {
             }
         case .instructionConflict:
             return "La sesión cambió. Abre de nuevo la tarjeta antes de enviar la instrucción."
+        case .pulseResetRequired:
+            return "El historial de cambios ya no está disponible."
+        case .decoding:
+            return "El servidor envió una respuesta no compatible."
         default:
             return "No se pudo actualizar Pulse. Comprueba la conexión e inténtalo de nuevo."
         }

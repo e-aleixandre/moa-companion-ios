@@ -243,6 +243,24 @@ final class MoaOpsCoreTests: XCTestCase {
             XCTAssertEqual(error, .conversationResetRequired)
         }
     }
+
+    func testAcceptedMalformedConversationSendReceiptMapsToDecoding() async throws {
+        RequestCapturingURLProtocol.handler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (response, Data(#"{"action":"not-a-canonical-action"}"#.utf8))
+        }
+        defer { RequestCapturingURLProtocol.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestCapturingURLProtocol.self]
+        let client = try MoaOpsClient(baseURL: URL(string: "https://ops.example")!, session: URLSession(configuration: configuration))
+
+        do {
+            _ = try await client.sendConversation(sessionID: "s1", text: "continúa")
+            XCTFail("Expected malformed accepted receipt to fail decoding")
+        } catch let error as MoaOpsClientError {
+            XCTAssertEqual(error, .decoding)
+        }
+    }
 }
 
 private final class RequestRecorder {

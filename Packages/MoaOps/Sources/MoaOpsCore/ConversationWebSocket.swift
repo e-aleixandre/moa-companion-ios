@@ -24,8 +24,10 @@ public actor MoaConversationWebSocketClient {
         let id = UUID()
         return AsyncStream { continuation in
             continuations[id] = continuation
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.removeContinuation(id) }
+            continuation.onTermination = { [weak self, id] _ in
+                Task { @Sendable [weak self, id] in
+                    await self?.removeContinuation(id)
+                }
             }
         }
     }
@@ -195,7 +197,11 @@ private struct WireMessage: Decodable {
         id = try values.decodeIfPresent(String.self, forKey: .id)
         role = try values.decode(String.self, forKey: .role)
         content = try values.decodeIfPresent([WireContent].self, forKey: .content) ?? []
-        hasCustom = values.contains(.custom) && !(try values.decodeNil(forKey: .custom))
+        if values.contains(.custom) {
+            hasCustom = try !values.decodeNil(forKey: .custom)
+        } else {
+            hasCustom = false
+        }
         if let seconds = try? values.decode(Double.self, forKey: .timestamp) {
             timestamp = Date(timeIntervalSince1970: seconds)
         } else if let seconds = try? values.decode(Int.self, forKey: .timestamp) {

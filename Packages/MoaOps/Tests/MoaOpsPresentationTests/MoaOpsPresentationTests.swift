@@ -79,11 +79,15 @@ final class MoaOpsPresentationTests: XCTestCase {
         let attention = try XCTUnwrap(sections.first)
         let attentionCard = try XCTUnwrap(attention.cards.first)
 
-        XCTAssertEqual(sections.map(\.kind), [.needsAttention, .changes, .inProgress, .onTrack])
+        XCTAssertEqual(sections.map(\.kind), [.needsAttention, .changes, .inProgress, .staleWork, .onTrack])
         XCTAssertEqual(attentionCard.category, "Permiso necesario")
         XCTAssertNil(attentionCard.verification, "Unknown must never become a displayed status")
         XCTAssertEqual(attentionCard.facts.map(\.provenance), ["Derivado", "Observado"])
         XCTAssertEqual(attentionCard.instructionTarget, PulseInstructionTarget(id: "directed-s1", title: "Release", project: "/work/release"))
+        let stale = try XCTUnwrap(sections.first(where: { $0.kind == .staleWork })?.cards.first)
+        XCTAssertEqual(stale.category, "Sin observación reciente")
+        XCTAssertEqual(stale.categoryDetail, "No hay una observación segura reciente de este trabajo activo.")
+        XCTAssertNil(stale.verification)
     }
 
     @MainActor
@@ -144,7 +148,7 @@ final class MoaOpsPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testFailedPulsePageRetainsOpaqueCursorForSafeRetryAndForegroundRefreshUsesIt() async throws {
+    func testFailedPulsePageRetainsOpaqueCursorForSafeManualRetry() async throws {
         let service = PulseServiceStub(pulseResults: [
             .success(try pulse(generatedAt: Date(), nextCursor: "retry-cursor")),
             .failure(.transport),
@@ -156,10 +160,28 @@ final class MoaOpsPresentationTests: XCTestCase {
         await model.testConnection()
         await model.refresh()
         XCTAssertEqual(store.cursor(), "retry-cursor")
-        await model.refreshOnForeground()
+        await model.refresh()
 
         XCTAssertEqual(service.requestedCursors, [nil, "retry-cursor", "retry-cursor"])
         XCTAssertEqual(store.cursor(), "after-foreground")
+    }
+
+    @MainActor
+    func testFailedResetRefetchKeepsCurrentPulseAndPriorContinuation() async throws {
+        let service = PulseServiceStub(pulseResults: [
+            .success(try pulse(generatedAt: Date(), nextCursor: "continuation", changeID: "visible")),
+            .failure(.pulseResetRequired),
+            .failure(.transport),
+        ])
+        let store = CursorStore(cursor: "old")
+        let model = MoaOpsAppModel(serverURLText: "https://ops.example", cursorStore: store, serviceFactory: { _, _ in service })
+
+        await model.testConnection()
+        await model.refresh()
+
+        XCTAssertEqual(service.requestedCursors, ["old", "continuation", nil])
+        XCTAssertEqual(store.cursor(), "continuation")
+        XCTAssertEqual(model.pulse?.changes.items.map(\.id), ["visible"])
     }
 
     @MainActor
@@ -212,6 +234,31 @@ final class MoaOpsPresentationTests: XCTestCase {
         XCTAssertTrue(PresentationMapper.isPulseStale(lastSuccessfulRefreshAt: nil, now: now))
     }
 
+    func testTokenProtectedTransportUsesEphemeralCookiePolicy() {
+        XCTAssertEqual(MoaOpsSessionFactory.privacy(accessTokenPresent: true), .init(usesEphemeralSession: true, persistsCookies: false))
+        XCTAssertEqual(MoaOpsSessionFactory.privacy(accessTokenPresent: false), .init(usesEphemeralSession: false, persistsCookies: true))
+        let session = MoaOpsSessionFactory.ephemeralSession()
+        XCTAssertNil(session.configuration.urlCache)
+        XCTAssertNotNil(session.configuration.httpCookieStorage)
+        session.invalidateAndCancel()
+    }
+
+    @MainActor
+    func testForegroundLifecycleOnlyRefreshesWhenActiveAndCancelsWhenInactive() async throws {
+        let service = PulseServiceStub(pulseResults: [
+            .success(try pulse(generatedAt: Date(), nextCursor: "first")),
+            .success(try pulse(generatedAt: Date(), nextCursor: "active")),
+        ])
+        let model = MoaOpsAppModel(serverURLText: "https://ops.example", cursorStore: CursorStore(cursor: nil), serviceFactory: { _, _ in service })
+        await model.testConnection()
+        model.setForegroundActive(true)
+        await Task.yield()
+        model.setForegroundActive(false)
+
+        XCTAssertFalse(model.isForegroundActive)
+        XCTAssertEqual(Array(service.requestedCursors.prefix(2)), [nil, "first"])
+    }
+
     private func askResponse(kind: String, includesBriefing: Bool) throws -> OpsAskResponse {
         let briefing = includesBriefing ? ",\"briefing\":{\"sessions\":[{\"id\":\"known-session\",\"title\":\"Known\",\"presence\":\"active\",\"lifecycle\":\"running\",\"activity\":\"running\",\"jobs\":{\"subagents\":0,\"bash\":0},\"verification\":\"passed\"}],\"blockers\":[],\"spoken\":\"Known is running.\"}" : ""
         return try JSONDecoder.moaOps.decode(OpsAskResponse.self, from: Data("{\"kind\":\"\(kind)\"\(briefing)}".utf8))
@@ -237,7 +284,7 @@ final class MoaOpsPresentationTests: XCTestCase {
     private func pulse(generatedAt: Date, nextCursor: String = "cursor-next", hasMore: Bool = false, changeID: String = "change") throws -> OpsPulse {
         let timestamp = ISO8601DateFormatter.moaOpsFractional.string(from: generatedAt)
         return try JSONDecoder.moaOps.decode(OpsPulse.self, from: Data("""
-        {"generated_at":"\(timestamp)","summary":{"needs_attention":1,"in_progress":1,"on_track":1,"changes":1},"needs_attention":[{"id":"attention","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","verification":"unknown","observed_at":"\(timestamp)","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","provenance":"observed"}],"directed_instruction":{"target_id":"directed-s1"}}],"in_progress":[{"id":"progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"on_track":[{"id":"track","session":{"id":"s3","title":"Tests","project":"/work/tests"},"category":"on_track","lifecycle":"running","activity":"running","verification":"passed","freshness":"fresh","facts":[]}],"changes":{"requested":true,"until":"\(timestamp)","items":[{"id":"\(changeID)","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","provenance":"observed"}]}],"next_cursor":"\(nextCursor)","has_more":\(hasMore)}}
+        {"generated_at":"\(timestamp)","summary":{"needs_attention":1,"in_progress":1,"stale_work":1,"on_track":1,"changes":1},"needs_attention":[{"id":"attention","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","verification":"unknown","observed_at":"\(timestamp)","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","provenance":"observed"}],"directed_instruction":{"target_id":"directed-s1"}}],"in_progress":[{"id":"progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"stale_work":[{"id":"stale","session":{"id":"s4","title":"Archive","project":"/work/archive"},"category":"stale_work","lifecycle":"running","activity":"running","freshness":"stale","facts":[{"kind":"activity","value":"running","provenance":"observed"}]}],"on_track":[{"id":"track","session":{"id":"s3","title":"Tests","project":"/work/tests"},"category":"on_track","lifecycle":"running","activity":"running","verification":"passed","freshness":"fresh","facts":[]}],"changes":{"requested":true,"until":"\(timestamp)","items":[{"id":"\(changeID)","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","provenance":"observed"}]}],"next_cursor":"\(nextCursor)","has_more":\(hasMore)}}
         """.utf8))
     }
 }
@@ -288,4 +335,5 @@ private final class PulseServiceStub: MoaOpsPresentationService, @unchecked Send
     func stopUpdates() async {}
     func snapshotUpdates() async -> AsyncStream<OpsSnapshotUpdate> { AsyncStream { $0.finish() } }
     func webSocketState() async -> OpsWebSocketState { .stopped }
+    func invalidate() async {}
 }

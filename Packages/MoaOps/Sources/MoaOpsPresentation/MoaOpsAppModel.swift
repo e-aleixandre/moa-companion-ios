@@ -16,6 +16,7 @@ public final class MoaOpsAppModel: ObservableObject {
     @Published public private(set) var userMessage: String?
     @Published public private(set) var historyUnavailable = false
     @Published public private(set) var lastSuccessfulRefreshAt: Date?
+    @Published public private(set) var isForegroundActive = false
     @Published public private(set) var activeInstructionTarget: PulseInstructionTarget?
     @Published public var instructionText = "" {
         didSet {
@@ -36,6 +37,10 @@ public final class MoaOpsAppModel: ObservableObject {
     private let cursorStore: PulseCursorStore
     private var service: (any MoaOpsPresentationService)?
     private var pendingInstruction: OpsInstructionRequest?
+    private var foregroundTask: Task<Void, Never>?
+    private var foregroundNow = Date()
+    private let foregroundTick: TimeInterval = 60
+    private let foregroundRefreshInterval: TimeInterval = 120
 
     public init(
         serverURLText: String = "",
@@ -55,13 +60,17 @@ public final class MoaOpsAppModel: ObservableObject {
         self.serviceFactory = serviceFactory
     }
 
+    deinit {
+        foregroundTask?.cancel()
+    }
+
     public var pulseSections: [PulseSection] {
         guard let pulse else { return [] }
         return PresentationMapper.pulseSections(for: pulse)
     }
 
     public var pulseIsStale: Bool {
-        PresentationMapper.isPulseStale(lastSuccessfulRefreshAt: lastSuccessfulRefreshAt, now: Date())
+        PresentationMapper.isPulseStale(lastSuccessfulRefreshAt: lastSuccessfulRefreshAt, now: foregroundNow)
     }
 
     public func testConnection() async {
@@ -71,9 +80,11 @@ public final class MoaOpsAppModel: ObservableObject {
         defer { isTestingConnection = false }
         do {
             let newService = try serviceFactory(configuration.baseURL, nonEmptyAccessToken)
-            let loadedPulse = try await loadPulsePageWithRecovery(using: newService)
-            try process(loadedPulse)
+            let result = try await loadPulsePageWithRecovery(using: newService)
+            try process(result.pulse)
+            historyUnavailable = result.historyReset
             service = newService
+            startForegroundTaskIfNeeded()
             userMessage = nil
         } catch {
             userMessage = pulseMessage(for: error)
@@ -89,8 +100,9 @@ public final class MoaOpsAppModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let loadedPulse = try await loadPulsePageWithRecovery(using: service)
-            try process(loadedPulse)
+            let result = try await loadPulsePageWithRecovery(using: service)
+            try process(result.pulse)
+            historyUnavailable = result.historyReset
             userMessage = nil
         } catch {
             // A failed page never changes the stored continuation, so retrying
@@ -99,20 +111,49 @@ public final class MoaOpsAppModel: ObservableObject {
         }
     }
 
-    /// Pulse does not maintain a background loop. It refreshes when the host
-    /// becomes active, provided it has already rendered a connected Pulse.
+    /// Starts a bounded foreground-only ticker. It invalidates the stale UI
+    /// every minute and refreshes no more frequently than every two minutes.
+    public func setForegroundActive(_ active: Bool) {
+        guard isForegroundActive != active else { return }
+        isForegroundActive = active
+        foregroundNow = Date()
+        foregroundTask?.cancel()
+        foregroundTask = nil
+        startForegroundTaskIfNeeded()
+        if active, pulse != nil, service != nil {
+            Task { [weak self] in await self?.refreshOnForeground() }
+        }
+    }
+
+    private func startForegroundTaskIfNeeded() {
+        guard foregroundTask == nil, isForegroundActive, pulse != nil, service != nil else { return }
+        foregroundTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(self?.foregroundTick ?? 60) * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                self.foregroundNow = Date()
+                guard let lastRefresh = self.lastSuccessfulRefreshAt,
+                      self.foregroundNow.timeIntervalSince(lastRefresh) >= self.foregroundRefreshInterval else { continue }
+                await self.refreshOnForeground()
+            }
+        }
+    }
+
     public func refreshOnForeground() async {
-        guard pulse != nil, service != nil, !isLoading, !isTestingConnection else { return }
+        guard isForegroundActive, pulse != nil, service != nil, !isLoading, !isTestingConnection else { return }
         await refresh()
     }
 
     public func disconnect() {
+        setForegroundActive(false)
+        let currentService = service
         service = nil
         pulse = nil
         accessToken = ""
         lastSuccessfulRefreshAt = nil
         historyUnavailable = false
         cancelInstruction()
+        Task { await currentService?.invalidate() }
     }
 
     /// Opens the composer only when the current server Pulse item supplied an
@@ -218,27 +259,23 @@ public final class MoaOpsAppModel: ObservableObject {
         return token.isEmpty ? nil : token
     }
 
-    private func loadPulsePageWithRecovery(using service: any MoaOpsPresentationService) async throws -> OpsPulse {
+    private func loadPulsePageWithRecovery(using service: any MoaOpsPresentationService) async throws -> (pulse: OpsPulse, historyReset: Bool) {
         let cursor = cursorStore.cursor()
         do {
-            return try await service.loadPulse(cursor: cursor)
+            return (try await service.loadPulse(cursor: cursor), false)
         } catch let error as MoaOpsClientError {
             let requiresReset: Bool
             switch error {
             case .pulseResetRequired:
                 requiresReset = true
-            case let .httpStatus(code, _):
-                requiresReset = code == 410
             default:
                 requiresReset = false
             }
             guard requiresReset, cursor != nil else { throw error }
-            // 410/reset means the opaque stream can no longer continue. Clear
-            // it and start exactly one replacement page without a cursor.
-            cursorStore.clear()
+            // Keep the old continuation until the reset page has rendered. A
+            // failed replacement cannot discard the current safe cursor/view.
             let current = try await service.loadPulse(cursor: nil)
-            historyUnavailable = true
-            return current
+            return (current, true)
         }
     }
 
@@ -251,6 +288,7 @@ public final class MoaOpsAppModel: ObservableObject {
         }
         pulse = loadedPulse
         lastSuccessfulRefreshAt = Date()
+        foregroundNow = lastSuccessfulRefreshAt ?? Date()
         // The page is rendered before its opaque continuation is committed.
         cursorStore.save(cursor: nextCursor)
     }

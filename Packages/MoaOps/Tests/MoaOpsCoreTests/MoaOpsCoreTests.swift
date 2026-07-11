@@ -153,7 +153,7 @@ final class MoaOpsCoreTests: XCTestCase {
 
     func testPulseDecodesExactSafeWireContract() throws {
         let data = Data("""
-        {"generated_at":"2026-07-11T17:00:00Z","summary":{"needs_attention":1,"in_progress":1,"on_track":0,"changes":1},"needs_attention":[{"id":"pulse:attention:s1:permission_needed","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","observed_at":"2026-07-11T16:59:00Z","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","at":"2026-07-11T16:59:00Z","provenance":"observed"}],"directed_instruction":{"target_id":"s1"}}],"in_progress":[{"id":"pulse:active:s2:in_progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"on_track":[],"changes":{"requested":true,"until":"2026-07-11T17:00:00Z","items":[{"id":"pulse:change:s1:run_started:run-1","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","ref_id":"run-1","provenance":"observed"}]}],"next_cursor":"opaque-next-page","has_more":true}}
+        {"generated_at":"2026-07-11T17:00:00Z","summary":{"needs_attention":1,"in_progress":1,"stale_work":1,"on_track":0,"changes":1},"needs_attention":[{"id":"pulse:attention:s1:permission_needed","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","observed_at":"2026-07-11T16:59:00Z","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","at":"2026-07-11T16:59:00Z","provenance":"observed"}],"directed_instruction":{"target_id":"s1"}}],"in_progress":[{"id":"pulse:active:s2:in_progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"stale_work":[{"id":"pulse:stale_work:s3","session":{"id":"s3","title":"Old","project":"/work/old"},"category":"stale_work","lifecycle":"running","activity":"running","freshness":"stale","facts":[{"kind":"activity","value":"running","provenance":"observed"}]}],"on_track":[],"changes":{"requested":true,"until":"2026-07-11T17:00:00Z","items":[{"id":"pulse:change:s1:run_started:run-1","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","ref_id":"run-1","provenance":"observed"}]}],"next_cursor":"opaque-next-page","has_more":true}}
         """.utf8)
 
         let pulse = try JSONDecoder.moaOps.decode(OpsPulse.self, from: data)
@@ -165,6 +165,8 @@ final class MoaOpsCoreTests: XCTestCase {
         XCTAssertEqual(pulse.changes.items[0].facts[0].refID, "run-1")
         XCTAssertEqual(pulse.changes.nextCursor, "opaque-next-page")
         XCTAssertTrue(pulse.changes.hasMore)
+        XCTAssertEqual(pulse.summary.staleWork, 1)
+        XCTAssertEqual(pulse.staleWork.first?.category, "stale_work")
         XCTAssertTrue(pulse.changes.requested)
     }
 

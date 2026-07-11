@@ -353,28 +353,28 @@ public enum PresentationMapper {
     public static func knownVerificationLabel(_ verification: OpsVerificationState?) -> String? {
         guard let verification else { return nil }
         switch verification {
-        case .passed: "Verificación superada"
-        case .pending: "Verificación pendiente"
-        case .failed: "Verificación fallida"
-        case .unknown: nil
+        case .passed: return "Verificación superada"
+        case .pending: return "Verificación pendiente"
+        case .failed: return "Verificación fallida"
+        case .unknown: return nil
         }
     }
 
     private static func pulseCategory(_ value: String) -> (title: String, detail: String)? {
         switch value {
-        case "lifecycle_error": ("Error de ciclo", "La sesión requiere revisión.")
-        case "activity_error": ("Error de actividad", "La actividad necesita atención.")
-        case "permission_needed": ("Permiso necesario", "Moa espera una decisión o permiso.")
-        case "verification_failed": ("Verificación fallida", "La comprobación conocida no pasó.")
-        case "in_progress": ("En marcha", "La sesión sigue trabajando.")
-        case "on_track": ("En buen camino", "El trabajo sigue en marcha con verificación superada.")
-        case "run_started": ("Trabajo iniciado", "Se registró el inicio de una ejecución.")
-        case "run_ended": ("Trabajo finalizado", "Se registró el final de una ejecución.")
-        case "error": ("Error registrado", "Se registró un cambio de error.")
-        case "permission": ("Permiso registrado", "Se registró una solicitud de permiso.")
-        case "ask_user": ("Respuesta solicitada", "Se registró una solicitud para ti.")
-        case "verification": ("Verificación actualizada", "Se registró un cambio de verificación.")
-        default: nil
+        case "lifecycle_error": return ("Error de ciclo", "La sesión requiere revisión.")
+        case "activity_error": return ("Error de actividad", "La actividad necesita atención.")
+        case "permission_needed": return ("Permiso necesario", "Moa espera una decisión o permiso.")
+        case "verification_failed": return ("Verificación fallida", "La comprobación conocida no pasó.")
+        case "in_progress": return ("En marcha", "La sesión sigue trabajando.")
+        case "on_track": return ("En buen camino", "El trabajo sigue en marcha con verificación superada.")
+        case "run_started": return ("Trabajo iniciado", "Se registró el inicio de una ejecución.")
+        case "run_ended": return ("Trabajo finalizado", "Se registró el final de una ejecución.")
+        case "error": return ("Error registrado", "Se registró un cambio de error.")
+        case "permission": return ("Permiso registrado", "Se registró una solicitud de permiso.")
+        case "ask_user": return ("Respuesta solicitada", "Se registró una solicitud para ti.")
+        case "verification": return ("Verificación actualizada", "Se registró un cambio de verificación.")
+        default: return nil
         }
     }
 
@@ -411,27 +411,27 @@ public enum PresentationMapper {
 
     private static func pulseLifecycle(_ lifecycle: OpsLifecycle) -> String {
         switch lifecycle {
-        case .idle: "En espera"
-        case .running: "En ejecución"
-        case .stopped: "Detenido"
-        case .error: "Error"
+        case .idle: return "En espera"
+        case .running: return "En ejecución"
+        case .stopped: return "Detenido"
+        case .error: return "Error"
         }
     }
 
     private static func pulseActivity(_ activity: OpsActivity) -> String {
         switch activity {
-        case .idle: "En espera"
-        case .running: "Trabajando"
-        case .permission: "Espera permiso"
-        case .error: "Error"
+        case .idle: return "En espera"
+        case .running: return "Trabajando"
+        case .permission: return "Espera permiso"
+        case .error: return "Error"
         }
     }
 
     private static func pulseFreshness(_ freshness: OpsPulseFreshness) -> String {
         switch freshness {
-        case .fresh: "Actual"
-        case .stale: "Puede estar desactualizado"
-        case .unknown: "Fecha no disponible"
+        case .fresh: return "Actual"
+        case .stale: return "Puede estar desactualizado"
+        case .unknown: return "Fecha no disponible"
         }
     }
 }

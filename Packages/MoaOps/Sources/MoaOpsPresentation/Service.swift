@@ -44,6 +44,79 @@ public protocol MoaOpsPresentationService: Sendable {
     func invalidate() async
 }
 
+/// Service boundary for the owner-authorized companion vertical. It exposes
+/// only Serve's display transcript and approved action endpoints.
+public protocol MoaCompanionPresentationService: Sendable {
+    func loadSessions() async throws -> [CompanionSession]
+    func loadConversation(sessionID: String, limit: Int, cursor: String?) async throws -> ConversationPage
+    func sendConversation(sessionID: String, text: String) async throws -> ConversationSendResponse
+    func loadBriefing(sessionIDs: [String]) async throws -> ConversationBriefing
+    func submitInstruction(_ instruction: OpsInstructionRequest) async throws -> OpsInstructionResponse
+    func loadPulse(cursor: String?) async throws -> OpsPulse
+    func startConversationUpdates(sessionID: String) async
+    func stopConversationUpdates() async
+    func conversationUpdates() async -> AsyncStream<ConversationLiveEvent>
+    func invalidate() async
+}
+
+public actor MoaCompanionLiveService: MoaCompanionPresentationService {
+    private let client: MoaOpsClient
+    private let baseURL: URL
+    private let transport: URLSession
+    private let authentication: (any MoaOpsAuthenticationBootstrap)?
+    private let ephemeralSession: URLSession?
+    private var conversationSocket: MoaConversationWebSocketClient?
+
+    public init(baseURL: URL, session: URLSession? = nil, authentication: (any MoaOpsAuthenticationBootstrap)? = nil) throws {
+        let mustIsolate = authentication != nil
+        let selectedTransport = mustIsolate ? MoaOpsSessionFactory.ephemeralSession() : (session ?? .shared)
+        transport = selectedTransport
+        ephemeralSession = mustIsolate ? selectedTransport : nil
+        self.baseURL = baseURL
+        self.authentication = authentication
+        client = try MoaOpsClient(baseURL: baseURL, session: selectedTransport, authentication: authentication)
+    }
+
+    public func loadSessions() async throws -> [CompanionSession] { try await client.sessions() }
+    public func loadConversation(sessionID: String, limit: Int, cursor: String?) async throws -> ConversationPage {
+        try await client.conversation(sessionID: sessionID, limit: limit, cursor: cursor)
+    }
+    public func sendConversation(sessionID: String, text: String) async throws -> ConversationSendResponse {
+        try await client.sendConversation(sessionID: sessionID, text: text)
+    }
+    public func loadBriefing(sessionIDs: [String]) async throws -> ConversationBriefing { try await client.opsBriefing(sessionIDs: sessionIDs) }
+    public func submitInstruction(_ instruction: OpsInstructionRequest) async throws -> OpsInstructionResponse {
+        try await client.submitInstruction(instruction)
+    }
+    public func loadPulse(cursor: String?) async throws -> OpsPulse { try await client.pulse(cursor: cursor) }
+
+    public func startConversationUpdates(sessionID: String) async {
+        await conversationSocket?.stop()
+        guard let socket = try? MoaConversationWebSocketClient(baseURL: baseURL, session: transport, authentication: authentication) else { return }
+        conversationSocket = socket
+        await socket.start(sessionID: sessionID)
+    }
+
+    public func stopConversationUpdates() async {
+        await conversationSocket?.stop()
+        conversationSocket = nil
+    }
+
+    public func conversationUpdates() async -> AsyncStream<ConversationLiveEvent> {
+        guard let conversationSocket else { return AsyncStream { $0.finish() } }
+        return await conversationSocket.updates()
+    }
+
+    public func invalidate() async {
+        await stopConversationUpdates()
+        guard let ephemeralSession else { return }
+        if let cookies = ephemeralSession.configuration.httpCookieStorage?.cookies {
+            for cookie in cookies { ephemeralSession.configuration.httpCookieStorage?.deleteCookie(cookie) }
+        }
+        ephemeralSession.invalidateAndCancel()
+    }
+}
+
 public actor MoaOpsLiveService: MoaOpsPresentationService {
     private let client: MoaOpsClient
     private let webSocket: MoaOpsWebSocketClient

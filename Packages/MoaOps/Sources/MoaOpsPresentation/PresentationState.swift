@@ -315,6 +315,8 @@ public enum PresentationMapper {
             return "That session changed. Select it again before sending an instruction."
         case .pulseResetRequired:
             return "Pulse history is no longer available. Refresh to start from the current state."
+        case .conversationResetRequired:
+            return "Conversation history changed. Reload it from the beginning."
         }
     }
 

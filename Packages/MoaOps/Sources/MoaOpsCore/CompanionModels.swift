@@ -10,8 +10,18 @@ public struct CompanionSession: Codable, Equatable, Sendable, Identifiable {
     public let updated: Date
 
     public var isLive: Bool {
-        let normalized = state.lowercased()
-        return !archived && (normalized == "active" || normalized == "running")
+        state.lowercased() != "saved"
+    }
+
+    public var spanishState: String {
+        switch state.lowercased() {
+        case "idle": return "En espera"
+        case "running": return "En marcha"
+        case "permission": return "Espera permiso"
+        case "error": return "Con error"
+        case "saved": return "Guardada"
+        default: return "Estado no disponible"
+        }
     }
 
     public init(id: String, title: String, archived: Bool = false, state: String, updated: Date) {
@@ -97,12 +107,15 @@ public struct ConversationPage: Codable, Equatable, Sendable {
     public let sessionID: String
     public let title: String
     public let branch: ConversationBranch
+    /// The hardened API always returns newest-first pages. Presentation must
+    /// reverse each page before displaying it chronologically.
+    public let order: String
     public let messages: [ConversationMessage]
     public let nextCursor: String?
     public let hasMore: Bool
 
     enum CodingKeys: String, CodingKey {
-        case title, branch, messages
+        case title, branch, order, messages
         case sessionID = "session_id"
         case nextCursor = "next_cursor"
         case hasMore = "has_more"
@@ -188,11 +201,33 @@ public struct ConversationSuggestedAction: Codable, Equatable, Sendable {
     }
 }
 
+public struct ConversationLiveInit: Equatable, Sendable {
+    public let sessionID: String
+    public let title: String
+    public let branch: ConversationBranch
+    public let state: String
+    public let tail: [ConversationMessage]
+    public let olderCursor: String?
+    public let hasOlder: Bool
+
+    public init(sessionID: String, title: String, branch: ConversationBranch, state: String, tail: [ConversationMessage], olderCursor: String?, hasOlder: Bool) {
+        self.sessionID = sessionID
+        self.title = title
+        self.branch = branch
+        self.state = state
+        self.tail = tail
+        self.olderCursor = olderCursor
+        self.hasOlder = hasOlder
+    }
+}
+
+/// This is the complete `/companion-ws` protocol. The server does not send
+/// raw AgentMessage values on this route, so no client-side filtering exists.
 public enum ConversationLiveEvent: Equatable, Sendable {
-    case initial(messages: [ConversationMessage], state: String, historyTruncated: Bool)
-    case textDelta(String)
-    case messageEnded(ConversationMessage)
-    case stateChanged(String)
+    case initial(ConversationLiveInit)
+    case assistantDelta(text: String, truncated: Bool)
+    case assistantFinal(ConversationMessage)
+    case state(String)
 }
 
 public struct ConversationLiveState: Equatable, Sendable {
@@ -210,17 +245,17 @@ public struct ConversationLiveState: Equatable, Sendable {
 
     public mutating func apply(_ event: ConversationLiveEvent) {
         switch event {
-        case let .initial(messages, state, historyTruncated):
-            self.messages = merge(messages, into: self.messages)
-            self.state = state
-            historyIsBounded = historyTruncated
+        case let .initial(init):
+            self.messages = merge(init.tail, into: self.messages)
+            self.state = init.state
+            historyIsBounded = init.hasOlder
             partialText = ""
-        case let .textDelta(delta):
+        case let .assistantDelta(delta, _):
             partialText += delta
-        case let .messageEnded(message):
+        case let .assistantFinal(message):
             messages = merge([message], into: messages)
             partialText = ""
-        case let .stateChanged(state):
+        case let .state(state):
             self.state = state
         }
     }

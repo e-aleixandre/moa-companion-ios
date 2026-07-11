@@ -74,6 +74,7 @@ public final class MoaCompanionAppModel: ObservableObject {
     @Published public private(set) var liveHistoryIsBounded = false
     @Published public var chatText = ""
     @Published public private(set) var chatReceipt: ConversationSendResponse?
+    @Published public private(set) var chatDeliveryUnconfirmed = false
     @Published public private(set) var isSendingChat = false
     @Published public private(set) var actionProposal: BriefingActionProposal?
     @Published public var actionText = "" {
@@ -162,6 +163,7 @@ public final class MoaCompanionAppModel: ObservableObject {
         conversationMessages = []
         conversationCursor = nil
         conversationBranch = nil
+        chatDeliveryUnconfirmed = false
         await loadConversation(cursor: nil, replacing: true)
         guard session.isLive, let service else { return }
         await service.startConversationUpdates(sessionID: session.id)
@@ -194,7 +196,11 @@ public final class MoaCompanionAppModel: ObservableObject {
                 return
             }
             conversationBranch = page.branch
-            conversationMessages = replacing ? page.messages : merge(page.messages, into: conversationMessages)
+            // REST pages are newest-first; the display is always chronological.
+            let chronological = page.messages.reversed()
+            conversationMessages = replacing
+                ? Array(chronological)
+                : prependChronological(Array(chronological), to: conversationMessages)
             conversationCursor = page.nextCursor
             conversationHasMore = page.hasMore && page.nextCursor != nil
             userMessage = nil
@@ -205,20 +211,55 @@ public final class MoaCompanionAppModel: ObservableObject {
     }
 
     private func applyLive(_ event: ConversationLiveEvent) {
-        var state = ConversationLiveState(messages: conversationMessages, state: liveState, partialText: livePartialText, historyIsBounded: liveHistoryIsBounded)
-        state.apply(event)
-        conversationMessages = state.messages
-        liveState = state.state
-        livePartialText = state.partialText
-        liveHistoryIsBounded = state.historyIsBounded
+        switch event {
+        case let .initial(init):
+            guard init.sessionID == activeConversation?.id else { return }
+            liveState = init.state
+            livePartialText = ""
+            liveHistoryIsBounded = init.hasOlder
+            if let branch = conversationBranch, branch != init.branch {
+                // Do not combine histories from branches. The companion init
+                // tail plus its cursor is a new ordered anchor.
+                conversationWasReset = true
+                conversationMessages = init.tail
+            } else if !conversationMessages.isEmpty, !sharesMessageID(conversationMessages, init.tail) {
+                // A reconnect tail that has no safe overlap cannot be placed
+                // relative to our REST page. Replace rather than claim order.
+                conversationWasReset = true
+                conversationMessages = init.tail
+            } else {
+                conversationMessages = mergeLiveTail(init.tail, into: conversationMessages)
+            }
+            conversationBranch = init.branch
+            if init.hasOlder, let cursor = init.olderCursor, !cursor.isEmpty {
+                // This anchor is generated with exactly the displayed tail and
+                // is therefore authoritative over a concurrently loaded page.
+                conversationCursor = cursor
+                conversationHasMore = true
+            } else {
+                conversationCursor = nil
+                conversationHasMore = false
+            }
+        case let .assistantDelta(text, _):
+            livePartialText += text
+        case let .assistantFinal(message):
+            // The safe protocol serializes finals after their deltas. A final
+            // belongs after the established chronological tail; duplicates on
+            // reconnect replace by ID rather than creating a false extra turn.
+            conversationMessages = appendFinal(message, to: conversationMessages)
+            livePartialText = ""
+        case let .state(state):
+            liveState = state
+        }
     }
 
     public func sendChat() async {
         guard let service, let conversation = activeConversation else { return }
         let text = chatText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.count <= 4_000 else { userMessage = "Escribe un mensaje de hasta 4.000 caracteres."; return }
+        guard !text.isEmpty else { userMessage = "Escribe un mensaje antes de enviarlo."; return }
         isSendingChat = true
         chatReceipt = nil
+        chatDeliveryUnconfirmed = false
         defer { isSendingChat = false }
         do {
             // The accepted response is a receipt, not a locally invented chat
@@ -226,7 +267,17 @@ public final class MoaCompanionAppModel: ObservableObject {
             chatReceipt = try await service.sendConversation(sessionID: conversation.id, text: text)
             chatText = ""
             userMessage = nil
-        } catch { userMessage = message(for: error) }
+        } catch {
+            // `/send` is deliberately not idempotent. A transport failure may
+            // have reached Moa, so never retain a one-tap retry of this text.
+            if isAmbiguousSendFailure(error) {
+                chatText = ""
+                chatDeliveryUnconfirmed = true
+                userMessage = "No se confirmó la entrega. Comprueba la conversación antes de enviar de nuevo."
+            } else {
+                userMessage = message(for: error)
+            }
+        }
     }
 
     public func beginSuggestedAction(_ item: ConversationBriefingItem) {
@@ -247,7 +298,7 @@ public final class MoaCompanionAppModel: ObservableObject {
     public func submitSuggestedAction() async {
         guard let service, let proposal = actionProposal else { return }
         let text = actionText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.count <= 4_000 else { userMessage = "Confirma el texto de la instrucción (máximo 4.000 caracteres)."; return }
+        guard !text.isEmpty, text.unicodeScalars.count <= 1_024 else { userMessage = "Confirma el texto de la instrucción (máximo 1.024 caracteres)."; return }
         let instruction: OpsInstructionRequest
         if let pendingActionInstruction, pendingActionInstruction.target == proposal.target.id, pendingActionInstruction.text == text {
             instruction = pendingActionInstruction
@@ -307,14 +358,46 @@ public final class MoaCompanionAppModel: ObservableObject {
         catch { userMessage = "Introduce una dirección http:// o https:// válida."; return nil }
     }
 
-    private func merge(_ incoming: [ConversationMessage], into current: [ConversationMessage]) -> [ConversationMessage] {
+    private func prependChronological(_ older: [ConversationMessage], to current: [ConversationMessage]) -> [ConversationMessage] {
+        let currentIDs = Set(current.map(\.id))
+        return older.filter { !currentIDs.contains($0.id) } + current
+    }
+
+    private func sharesMessageID(_ lhs: [ConversationMessage], _ rhs: [ConversationMessage]) -> Bool {
+        let ids = Set(lhs.map(\.id))
+        return rhs.contains { ids.contains($0.id) }
+    }
+
+    private func mergeLiveTail(_ tail: [ConversationMessage], into current: [ConversationMessage]) -> [ConversationMessage] {
+        guard !current.isEmpty else { return tail }
         var result = current
-        var positions = Dictionary(uniqueKeysWithValues: current.enumerated().map { ($0.element.id, $0.offset) })
-        for message in incoming {
-            if let index = positions[message.id] { result[index] = message }
-            else { positions[message.id] = result.count; result.append(message) }
+        var positions = Dictionary(uniqueKeysWithValues: result.enumerated().map { ($0.element.id, $0.offset) })
+        for (tailIndex, message) in tail.enumerated() {
+            if let index = positions[message.id] { result[index] = message; continue }
+            let prior = tail[..<tailIndex].reversed().compactMap { positions[$0.id] }.first
+            let following = tail.dropFirst(tailIndex + 1).compactMap { positions[$0.id] }.first
+            let insertion = prior.map { $0 + 1 } ?? following ?? result.count
+            result.insert(message, at: insertion)
+            positions = Dictionary(uniqueKeysWithValues: result.enumerated().map { ($0.element.id, $0.offset) })
         }
         return result
+    }
+
+    private func appendFinal(_ message: ConversationMessage, to current: [ConversationMessage]) -> [ConversationMessage] {
+        if let index = current.firstIndex(where: { $0.id == message.id }) {
+            var result = current
+            result[index] = message
+            return result
+        }
+        return current + [message]
+    }
+
+    private func isAmbiguousSendFailure(_ error: Error) -> Bool {
+        guard let error = error as? MoaOpsClientError else { return true }
+        switch error {
+        case .transport, .invalidResponse: return true
+        default: return false
+        }
     }
 
     private func message(for error: Error) -> String {

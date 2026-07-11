@@ -1,8 +1,8 @@
 @preconcurrency import Foundation
 
-/// Read-only overlay for an active conversation. Serve's `init` is explicitly
-/// a bounded tail, so it is merged over REST history and never treated as a
-/// complete transcript.
+/// Read-only client for Serve's intentionally reduced `/companion-ws` route.
+/// It never connects to the dashboard `/ws` endpoint and therefore never
+/// decodes, filters, or retains raw agent/tool/thinking payloads.
 public actor MoaConversationWebSocketClient {
     private let baseURL: URL
     private let session: URLSession
@@ -25,9 +25,7 @@ public actor MoaConversationWebSocketClient {
         return AsyncStream { continuation in
             continuations[id] = continuation
             continuation.onTermination = { [weak self, id] _ in
-                Task { @Sendable [weak self, id] in
-                    await self?.removeContinuation(id)
-                }
+                Task { @Sendable [weak self, id] in await self?.removeContinuation(id) }
             }
         }
     }
@@ -58,10 +56,7 @@ public actor MoaConversationWebSocketClient {
                 attempt += 1
             }
             guard !Task.isCancelled else { break }
-            // Mobile network changes are normal. Reconnect with a bounded delay;
-            // the next init is a tail overlay, not a history replacement.
-            let delay = min(pow(2, Double(max(0, attempt - 1))), 30)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(min(pow(2, Double(max(0, attempt - 1))), 30) * 1_000_000_000))
         }
         task = nil
         runTask = nil
@@ -78,7 +73,7 @@ public actor MoaConversationWebSocketClient {
                 data = value
             @unknown default: throw MoaOpsClientError.decoding
             }
-            if let event = try ConversationWireEvent.decode(data) { yield(event) }
+            if let event = try ConversationLiveEvent.decodeServerEvent(data) { yield(event) }
         }
     }
 
@@ -95,7 +90,7 @@ public actor MoaConversationWebSocketClient {
 
     private func webSocketURL(sessionID: String) throws -> URL {
         guard !sessionID.isEmpty,
-              var components = URLComponents(url: baseURL.appendingPathComponent("api").appendingPathComponent("sessions").appendingPathComponent(sessionID).appendingPathComponent("ws"), resolvingAgainstBaseURL: false) else {
+              var components = URLComponents(url: baseURL.appendingPathComponent("api").appendingPathComponent("sessions").appendingPathComponent(sessionID).appendingPathComponent("companion-ws"), resolvingAgainstBaseURL: false) else {
             throw MoaOpsClientError.invalidBaseURL
         }
         components.scheme = baseURL.scheme == "https" ? "wss" : "ws"
@@ -111,136 +106,78 @@ public actor MoaConversationWebSocketClient {
 }
 
 public extension ConversationLiveEvent {
-    /// Decodes only the safe subset of Serve's existing per-session WS
-    /// contract: init display tail, assistant text progression, completion,
-    /// and state. All tool/thinking/unknown frames intentionally become nil.
     static func decodeServerEvent(_ data: Data) throws -> ConversationLiveEvent? {
-        try ConversationWireEvent.decode(data)
+        try CompanionWireEvent.decode(data)
     }
 }
 
-private struct ConversationWireEvent: Decodable {
+/// Exact safe DTO schema emitted by `companion-ws`.
+private struct CompanionWireEvent: Decodable {
     let type: String
-    let data: WireData?
+    let initData: CompanionInitWire?
+    let state: CompanionStateWire?
+    let delta: CompanionDeltaWire?
+    let message: ConversationMessage?
 
-    enum CodingKeys: String, CodingKey { case type, data }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        type = try values.decode(String.self, forKey: .type)
-        switch type {
-        case "init":
-            data = .initial(try values.decode(WireInitial.self, forKey: .data))
-        case "text_delta":
-            data = .delta(try values.nestedContainer(keyedBy: DynamicKey.self, forKey: .data).decode(String.self, forKey: DynamicKey("delta")))
-        case "message_end":
-            let message = try values.nestedContainer(keyedBy: DynamicKey.self, forKey: .data)
-            data = .messageEnd(.init(text: try message.decode(String.self, forKey: DynamicKey("text")), id: try message.decodeIfPresent(String.self, forKey: DynamicKey("msg_id"))))
-        case "state_change":
-            data = .state(try values.nestedContainer(keyedBy: DynamicKey.self, forKey: .data).decode(String.self, forKey: DynamicKey("state")))
-        default:
-            data = nil
-        }
+    enum CodingKeys: String, CodingKey {
+        case type
+        case initData = "init"
+        case state, delta, message
     }
 
     static func decode(_ data: Data) throws -> ConversationLiveEvent? {
-        let envelope = try JSONDecoder.moaOps.decode(ConversationWireEvent.self, from: data)
-        switch envelope.type {
+        let wire = try JSONDecoder.moaOps.decode(CompanionWireEvent.self, from: data)
+        switch wire.type {
         case "init":
-            guard case let .initial(initial)? = envelope.data else { return nil }
-            return .initial(messages: initial.messages.compactMap(ConversationMessage.init), state: initial.state, historyTruncated: initial.historyTruncated)
-        case "text_delta":
-            guard case let .delta(delta)? = envelope.data else { return nil }
-            return .textDelta(delta)
-        case "message_end":
-            guard case let .messageEnd(end)? = envelope.data else { return nil }
-            return .messageEnded(.init(id: end.id ?? UUID().uuidString, role: "assistant", text: end.text))
-        case "state_change":
-            guard case let .state(state)? = envelope.data else { return nil }
-            return .stateChanged(state)
+            guard let initData = wire.initData, initData.tailOrder == "oldest_first" else { throw MoaOpsClientError.decoding }
+            return .initial(.init(sessionID: initData.sessionID, title: initData.title, branch: initData.branch, state: initData.state, tail: initData.tail, olderCursor: initData.olderCursor, hasOlder: initData.hasOlder))
+        case "state":
+            guard let state = wire.state else { throw MoaOpsClientError.decoding }
+            return .state(state.state)
+        case "assistant_delta":
+            guard let delta = wire.delta else { throw MoaOpsClientError.decoding }
+            return .assistantDelta(text: delta.text, truncated: delta.truncated)
+        case "assistant_final":
+            guard let message = wire.message, message.role == "assistant" else { throw MoaOpsClientError.decoding }
+            return .assistantFinal(message)
         default:
-            return nil // Thinking, tools, command output, and unknown events are never surfaced.
+            // Unknown frames are protocol incompatibility, not candidate raw
+            // frames to filter. Closing/reconnecting is safer than displaying
+            // an incomplete or unexpected transcript.
+            throw MoaOpsClientError.decoding
         }
-    }
-
-    enum WireData {
-        case initial(WireInitial)
-        case delta(String)
-        case messageEnd(WireMessageEnd)
-        case state(String)
-
     }
 }
 
-private struct WireInitial: Decodable {
-    let messages: [WireMessage]
+private struct CompanionInitWire: Decodable {
+    let sessionID: String
+    let title: String
+    let branch: ConversationBranch
     let state: String
-    let historyTruncated: Bool
+    let tailOrder: String
+    let tail: [ConversationMessage]
+    let olderCursor: String?
+    let hasOlder: Bool
 
-    enum CodingKeys: String, CodingKey { case messages, state; case historyTruncated = "history_truncated" }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        messages = try values.decode([WireMessage].self, forKey: .messages)
-        state = try values.decode(String.self, forKey: .state)
-        historyTruncated = try values.decodeIfPresent(Bool.self, forKey: .historyTruncated) ?? false
+    enum CodingKeys: String, CodingKey {
+        case title, branch, state, tail
+        case sessionID = "session_id"
+        case tailOrder = "tail_order"
+        case olderCursor = "older_cursor"
+        case hasOlder = "has_older"
     }
 }
 
-private struct WireMessage: Decodable {
-    let id: String?
-    let role: String
-    let timestamp: Date?
-    let content: [WireContent]
-    let hasCustom: Bool
-
-    enum CodingKeys: String, CodingKey { case id = "msg_id"; case role, timestamp, content, custom }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        id = try values.decodeIfPresent(String.self, forKey: .id)
-        role = try values.decode(String.self, forKey: .role)
-        content = try values.decodeIfPresent([WireContent].self, forKey: .content) ?? []
-        if values.contains(.custom) {
-            hasCustom = try !values.decodeNil(forKey: .custom)
-        } else {
-            hasCustom = false
-        }
-        if let seconds = try? values.decode(Double.self, forKey: .timestamp) {
-            timestamp = Date(timeIntervalSince1970: seconds)
-        } else if let seconds = try? values.decode(Int.self, forKey: .timestamp) {
-            timestamp = Date(timeIntervalSince1970: TimeInterval(seconds))
-        } else {
-            timestamp = nil
-        }
-    }
-
-    func asConversationMessage() -> ConversationMessage? {
-        guard (role == "user" || role == "assistant"), !hasCustom else { return nil }
-        let text = content.filter { $0.type == "text" }.compactMap(\.text).joined(separator: "\n")
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return .init(id: id ?? "live-\(role)-\(text.hashValue)", role: role, timestamp: timestamp, text: text, omitted: content.contains { $0.type != "text" }, omittedBlocks: content.filter { $0.type != "text" }.count)
-    }
-}
-
-private extension ConversationMessage {
-    init?(_ wire: WireMessage) { guard let message = wire.asConversationMessage() else { return nil }; self = message }
-}
-
-private struct WireContent: Decodable {
-    let type: String
-    let text: String?
-}
-
-private struct WireMessageEnd {
+private struct CompanionStateWire: Decodable { let state: String }
+private struct CompanionDeltaWire: Decodable {
     let text: String
-    let id: String?
-}
+    let truncated: Bool
 
-private struct DynamicKey: CodingKey {
-    var stringValue: String
-    var intValue: Int?
-    init(_ value: String) { stringValue = value }
-    init?(stringValue: String) { self.init(stringValue) }
-    init?(intValue: Int) { return nil }
+    enum CodingKeys: String, CodingKey { case text, truncated }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        text = try values.decode(String.self, forKey: .text)
+        truncated = try values.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+    }
 }

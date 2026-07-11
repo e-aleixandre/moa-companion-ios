@@ -113,7 +113,7 @@ private struct MoaHomeView: View {
                 Button { model.toggleSelection(session) } label: {
                     HStack {
                         Image(systemName: model.selectedSessionIDs.contains(session.id) ? "checkmark.circle.fill" : "circle")
-                        VStack(alignment: .leading) { Text(session.title).lineLimit(1); Text(session.state).font(.caption).foregroundStyle(.secondary) }
+                        VStack(alignment: .leading) { Text(session.title).lineLimit(1); Text(session.spanishState).font(.caption).foregroundStyle(.secondary) }
                         Spacer()
                         if session.isLive { Text("ACTIVA").font(.caption2.bold()).foregroundStyle(.green) }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(10).background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -168,7 +168,7 @@ private struct ConversationsView: View {
                 NavigationLink { ConversationDetailView(model: model, session: session) } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(session.title).lineLimit(1)
-                        HStack { Text(session.state); Text("·"); Text(session.updated, style: .relative) }.font(.caption).foregroundStyle(.secondary)
+                        HStack { Text(session.spanishState); Text("·"); Text(session.updated, style: .relative) }.font(.caption).foregroundStyle(.secondary)
                         if session.isLive { Text("ACTIVA · superposición en directo").font(.caption2).foregroundStyle(.green) }
                         else { Text("Guardada · solo lectura; no se reanuda automáticamente").font(.caption2).foregroundStyle(.secondary) }
                     }
@@ -206,6 +206,7 @@ private struct ConversationDetailView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let receipt = model.chatReceipt { Text(receipt.action == .send ? "Mensaje aceptado por Moa." : "Mensaje dirigido a una ejecución activa.").font(.caption).foregroundStyle(.secondary) }
+            if model.chatDeliveryUnconfirmed { Label("Entrega no confirmada. Comprueba la conversación antes de enviar de nuevo.", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange) }
             HStack(alignment: .bottom) {
                 TextField("Escribe a Moa", text: $model.chatText, axis: .vertical).textFieldStyle(.roundedBorder).lineLimit(1...4)
                 Button(model.isSendingChat ? "…" : "Enviar") { Task { await model.sendChat() } }.buttonStyle(.borderedProminent).disabled(model.isSendingChat || model.chatText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

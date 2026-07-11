@@ -59,6 +59,18 @@ public actor MoaOpsClient {
         try await get(path: "api/ops/overview", as: OpsSnapshot.self)
     }
 
+    /// Loads the server-selected Pulse projection. A cursor is sent only as a
+    /// UTC RFC3339 value; retention recovery is intentionally owned by the
+    /// presentation layer so it can tell the person that history was reset.
+    public func pulse(since: Date? = nil) async throws -> OpsPulse {
+        var components = URLComponents(url: try endpoint(path: "api/ops/pulse"), resolvingAgainstBaseURL: false)
+        if let since {
+            components?.queryItems = [URLQueryItem(name: "since", value: ISO8601DateFormatter.moaOpsFractional.string(from: since))]
+        }
+        guard let url = components?.url else { throw MoaOpsClientError.invalidBaseURL }
+        return try await get(url: url, as: OpsPulse.self)
+    }
+
     public func sitrep() async throws -> OpsBriefing {
         try await query(view: "sitrep", target: nil, as: OpsBriefing.self)
     }

@@ -8,6 +8,107 @@ public struct OpsSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Pulse
+
+/// The bounded, server-derived mobile inbox returned by `/api/ops/pulse`.
+/// It deliberately has no transcript, command output, or arbitrary error text.
+public struct OpsPulse: Codable, Equatable, Sendable {
+    public let generatedAt: Date
+    public let summary: OpsPulseSummary
+    public let needsAttention: [OpsPulseItem]
+    public let inProgress: [OpsPulseItem]
+    public let onTrack: [OpsPulseItem]
+    public let changes: OpsPulseChanges
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case summary
+        case needsAttention = "needs_attention"
+        case inProgress = "in_progress"
+        case onTrack = "on_track"
+        case changes
+    }
+}
+
+public struct OpsPulseSummary: Codable, Equatable, Sendable {
+    public let needsAttention: Int
+    public let inProgress: Int
+    public let onTrack: Int
+    public let changes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case needsAttention = "needs_attention"
+        case inProgress = "in_progress"
+        case onTrack = "on_track"
+        case changes
+    }
+}
+
+public struct OpsPulseChanges: Codable, Equatable, Sendable {
+    public let requested: Bool
+    public let since: Date?
+    public let until: Date
+    public let items: [OpsPulseItem]
+    public let truncated: Bool
+}
+
+public struct OpsPulseItem: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let session: OpsPulseSession
+    public let category: String
+    public let priority: Int?
+    public let lifecycle: OpsLifecycle
+    public let activity: OpsActivity
+    /// The API omits this value when verification is not known. Clients must
+    /// not substitute an "unknown" status in its place.
+    public let verification: OpsVerificationState?
+    public let observedAt: Date?
+    public let freshness: OpsPulseFreshness
+    public let facts: [OpsPulseFact]
+    public let directedInstruction: OpsPulseDirectedInstruction?
+
+    enum CodingKeys: String, CodingKey {
+        case id, session, category, priority, lifecycle, activity, verification, freshness, facts
+        case observedAt = "observed_at"
+        case directedInstruction = "directed_instruction"
+    }
+}
+
+public struct OpsPulseSession: Codable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let project: String
+}
+
+public enum OpsPulseFreshness: String, Codable, Equatable, Sendable {
+    case fresh, stale, unknown
+}
+
+public enum OpsPulseProvenance: String, Codable, Equatable, Sendable {
+    case observed, derived
+}
+
+public struct OpsPulseFact: Codable, Equatable, Sendable {
+    public let kind: String
+    public let value: String
+    public let at: Date?
+    public let refID: String?
+    public let provenance: OpsPulseProvenance
+
+    enum CodingKeys: String, CodingKey {
+        case kind, value, at, provenance
+        case refID = "ref_id"
+    }
+}
+
+public struct OpsPulseDirectedInstruction: Codable, Equatable, Sendable {
+    public let targetID: String
+
+    enum CodingKeys: String, CodingKey {
+        case targetID = "target_id"
+    }
+}
+
 public struct OpsProject: Codable, Equatable, Sendable {
     public let canonicalCWD: String
     public let aliases: [String]?

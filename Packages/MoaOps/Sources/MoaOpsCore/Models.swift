@@ -70,6 +70,12 @@ public enum OpsActivity: String, Codable, Sendable {
 
 public enum OpsVerificationState: String, Codable, Sendable {
     case unknown, pending, passed, failed
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        self = OpsVerificationState(rawValue: value) ?? .unknown
+    }
 }
 
 public enum OpsMilestoneType: String, Codable, Sendable {

@@ -157,13 +157,6 @@ private struct PulseHomeView: View {
             }
             if sections.isEmpty {
                 AllClearView(isStale: isStale)
-            } else if summary.staleWork > 0 {
-                Label("Hay trabajo sin observación reciente", systemImage: "questionmark.circle.fill")
-                    .font(.title3.bold())
-                    .foregroundStyle(.orange)
-                Text("\(summary.staleWork) \(summary.staleWork == 1 ? "sesión no tiene" : "sesiones no tienen") una observación segura reciente. No confirmamos que todo esté en orden.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
             } else {
                 ForEach(sections) { section in
                     PulseSectionView(section: section, onSelect: onSelect)
@@ -193,6 +186,13 @@ private struct PulseHero: View {
                     .foregroundStyle(.secondary)
                 Text(heroLine)
                     .font(.title.bold())
+            } else if summary.staleWork > 0 {
+                Label("Hay trabajo sin observación reciente", systemImage: "questionmark.circle.fill")
+                    .font(.title3.bold())
+                    .foregroundStyle(.orange)
+                Text("\(summary.staleWork) \(summary.staleWork == 1 ? "sesión no tiene" : "sesiones no tienen") una observación segura reciente. No confirmamos que todo esté en orden.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
             } else {
                 Label("Todo en orden", systemImage: "checkmark.circle.fill")
                     .font(.title.bold())

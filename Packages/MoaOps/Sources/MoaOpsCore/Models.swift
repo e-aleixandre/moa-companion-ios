@@ -181,6 +181,63 @@ public struct OpsStatusResult: Codable, Equatable, Sendable {
     public let briefing: OpsBriefing?
 }
 
+public struct OpsAskRequest: Encodable, Equatable, Sendable {
+    public let text: String
+
+    public init(text: String) {
+        self.text = text
+    }
+}
+
+/// The server decides whether a question can be answered from verified Ops data.
+/// Unknown future kinds deliberately decode as `unknown` so callers never present
+/// an unrecognised payload as a verified answer.
+public enum OpsAskKind: Equatable, Sendable {
+    case sitrep
+    case blockers
+    case status
+    case unsupported
+    case unknown
+}
+
+extension OpsAskKind: Codable {
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "sitrep": self = .sitrep
+        case "blockers": self = .blockers
+        case "status": self = .status
+        case "unsupported": self = .unsupported
+        default: self = .unknown
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        let value: String
+        switch self {
+        case .sitrep: value = "sitrep"
+        case .blockers: value = "blockers"
+        case .status: value = "status"
+        case .unsupported: value = "unsupported"
+        case .unknown: value = "unknown"
+        }
+        try container.encode(value)
+    }
+}
+
+public struct OpsAskResponse: Codable, Equatable, Sendable {
+    public let kind: OpsAskKind
+    public let resolution: OpsResolution?
+    public let briefing: OpsBriefing?
+
+    public init(kind: OpsAskKind, resolution: OpsResolution? = nil, briefing: OpsBriefing? = nil) {
+        self.kind = kind
+        self.resolution = resolution
+        self.briefing = briefing
+    }
+}
+
 public struct OpsInstructionRequest: Encodable, Equatable, Sendable {
     public let target: String
     public let text: String

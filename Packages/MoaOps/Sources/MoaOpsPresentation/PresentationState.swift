@@ -89,6 +89,74 @@ public struct OpsSessionDetail: Equatable, Sendable {
     }
 }
 
+public struct OpsAskHistoryEntry: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let question: String
+    public let kind: OpsAskKind
+    public let resolution: OpsResolution?
+    public let briefing: OpsBriefing
+
+    public init(id: UUID = UUID(), question: String, kind: OpsAskKind, resolution: OpsResolution?, briefing: OpsBriefing) {
+        self.id = id
+        self.question = question
+        self.kind = kind
+        self.resolution = resolution
+        self.briefing = briefing
+    }
+
+    public var statusLabel: String {
+        switch kind {
+        case .sitrep: "Verified sitrep"
+        case .blockers: "Verified blockers"
+        case .status: "Verified status"
+        case .unsupported, .unknown: "Unsupported"
+        }
+    }
+}
+
+public enum OpsAskFeedback: Equatable, Sendable {
+    case unsupported
+    case unavailable
+
+    public var message: String {
+        switch self {
+        case .unsupported:
+            "Moa could not provide a verified answer for that question. Try a suggested verified prompt."
+        case .unavailable:
+            "Moa could not retrieve a verified answer. Check the connection and try again."
+        }
+    }
+}
+
+public struct OpsInstructionReceipt: Equatable, Sendable {
+    public let title: String
+    public let delivery: Delivery
+
+    public enum Delivery: Equatable, Sendable {
+        case sent
+        case steered
+
+        init(action: String) {
+            self = action.lowercased() == "steered" ? .steered : .sent
+        }
+
+        var label: String {
+            switch self {
+            case .sent: "sent"
+            case .steered: "steered"
+            }
+        }
+    }
+
+    public init(title: String, action: String) {
+        self.title = title
+        delivery = Delivery(action: action)
+    }
+
+    public var message: String { "Delivered to \(title) — \(delivery.label)" }
+    public var completionNotice: String { "Delivery is not proof of completion. Check verified status for progress." }
+}
+
 public enum PresentationMapper {
     public static func sessionTargets(in snapshot: OpsSnapshot?) -> [OpsSessionTarget] {
         guard let snapshot else { return [] }
@@ -107,6 +175,20 @@ public enum PresentationMapper {
             }
         }
         return nil
+    }
+
+    public static func askHistoryEntry(question: String, response: OpsAskResponse) -> OpsAskHistoryEntry? {
+        guard let briefing = response.briefing else { return nil }
+        switch response.kind {
+        case .sitrep, .blockers, .status:
+            return OpsAskHistoryEntry(question: question, kind: response.kind, resolution: response.resolution, briefing: briefing)
+        case .unsupported, .unknown:
+            return nil
+        }
+    }
+
+    public static func appendingAskHistory(_ entry: OpsAskHistoryEntry, to history: [OpsAskHistoryEntry], maximumCount: Int = 6) -> [OpsAskHistoryEntry] {
+        Array((history + [entry]).suffix(maximumCount))
     }
 
     public static func isStale(lastSnapshotAt: Date?, connection: OpsConnectionState, now: Date, maximumAge: TimeInterval = 45) -> Bool {

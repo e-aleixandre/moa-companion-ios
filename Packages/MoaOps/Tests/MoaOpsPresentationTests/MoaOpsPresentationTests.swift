@@ -38,6 +38,45 @@ final class MoaOpsPresentationTests: XCTestCase {
         XCTAssertEqual(PresentationMapper.userMessage(for: NSError(domain: "private-server-detail", code: 1)), "Could not reach the server. Check the address and try again.")
     }
 
+    func testAskMappingKeepsOnlyRecognizedVerifiedAnswers() throws {
+        let response = try askResponse(kind: "status", includesBriefing: true)
+
+        let entry = try XCTUnwrap(PresentationMapper.askHistoryEntry(question: "What is Known doing?", response: response))
+
+        XCTAssertEqual(entry.question, "What is Known doing?")
+        XCTAssertEqual(entry.statusLabel, "Verified status")
+        XCTAssertEqual(entry.briefing.sessions?.map(\.title), ["Known"])
+        XCTAssertNil(PresentationMapper.askHistoryEntry(question: "Anything?", response: try askResponse(kind: "future", includesBriefing: true)))
+        XCTAssertNil(PresentationMapper.askHistoryEntry(question: "Anything?", response: try askResponse(kind: "unsupported", includesBriefing: false)))
+    }
+
+    func testAskHistoryIsBoundedAndKeepsMostRecentEntries() throws {
+        let response = try askResponse(kind: "sitrep", includesBriefing: true)
+        let entries = (1...3).compactMap { index in
+            PresentationMapper.askHistoryEntry(question: "Question \(index)", response: response)
+        }
+
+        let history = entries.reduce([]) { partial, entry in
+            PresentationMapper.appendingAskHistory(entry, to: partial, maximumCount: 2)
+        }
+
+        XCTAssertEqual(history.map(\.question), ["Question 2", "Question 3"])
+    }
+
+    func testInstructionReceiptUsesLocalTargetAndDoesNotClaimCompletion() {
+        let sent = OpsInstructionReceipt(title: "Known", action: "sent")
+        let steered = OpsInstructionReceipt(title: "Known", action: "steered")
+
+        XCTAssertEqual(sent.message, "Delivered to Known — sent")
+        XCTAssertEqual(steered.message, "Delivered to Known — steered")
+        XCTAssertEqual(sent.completionNotice, "Delivery is not proof of completion. Check verified status for progress.")
+    }
+
+    private func askResponse(kind: String, includesBriefing: Bool) throws -> OpsAskResponse {
+        let briefing = includesBriefing ? ",\"briefing\":{\"sessions\":[{\"id\":\"known-session\",\"title\":\"Known\",\"presence\":\"active\",\"lifecycle\":\"running\",\"activity\":\"running\",\"jobs\":{\"subagents\":0,\"bash\":0},\"verification\":\"passed\"}],\"blockers\":[],\"spoken\":\"Known is running.\"}" : ""
+        return try JSONDecoder.moaOps.decode(OpsAskResponse.self, from: Data("{\"kind\":\"\(kind)\"\(briefing)}".utf8))
+    }
+
     private func snapshot() -> OpsSnapshot {
         OpsSnapshot(projects: [
             OpsProject(canonicalCWD: "/work/moa", sessions: [

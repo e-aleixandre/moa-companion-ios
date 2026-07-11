@@ -71,6 +71,19 @@ public actor MoaOpsClient {
         try await query(view: "status", target: target, as: OpsStatusResult.self)
     }
 
+    public func ask(_ question: OpsAskRequest) async throws -> OpsAskResponse {
+        try await ensureAuthenticated()
+        var request = try makeRequest(path: "api/ops/ask")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = try JSONEncoder.moaOps.encode(question)
+        let (data, response) = try await data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw MoaOpsClientError.invalidResponse }
+        try validate(http)
+        return try decode(OpsAskResponse.self, from: data)
+    }
+
     public func submitInstruction(_ instruction: OpsInstructionRequest) async throws -> OpsInstructionResponse {
         try await ensureAuthenticated()
         var request = try makeRequest(path: "api/ops/instruction")

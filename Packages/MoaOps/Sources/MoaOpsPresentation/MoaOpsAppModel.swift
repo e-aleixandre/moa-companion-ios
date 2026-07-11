@@ -15,9 +15,14 @@ public final class MoaOpsAppModel: ObservableObject {
     @Published public private(set) var isTestingConnection = false
     @Published public private(set) var isSnapshotStale = true
     @Published public private(set) var userMessage: String?
+    @Published public var askText = ""
+    @Published public private(set) var askHistory: [OpsAskHistoryEntry] = []
+    @Published public private(set) var askFeedback: OpsAskFeedback?
+    @Published public private(set) var isAsking = false
     @Published public var selectedSessionID: String?
     @Published public var instructionTargetID: String?
     @Published public private(set) var instructionWasSent = false
+    @Published public private(set) var instructionReceipt: OpsInstructionReceipt?
 
     private let serviceFactory: ServiceFactory
     private var service: (any MoaOpsPresentationService)?
@@ -44,6 +49,17 @@ public final class MoaOpsAppModel: ObservableObject {
     public var selectedSessionDetail: OpsSessionDetail? {
         guard let selectedSessionID else { return nil }
         return PresentationMapper.detail(sessionID: selectedSessionID, in: snapshot)
+    }
+
+    public var suggestedAskPrompts: [String] {
+        var prompts = [
+            "Give me a verified sitrep.",
+            "What verified blockers need attention?",
+        ]
+        if let detail = selectedSessionDetail {
+            prompts.append("What is the verified status of \(detail.title)?")
+        }
+        return prompts
     }
 
     public func testConnection() async {
@@ -113,7 +129,7 @@ public final class MoaOpsAppModel: ObservableObject {
     public func submitInstruction(text: String) async {
         guard let service,
               let targetID = instructionTargetID,
-              sessionTargets.contains(where: { $0.id == targetID }) else {
+              let target = sessionTargets.first(where: { $0.id == targetID }) else {
             userMessage = "Choose a current session before sending an instruction."
             return
         }
@@ -128,12 +144,49 @@ public final class MoaOpsAppModel: ObservableObject {
         }
         instructionWasSent = false
         do {
-            _ = try await service.submitInstruction(.init(target: targetID, text: trimmedText))
+            let response = try await service.submitInstruction(.init(target: targetID, text: trimmedText))
             instructionWasSent = true
+            instructionReceipt = OpsInstructionReceipt(title: target.title, action: response.action)
             userMessage = nil
         } catch {
             userMessage = PresentationMapper.userMessage(for: error)
         }
+    }
+
+    public func ask() async {
+        guard let service else {
+            askFeedback = .unavailable
+            return
+        }
+        let question = askText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else {
+            askFeedback = .unsupported
+            return
+        }
+        guard question.count <= 1_000 else {
+            askFeedback = .unsupported
+            return
+        }
+
+        isAsking = true
+        askFeedback = nil
+        defer { isAsking = false }
+        do {
+            let response = try await service.ask(.init(text: question))
+            guard let entry = PresentationMapper.askHistoryEntry(question: question, response: response) else {
+                askFeedback = .unsupported
+                return
+            }
+            askHistory = PresentationMapper.appendingAskHistory(entry, to: askHistory)
+            askText = ""
+        } catch {
+            askFeedback = .unavailable
+        }
+    }
+
+    public func useSuggestedAskPrompt(_ prompt: String) {
+        askText = prompt
+        askFeedback = nil
     }
 
     public func clearMessage() {

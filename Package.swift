@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "MoaOpsCore",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .macOS(.v13)],
     products: [
         .library(name: "MoaOpsCore", targets: ["MoaOpsCore"]),
     ],

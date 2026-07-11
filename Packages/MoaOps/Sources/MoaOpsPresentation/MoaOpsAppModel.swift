@@ -188,8 +188,8 @@ public final class MoaOpsAppModel: ObservableObject {
             userMessage = "Escribe una instrucción antes de enviarla."
             return
         }
-        guard trimmedText.count <= 4_000 else {
-            userMessage = "La instrucción debe tener 4.000 caracteres o menos."
+        guard trimmedText.unicodeScalars.count <= 1_024 else {
+            userMessage = "La instrucción debe tener 1.024 caracteres o menos."
             return
         }
 

@@ -65,10 +65,9 @@ public actor MoaOpsClient {
         try await get(path: "api/sessions", as: [CompanionSession].self)
     }
 
-    /// Loads the canonical, oldest-first owner display transcript page. The
-    /// cursor is opaque and may cease to be valid after a restart or branch
-    /// change; callers receive `conversationResetRequired` and must reload
-    /// from the first page rather than infer a replacement cursor.
+    /// Loads a newest-first owner display transcript page. The cursor anchors
+    /// the prior page's oldest ID; it is opaque and may become invalid after a
+    /// restart or branch change, requiring a safe first-page reload.
     public func conversation(sessionID: String, limit: Int = 50, cursor: String? = nil) async throws -> ConversationPage {
         guard (1...100).contains(limit) else { throw MoaOpsClientError.decoding }
         var components = URLComponents(url: try sessionEndpoint(sessionID, suffix: "messages"), resolvingAgainstBaseURL: false)
@@ -84,7 +83,9 @@ public actor MoaOpsClient {
         guard let http = response as? HTTPURLResponse else { throw MoaOpsClientError.invalidResponse }
         if http.statusCode == 400, cursor != nil { throw MoaOpsClientError.conversationResetRequired }
         try validate(http)
-        return try decode(ConversationPage.self, from: data)
+        let page = try decode(ConversationPage.self, from: data)
+        guard page.order == "newest_first", page.sessionID == sessionID else { throw MoaOpsClientError.decoding }
+        return page
     }
 
     public func sendConversation(sessionID: String, text: String) async throws -> ConversationSendResponse {

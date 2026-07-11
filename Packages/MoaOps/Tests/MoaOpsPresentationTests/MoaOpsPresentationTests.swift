@@ -252,7 +252,12 @@ final class MoaOpsPresentationTests: XCTestCase {
         let model = MoaOpsAppModel(serverURLText: "https://ops.example", cursorStore: CursorStore(cursor: nil), serviceFactory: { _, _ in service })
         await model.testConnection()
         model.setForegroundActive(true)
-        await Task.yield()
+        // The foreground refresh is deliberately spawned as a task. Give that
+        // task a bounded chance to run instead of assuming one scheduler yield
+        // is enough on a busy CI executor.
+        for _ in 0..<10 where service.requestedCursors.count < 2 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         model.setForegroundActive(false)
 
         XCTAssertFalse(model.isForegroundActive)

@@ -54,6 +54,37 @@ final class MoaOpsCoreTests: XCTestCase {
         XCTAssertEqual(object?["request_id"], "retry-id")
     }
 
+    func testSubmitInstructionIncludesCSRFHeaderAndJSONBody() async throws {
+        let recorder = RequestRecorder()
+        RequestCapturingURLProtocol.handler = { request in
+            recorder.record(request)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data("""
+            {"action":"sent","target":{"id":"session-1","title":"Ops","project":"/work/moa"}}
+            """.utf8))
+        }
+        defer { RequestCapturingURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestCapturingURLProtocol.self]
+        let client = try MoaOpsClient(baseURL: URL(string: "https://ops.example")!, session: URLSession(configuration: configuration))
+        let instruction = OpsInstructionRequest(target: "session-1", text: "continue", requestID: "retry-id")
+
+        _ = try await client.submitInstruction(instruction)
+
+        let request = try XCTUnwrap(recorder.request)
+        XCTAssertEqual(request.url?.path, "/api/ops/instruction")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Request-ID"), "retry-id")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Moa-Request"), "1")
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(object, ["target": "session-1", "text": "continue", "request_id": "retry-id"])
+    }
+
     func testReconnectPolicyIsBounded() {
         let policy = OpsReconnectPolicy(initialDelay: 1, maximumDelay: 5)
         XCTAssertEqual(policy.delay(forAttempt: 1), 1)
@@ -65,4 +96,54 @@ final class MoaOpsCoreTests: XCTestCase {
         XCTAssertThrowsError(try MoaOpsClient(baseURL: URL(string: "file:///tmp")!))
         XCTAssertThrowsError(try MoaOpsWebSocketClient(baseURL: URL(string: "https:///missing-host")!))
     }
+}
+
+private final class RequestRecorder {
+    private let lock = NSLock()
+    private var capturedRequest: URLRequest?
+
+    func record(_ request: URLRequest) {
+        var request = request
+        if request.httpBody == nil, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var body = Data()
+            var buffer = [UInt8](repeating: 0, count: 1_024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                body.append(contentsOf: buffer.prefix(count))
+            }
+            request.httpBody = body
+        }
+        lock.lock()
+        capturedRequest = request
+        lock.unlock()
+    }
+
+    var request: URLRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedRequest
+    }
+}
+
+private final class RequestCapturingURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        let (response, data) = handler(request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

@@ -123,7 +123,20 @@ public enum PresentationMapper {
             return "The server address is not valid."
         case .authentication:
             return "The server did not accept this connection."
-        case .httpStatus, .transport, .invalidResponse:
+        case let .httpStatus(code, _):
+            switch code {
+            case 401:
+                return "The server requires authentication. Check your access and try again."
+            case 403:
+                return "The server did not authorize this request. Check authentication and request authorization."
+            case 404:
+                return "This server does not support the requested Ops API."
+            case 429:
+                return "The server is rate limiting requests. Try again shortly."
+            default:
+                return "The server refused the request. Try again later."
+            }
+        case .transport, .invalidResponse:
             return "Could not reach the server. Check the address and try again."
         case .decoding:
             return "The server sent an unsupported response."

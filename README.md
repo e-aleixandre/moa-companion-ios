@@ -4,7 +4,24 @@ This repository provides package libraries plus a minimal iOS 17 host app for th
 
 ## CI
 
-GitHub Actions validates the package on GitHub-hosted macOS 14 for pull requests and pushes to `main` and `feat/**`, running `swift build`, `swift test`, and an unsigned Debug build of `MoaCompanion` for the generic iOS Simulator destination. It does not use signing, secrets, or deployment steps.
+GitHub Actions validates the package on GitHub-hosted macOS 14 for pull requests and pushes to `main` and `feat/**`, running `swift build --package-path Packages/MoaOps`, `swift test --package-path Packages/MoaOps`, and an unsigned Debug build of `MoaCompanion` for the generic iOS Simulator destination. It does not use signing, secrets, or deployment steps.
+
+## Local validation
+
+The Swift package is intentionally nested at `Packages/MoaOps`, separate from the Xcode project root. Validate the package and unsigned simulator host app with:
+
+```sh
+swift build --package-path Packages/MoaOps
+swift test --package-path Packages/MoaOps
+xcodebuild \
+  -project MoaCompanion.xcodeproj \
+  -scheme MoaCompanion \
+  -configuration Debug \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
 
 ## Libraries
 

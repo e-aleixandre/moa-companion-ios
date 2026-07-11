@@ -103,7 +103,7 @@
 			);
 			mainGroup = A10000000000000000000009;
 			packageReferences = (
-				A10000000000000000000012 /* XCLocalSwiftPackageReference "." */,
+				A10000000000000000000012 /* XCLocalSwiftPackageReference "Packages/MoaOps" */,
 			);
 			productRefGroup = A1000000000000000000000B /* Products */;
 			projectDirPath = "";
@@ -241,21 +241,21 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		A10000000000000000000012 /* XCLocalSwiftPackageReference "." */ = {
+		A10000000000000000000012 /* XCLocalSwiftPackageReference "Packages/MoaOps" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = .;
+			relativePath = Packages/MoaOps;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A10000000000000000000004 /* MoaOpsCore */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A10000000000000000000012 /* XCLocalSwiftPackageReference "." */;
+			package = A10000000000000000000012 /* XCLocalSwiftPackageReference "Packages/MoaOps" */;
 			productName = MoaOpsCore;
 		};
 		A10000000000000000000006 /* MoaOpsPresentation */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A10000000000000000000012 /* XCLocalSwiftPackageReference "." */;
+			package = A10000000000000000000012 /* XCLocalSwiftPackageReference "Packages/MoaOps" */;
 			productName = MoaOpsPresentation;
 		};
 /* End XCSwiftPackageProductDependency section */

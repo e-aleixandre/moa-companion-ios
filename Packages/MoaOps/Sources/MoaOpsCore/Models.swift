@@ -46,10 +46,18 @@ public struct OpsPulseSummary: Codable, Equatable, Sendable {
 
 public struct OpsPulseChanges: Codable, Equatable, Sendable {
     public let requested: Bool
-    public let since: Date?
     public let until: Date
     public let items: [OpsPulseItem]
-    public let truncated: Bool
+    /// Opaque server continuation. Clients must store and replay it verbatim,
+    /// never derive it from a timestamp or displayed item.
+    public let nextCursor: String?
+    public let hasMore: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case requested, until, items
+        case nextCursor = "next_cursor"
+        case hasMore = "has_more"
+    }
 }
 
 public struct OpsPulseItem: Codable, Equatable, Sendable, Identifiable {
@@ -362,8 +370,13 @@ public struct OpsInstructionTarget: Codable, Equatable, Sendable {
     public let project: String?
 }
 
+public enum OpsInstructionAction: String, Codable, Equatable, Sendable {
+    case send
+    case steer
+}
+
 public struct OpsInstructionResponse: Codable, Equatable, Sendable {
-    public let action: String
+    public let action: OpsInstructionAction
     public let target: OpsInstructionTarget
 }
 

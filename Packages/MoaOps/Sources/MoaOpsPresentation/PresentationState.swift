@@ -2,24 +2,24 @@ import Foundation
 import MoaOpsCore
 
 public protocol PulseCursorStore: AnyObject {
-    func lastSeen() -> Date?
-    func save(lastSeen: Date)
+    func cursor() -> String?
+    func save(cursor: String)
     func clear()
 }
 
-/// Stores only the non-secret Pulse cursor. URLs, credentials, instruction
-/// text, and server payloads are intentionally not persisted.
+/// Stores only the opaque, non-secret Pulse continuation. URLs, credentials,
+/// instruction text, timestamps, and server payloads are never persisted.
 public final class UserDefaultsPulseCursorStore: PulseCursorStore {
     private let defaults: UserDefaults
     private let key: String
 
-    public init(defaults: UserDefaults = .standard, key: String = "moa.ops.pulse.lastSeen") {
+    public init(defaults: UserDefaults = .standard, key: String = "moa.ops.pulse.cursor") {
         self.defaults = defaults
         self.key = key
     }
 
-    public func lastSeen() -> Date? { defaults.object(forKey: key) as? Date }
-    public func save(lastSeen: Date) { defaults.set(lastSeen, forKey: key) }
+    public func cursor() -> String? { defaults.string(forKey: key) }
+    public func save(cursor: String) { defaults.set(cursor, forKey: key) }
     public func clear() { defaults.removeObject(forKey: key) }
 }
 
@@ -215,25 +215,28 @@ public struct OpsInstructionReceipt: Equatable, Sendable {
         case sent
         case steered
 
-        init(action: String) {
-            self = action.lowercased() == "steered" ? .steered : .sent
+        init(action: OpsInstructionAction) {
+            switch action {
+            case .send: self = .sent
+            case .steer: self = .steered
+            }
         }
 
         var label: String {
             switch self {
-            case .sent: "sent"
-            case .steered: "steered"
+            case .sent: "enviada"
+            case .steered: "dirigida"
             }
         }
     }
 
-    public init(title: String, action: String) {
+    public init(title: String, action: OpsInstructionAction) {
         self.title = title
         delivery = Delivery(action: action)
     }
 
-    public var message: String { "Delivered to \(title) — \(delivery.label)" }
-    public var completionNotice: String { "Delivery is not proof of completion. Check verified status for progress." }
+    public var message: String { "Entregada a \(title) — \(delivery.label)" }
+    public var completionNotice: String { "La entrega no demuestra que el trabajo haya terminado. Revisa Pulse para ver el progreso." }
 }
 
 public enum PresentationMapper {
@@ -275,6 +278,11 @@ public enum PresentationMapper {
         return now.timeIntervalSince(lastSnapshotAt) > maximumAge
     }
 
+    public static func isPulseStale(lastSuccessfulRefreshAt: Date?, now: Date, maximumAge: TimeInterval = 5 * 60) -> Bool {
+        guard let lastSuccessfulRefreshAt else { return true }
+        return now.timeIntervalSince(lastSuccessfulRefreshAt) > maximumAge
+    }
+
     public static func userMessage(for error: Error) -> String {
         guard let error = error as? MoaOpsClientError else {
             return "Could not reach the server. Check the address and try again."
@@ -303,6 +311,8 @@ public enum PresentationMapper {
             return "The server sent an unsupported response."
         case .instructionConflict:
             return "That session changed. Select it again before sending an instruction."
+        case .pulseResetRequired:
+            return "Pulse history is no longer available. Refresh to start from the current state."
         }
     }
 

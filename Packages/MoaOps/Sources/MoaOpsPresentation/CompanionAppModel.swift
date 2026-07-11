@@ -212,26 +212,26 @@ public final class MoaCompanionAppModel: ObservableObject {
 
     private func applyLive(_ event: ConversationLiveEvent) {
         switch event {
-        case let .initial(init):
-            guard init.sessionID == activeConversation?.id else { return }
-            liveState = init.state
+        case let .initial(payload):
+            guard payload.sessionID == activeConversation?.id else { return }
+            liveState = payload.state
             livePartialText = ""
-            liveHistoryIsBounded = init.hasOlder
-            if let branch = conversationBranch, branch != init.branch {
+            liveHistoryIsBounded = payload.hasOlder
+            if let branch = conversationBranch, branch != payload.branch {
                 // Do not combine histories from branches. The companion init
                 // tail plus its cursor is a new ordered anchor.
                 conversationWasReset = true
-                conversationMessages = init.tail
-            } else if !conversationMessages.isEmpty, !sharesMessageID(conversationMessages, init.tail) {
+                conversationMessages = payload.tail
+            } else if !conversationMessages.isEmpty, !sharesMessageID(conversationMessages, payload.tail) {
                 // A reconnect tail that has no safe overlap cannot be placed
                 // relative to our REST page. Replace rather than claim order.
                 conversationWasReset = true
-                conversationMessages = init.tail
+                conversationMessages = payload.tail
             } else {
-                conversationMessages = mergeLiveTail(init.tail, into: conversationMessages)
+                conversationMessages = mergeLiveTail(payload.tail, into: conversationMessages)
             }
-            conversationBranch = init.branch
-            if init.hasOlder, let cursor = init.olderCursor, !cursor.isEmpty {
+            conversationBranch = payload.branch
+            if payload.hasOlder, let cursor = payload.olderCursor, !cursor.isEmpty {
                 // This anchor is generated with exactly the displayed tail and
                 // is therefore authoritative over a concurrently loaded page.
                 conversationCursor = cursor

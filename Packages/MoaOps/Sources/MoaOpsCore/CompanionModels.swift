@@ -245,10 +245,10 @@ public struct ConversationLiveState: Equatable, Sendable {
 
     public mutating func apply(_ event: ConversationLiveEvent) {
         switch event {
-        case let .initial(init):
-            self.messages = merge(init.tail, into: self.messages)
-            self.state = init.state
-            historyIsBounded = init.hasOlder
+        case let .initial(payload):
+            self.messages = merge(payload.tail, into: self.messages)
+            self.state = payload.state
+            historyIsBounded = payload.hasOlder
             partialText = ""
         case let .assistantDelta(delta, _):
             partialText += delta

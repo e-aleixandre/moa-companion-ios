@@ -61,6 +61,7 @@ public enum PulseSectionKind: Int, Equatable, Sendable {
     case needsAttention
     case changes
     case inProgress
+    case staleWork
     case onTrack
 
     public var title: String {
@@ -68,6 +69,7 @@ public enum PulseSectionKind: Int, Equatable, Sendable {
         case .needsAttention: "Necesita de ti"
         case .changes: "Cambios desde tu última visita"
         case .inProgress: "En marcha"
+        case .staleWork: "Sin observación reciente"
         case .onTrack: "En buen camino"
         }
     }
@@ -325,6 +327,7 @@ public enum PresentationMapper {
             (.needsAttention, pulse.needsAttention),
             (.changes, pulse.changes.requested ? pulse.changes.items : []),
             (.inProgress, pulse.inProgress),
+            (.staleWork, pulse.staleWork),
             (.onTrack, pulse.onTrack),
         ]
         return candidates.compactMap { kind, items in
@@ -377,6 +380,7 @@ public enum PresentationMapper {
         case "permission_needed": return ("Permiso necesario", "Moa espera una decisión o permiso.")
         case "verification_failed": return ("Verificación fallida", "La comprobación conocida no pasó.")
         case "in_progress": return ("En marcha", "La sesión sigue trabajando.")
+        case "stale_work": return ("Sin observación reciente", "No hay una observación segura reciente de este trabajo activo.")
         case "on_track": return ("En buen camino", "El trabajo sigue en marcha con verificación superada.")
         case "run_started": return ("Trabajo iniciado", "Se registró el inicio de una ejecución.")
         case "run_ended": return ("Trabajo finalizado", "Se registró el final de una ejecución.")

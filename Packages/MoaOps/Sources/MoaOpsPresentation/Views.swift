@@ -65,8 +65,10 @@ public struct MoaOpsRootView: View {
                     .presentationDetents([.medium, .large])
             }
             .onChange(of: scenePhase) { phase in
-                guard phase == .active else { return }
-                Task { await model.refreshOnForeground() }
+                model.setForegroundActive(phase == .active)
+            }
+            .onAppear {
+                model.setForegroundActive(scenePhase == .active)
             }
         }
     }
@@ -149,12 +151,19 @@ private struct PulseHomeView: View {
                     .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             if pulse.changes.hasMore {
-                Label("Hay más cambios retenidos. Actualiza para ver la siguiente página.", systemImage: "rectangle.3.group.bubble")
+                Label("Hay más cambios por cargar. Actualiza para ver la siguiente página.", systemImage: "rectangle.3.group.bubble")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
             if sections.isEmpty {
                 AllClearView(isStale: isStale)
+            } else if summary.staleWork > 0 {
+                Label("Hay trabajo sin observación reciente", systemImage: "questionmark.circle.fill")
+                    .font(.title3.bold())
+                    .foregroundStyle(.orange)
+                Text("\(summary.staleWork) \(summary.staleWork == 1 ? "sesión no tiene" : "sesiones no tienen") una observación segura reciente. No confirmamos que todo esté en orden.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
             } else {
                 ForEach(sections) { section in
                     PulseSectionView(section: section, onSelect: onSelect)

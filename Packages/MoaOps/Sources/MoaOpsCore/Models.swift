@@ -17,6 +17,7 @@ public struct OpsPulse: Codable, Equatable, Sendable {
     public let summary: OpsPulseSummary
     public let needsAttention: [OpsPulseItem]
     public let inProgress: [OpsPulseItem]
+    public let staleWork: [OpsPulseItem]
     public let onTrack: [OpsPulseItem]
     public let changes: OpsPulseChanges
 
@@ -25,6 +26,7 @@ public struct OpsPulse: Codable, Equatable, Sendable {
         case summary
         case needsAttention = "needs_attention"
         case inProgress = "in_progress"
+        case staleWork = "stale_work"
         case onTrack = "on_track"
         case changes
     }
@@ -33,12 +35,14 @@ public struct OpsPulse: Codable, Equatable, Sendable {
 public struct OpsPulseSummary: Codable, Equatable, Sendable {
     public let needsAttention: Int
     public let inProgress: Int
+    public let staleWork: Int
     public let onTrack: Int
     public let changes: Int
 
     enum CodingKeys: String, CodingKey {
         case needsAttention = "needs_attention"
         case inProgress = "in_progress"
+        case staleWork = "stale_work"
         case onTrack = "on_track"
         case changes
     }

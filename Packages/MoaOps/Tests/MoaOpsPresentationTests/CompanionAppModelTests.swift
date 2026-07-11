@@ -59,8 +59,8 @@ final class CompanionAppModelTests: XCTestCase {
     func testNonOverlappingReconnectTailResetsRatherThanClaimingOrder() async throws {
         let session = activeSession()
         let recent = page(sessionID: "s1", newestFirst: ["m3", "m2"], cursor: "old")
-        let init = ConversationLiveEvent.initial(.init(sessionID: "s1", title: "Entrega", branch: .init(leafID: "leaf", source: "active"), state: "idle", tail: messages(["new1", "new2"]), olderCursor: "tail-old", hasOlder: true))
-        let service = CompanionServiceStub(sessions: [session], pages: [.success(recent)], liveEvents: [init])
+        let reconnectTail = ConversationLiveEvent.initial(.init(sessionID: "s1", title: "Entrega", branch: .init(leafID: "leaf", source: "active"), state: "idle", tail: messages(["new1", "new2"]), olderCursor: "tail-old", hasOlder: true))
+        let service = CompanionServiceStub(sessions: [session], pages: [.success(recent)], liveEvents: [reconnectTail])
         let model = model(service)
 
         await model.connect()

@@ -172,7 +172,9 @@ extension JSONDecoder {
             if let date = ISO8601DateFormatter.moaOpsFractional.date(from: value) ?? ISO8601DateFormatter.moaOps.date(from: value) {
                 return date
             }
-            throw DecodingError.dataCorruptedError(in: decoder, debugDescription: "Expected an RFC 3339 timestamp")
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Expected an RFC 3339 timestamp")
+            )
         }
         return decoder
     }()

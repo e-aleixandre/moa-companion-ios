@@ -64,8 +64,10 @@ public actor MoaOpsWebSocketClient {
         let id = UUID()
         return AsyncStream { continuation in
             continuations[id] = continuation
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.removeContinuation(id) }
+            continuation.onTermination = { [weak self, id] _ in
+                Task { @Sendable [weak self, id] in
+                    await self?.removeContinuation(id)
+                }
             }
         }
     }

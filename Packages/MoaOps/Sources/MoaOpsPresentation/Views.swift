@@ -64,7 +64,7 @@ public struct MoaOpsRootView: View {
                 PulseDetailSheet(card: card, model: model)
                     .presentationDetents([.medium, .large])
             }
-            .onChange(of: scenePhase) { _, phase in
+            .onChange(of: scenePhase) { phase in
                 guard phase == .active else { return }
                 Task { await model.refreshOnForeground() }
             }

@@ -33,7 +33,7 @@ public struct MoaOpsRootView: View {
                     if let detail = model.selectedSessionDetail {
                         SessionDetailView(detail: detail)
                     } else if model.snapshot != nil {
-                        ContentUnavailableView("Select a session", systemImage: "rectangle.stack")
+                        EmptySessionSelectionView()
                     }
                     DirectedInstructionComposer(model: model)
                 }
@@ -57,7 +57,9 @@ public struct ServerConfigurationView: View {
         GroupBox("Server") {
             HStack {
                 TextField("https://moa.example", text: $model.serverURLText)
+#if os(iOS)
                     .textInputAutocapitalization(.never)
+#endif
                     .autocorrectionDisabled()
                 Button(model.isTestingConnection ? "Testing…" : "Test connection") {
                     Task { await model.testConnection() }
@@ -65,6 +67,22 @@ public struct ServerConfigurationView: View {
                 .disabled(model.isTestingConnection)
             }
         }
+    }
+}
+
+private struct EmptySessionSelectionView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "rectangle.stack")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("Select a session")
+                .font(.headline)
+            Text("Choose a session from the sidebar to view its details.")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
     }
 }
 

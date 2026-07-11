@@ -72,6 +72,58 @@ final class MoaOpsPresentationTests: XCTestCase {
         XCTAssertEqual(sent.completionNotice, "Delivery is not proof of completion. Check verified status for progress.")
     }
 
+    func testPulseSectionsKeepInboxPriorityAndKnownVerificationOnly() throws {
+        let pulse = try pulse(generatedAt: Date())
+
+        let sections = PresentationMapper.pulseSections(for: pulse)
+        let attention = try XCTUnwrap(sections.first)
+        let attentionCard = try XCTUnwrap(attention.cards.first)
+
+        XCTAssertEqual(sections.map(\.kind), [.needsAttention, .changes, .inProgress, .onTrack])
+        XCTAssertEqual(attentionCard.category, "Permiso necesario")
+        XCTAssertNil(attentionCard.verification, "Unknown must never become a displayed status")
+        XCTAssertEqual(attentionCard.facts.map(\.provenance), ["Derivado", "Observado"])
+        XCTAssertEqual(attentionCard.instructionTarget, PulseInstructionTarget(id: "directed-s1", title: "Release", project: "/work/release"))
+    }
+
+    @MainActor
+    func testPulseRetentionGapRetriesOnceWithoutCursorAndThenPersistsRenderedCursor() async throws {
+        let cursor = Date().addingTimeInterval(-60)
+        let generatedAt = Date()
+        let store = CursorStore(cursor: cursor)
+        let service = PulseServiceStub(pulseResults: [.failure(.httpStatus(code: 410, retryAfter: nil)), .success(try pulse(generatedAt: generatedAt))])
+        let model = MoaOpsAppModel(
+            serverURLText: "https://ops.example",
+            cursorStore: store,
+            serviceFactory: { _ in service }
+        )
+
+        await model.testConnection()
+
+        XCTAssertEqual(service.requestedCursors, [cursor, nil])
+        XCTAssertEqual(store.lastSeen(), model.pulse?.generatedAt)
+        XCTAssertTrue(model.historyUnavailable)
+        XCTAssertNotNil(model.pulse)
+    }
+
+    @MainActor
+    func testInstructionUsesOnlyPulseSuppliedTargetBinding() async throws {
+        let service = PulseServiceStub(pulseResults: [.success(try pulse(generatedAt: Date()))])
+        let model = MoaOpsAppModel(
+            serverURLText: "https://ops.example",
+            cursorStore: CursorStore(cursor: nil),
+            serviceFactory: { _ in service }
+        )
+        await model.testConnection()
+        let card = try XCTUnwrap(model.pulseSections.first?.cards.first)
+
+        model.beginInstruction(for: card)
+        await model.submitInstruction(text: "Continúa con la entrega")
+
+        XCTAssertEqual(service.submittedInstructions.map(\.target), ["directed-s1"])
+        XCTAssertEqual(model.instructionReceipt?.message, "Delivered to Release — steered")
+    }
+
     private func askResponse(kind: String, includesBriefing: Bool) throws -> OpsAskResponse {
         let briefing = includesBriefing ? ",\"briefing\":{\"sessions\":[{\"id\":\"known-session\",\"title\":\"Known\",\"presence\":\"active\",\"lifecycle\":\"running\",\"activity\":\"running\",\"jobs\":{\"subagents\":0,\"bash\":0},\"verification\":\"passed\"}],\"blockers\":[],\"spoken\":\"Known is running.\"}" : ""
         return try JSONDecoder.moaOps.decode(OpsAskResponse.self, from: Data("{\"kind\":\"\(kind)\"\(briefing)}".utf8))
@@ -93,4 +145,51 @@ final class MoaOpsPresentationTests: XCTestCase {
             ])
         ])
     }
+
+    private func pulse(generatedAt: Date) throws -> OpsPulse {
+        let timestamp = ISO8601DateFormatter.moaOpsFractional.string(from: generatedAt)
+        return try JSONDecoder.moaOps.decode(OpsPulse.self, from: Data("""
+        {"generated_at":"\(timestamp)","summary":{"needs_attention":1,"in_progress":1,"on_track":1,"changes":1},"needs_attention":[{"id":"attention","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"permission_needed","priority":2,"lifecycle":"running","activity":"permission","verification":"unknown","observed_at":"\(timestamp)","freshness":"fresh","facts":[{"kind":"attention_reason","value":"permission_needed","provenance":"derived"},{"kind":"activity","value":"permission","provenance":"observed"}],"directed_instruction":{"target_id":"directed-s1"}}],"in_progress":[{"id":"progress","session":{"id":"s2","title":"Build","project":"/work/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[]}],"on_track":[{"id":"track","session":{"id":"s3","title":"Tests","project":"/work/tests"},"category":"on_track","lifecycle":"running","activity":"running","verification":"passed","freshness":"fresh","facts":[]}],"changes":{"requested":true,"since":"\(timestamp)","until":"\(timestamp)","items":[{"id":"change","session":{"id":"s1","title":"Release","project":"/work/release"},"category":"run_started","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"milestone","value":"run_started","provenance":"observed"}]}],"truncated":false}}
+        """.utf8))
+    }
+}
+
+private final class CursorStore: PulseCursorStore {
+    private var value: Date?
+
+    init(cursor: Date?) { value = cursor }
+    func lastSeen() -> Date? { value }
+    func save(lastSeen: Date) { value = lastSeen }
+    func clear() { value = nil }
+}
+
+private final class PulseServiceStub: MoaOpsPresentationService, @unchecked Sendable {
+    var pulseResults: [Result<OpsPulse, MoaOpsClientError>]
+    private(set) var requestedCursors: [Date?] = []
+    private(set) var submittedInstructions: [OpsInstructionRequest] = []
+
+    init(pulseResults: [Result<OpsPulse, MoaOpsClientError>]) {
+        self.pulseResults = pulseResults
+    }
+
+    func loadPulse(since: Date?) async throws -> OpsPulse {
+        requestedCursors.append(since)
+        guard !pulseResults.isEmpty else { throw MoaOpsClientError.transport }
+        return try pulseResults.removeFirst().get()
+    }
+
+    func loadOverview() async throws -> OpsSnapshot { throw MoaOpsClientError.transport }
+    func loadSitrep() async throws -> OpsBriefing { throw MoaOpsClientError.transport }
+    func loadBlockers() async throws -> OpsBriefing { throw MoaOpsClientError.transport }
+    func ask(_ question: OpsAskRequest) async throws -> OpsAskResponse { throw MoaOpsClientError.transport }
+    func submitInstruction(_ instruction: OpsInstructionRequest) async throws -> OpsInstructionResponse {
+        submittedInstructions.append(instruction)
+        return try JSONDecoder.moaOps.decode(OpsInstructionResponse.self, from: Data("""
+        {"action":"steered","target":{"id":"directed-s1","title":"Release","project":"/work/release"}}
+        """.utf8))
+    }
+    func startUpdates() async {}
+    func stopUpdates() async {}
+    func snapshotUpdates() async -> AsyncStream<OpsSnapshotUpdate> { AsyncStream { $0.finish() } }
+    func webSocketState() async -> OpsWebSocketState { .stopped }
 }

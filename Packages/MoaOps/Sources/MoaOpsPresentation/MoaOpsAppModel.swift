@@ -7,86 +7,57 @@ public final class MoaOpsAppModel: ObservableObject {
     public typealias ServiceFactory = @Sendable (URL) throws -> any MoaOpsPresentationService
 
     @Published public var serverURLText: String
-    @Published public private(set) var snapshot: OpsSnapshot?
-    @Published public private(set) var sitrep: OpsBriefing?
-    @Published public private(set) var blockers: OpsBriefing?
-    @Published public private(set) var connection: OpsConnectionState = .disconnected
+    @Published public private(set) var pulse: OpsPulse?
     @Published public private(set) var isLoading = false
     @Published public private(set) var isTestingConnection = false
-    @Published public private(set) var isSnapshotStale = true
     @Published public private(set) var userMessage: String?
+    @Published public private(set) var historyUnavailable = false
+    @Published public private(set) var activeInstructionTarget: PulseInstructionTarget?
+    @Published public private(set) var instructionReceipt: OpsInstructionReceipt?
+    @Published public private(set) var isSendingInstruction = false
     @Published public var askText = ""
     @Published public private(set) var askHistory: [OpsAskHistoryEntry] = []
     @Published public private(set) var askFeedback: OpsAskFeedback?
     @Published public private(set) var isAsking = false
-    @Published public var selectedSessionID: String?
-    @Published public var instructionTargetID: String?
-    @Published public private(set) var instructionWasSent = false
-    @Published public private(set) var instructionReceipt: OpsInstructionReceipt?
 
     private let serviceFactory: ServiceFactory
+    private let cursorStore: PulseCursorStore
     private var service: (any MoaOpsPresentationService)?
-    private var updatesTask: Task<Void, Never>?
-    private var stateTask: Task<Void, Never>?
-    private var lastSnapshotAt: Date?
-    private var updateGeneration = UUID()
-    private var connectionAttemptID = UUID()
+    private let maximumCursorAge: TimeInterval = 31 * 24 * 60 * 60
 
-    public init(serverURLText: String = "", serviceFactory: @escaping ServiceFactory = { try MoaOpsLiveService(baseURL: $0) }) {
+    public init(
+        serverURLText: String = "",
+        cursorStore: PulseCursorStore = UserDefaultsPulseCursorStore(),
+        serviceFactory: @escaping ServiceFactory = { try MoaOpsLiveService(baseURL: $0) }
+    ) {
         self.serverURLText = serverURLText
+        self.cursorStore = cursorStore
         self.serviceFactory = serviceFactory
     }
 
-    deinit {
-        updatesTask?.cancel()
-        stateTask?.cancel()
+    public var pulseSections: [PulseSection] {
+        guard let pulse else { return [] }
+        return PresentationMapper.pulseSections(for: pulse)
     }
 
-    public var sessionTargets: [OpsSessionTarget] {
-        PresentationMapper.sessionTargets(in: snapshot)
-    }
-
-    public var selectedSessionDetail: OpsSessionDetail? {
-        guard let selectedSessionID else { return nil }
-        return PresentationMapper.detail(sessionID: selectedSessionID, in: snapshot)
-    }
-
-    public var suggestedAskPrompts: [String] {
-        var prompts = [
-            "Give me a verified sitrep.",
-            "What verified blockers need attention?",
-        ]
-        if let detail = selectedSessionDetail {
-            prompts.append("What is the verified status of \(detail.title)?")
-        }
-        return prompts
+    public var isAllClear: Bool {
+        guard let pulse else { return false }
+        return pulse.summary.needsAttention == 0
     }
 
     public func testConnection() async {
         guard let configuration = validateConfiguration() else { return }
-        let attemptID = UUID()
-        connectionAttemptID = attemptID
+        historyUnavailable = false
         isTestingConnection = true
-        instructionWasSent = false
-        defer {
-            if connectionAttemptID == attemptID { isTestingConnection = false }
-        }
-
+        defer { isTestingConnection = false }
         do {
-            let service = try serviceFactory(configuration.baseURL)
-            async let loadedSnapshot = service.loadOverview()
-            async let loadedSitrep = service.loadSitrep()
-            async let loadedBlockers = service.loadBlockers()
-            let (snapshot, sitrep, blockers) = try await (loadedSnapshot, loadedSitrep, loadedBlockers)
-            guard connectionAttemptID == attemptID else { return }
-            install(snapshot: snapshot, sitrep: sitrep, blockers: blockers, service: service)
+            let newService = try serviceFactory(configuration.baseURL)
+            let loadedPulse = try await loadPulseWithRecovery(using: newService)
+            render(loadedPulse)
+            service = newService
             userMessage = nil
-            isTestingConnection = false
         } catch {
-            guard connectionAttemptID == attemptID else { return }
-            connection = .disconnected
-            isSnapshotStale = true
-            userMessage = PresentationMapper.userMessage(for: error)
+            userMessage = pulseMessage(for: error)
         }
     }
 
@@ -95,61 +66,62 @@ public final class MoaOpsAppModel: ObservableObject {
             await testConnection()
             return
         }
+        historyUnavailable = false
         isLoading = true
         defer { isLoading = false }
         do {
-            async let loadedSnapshot = service.loadOverview()
-            async let loadedSitrep = service.loadSitrep()
-            async let loadedBlockers = service.loadBlockers()
-            let (newSnapshot, newSitrep, newBlockers) = try await (loadedSnapshot, loadedSitrep, loadedBlockers)
-            apply(snapshot: newSnapshot)
-            sitrep = newSitrep
-            blockers = newBlockers
+            let loadedPulse = try await loadPulseWithRecovery(using: service)
+            render(loadedPulse)
             userMessage = nil
         } catch {
-            isSnapshotStale = true
-            userMessage = PresentationMapper.userMessage(for: error)
+            userMessage = pulseMessage(for: error)
         }
     }
 
     public func disconnect() {
-        updateGeneration = UUID()
-        connectionAttemptID = UUID()
-        updatesTask?.cancel()
-        stateTask?.cancel()
-        updatesTask = nil
-        stateTask = nil
-        let currentService = service
         service = nil
-        connection = .disconnected
-        isSnapshotStale = true
-        Task { await currentService?.stopUpdates() }
+        pulse = nil
+        activeInstructionTarget = nil
+        instructionReceipt = nil
+        historyUnavailable = false
+    }
+
+    /// Opens the composer only when the current server Pulse item supplied an
+    /// exact target id. There is no target text field or local matching path.
+    public func beginInstruction(for card: PulseCard) {
+        guard let target = card.instructionTarget else { return }
+        activeInstructionTarget = target
+        instructionReceipt = nil
+        userMessage = nil
+    }
+
+    public func closeInstruction() {
+        activeInstructionTarget = nil
+        instructionReceipt = nil
     }
 
     public func submitInstruction(text: String) async {
-        guard let service,
-              let targetID = instructionTargetID,
-              let target = sessionTargets.first(where: { $0.id == targetID }) else {
-            userMessage = "Choose a current session before sending an instruction."
+        guard let service, let target = activeInstructionTarget else {
+            userMessage = "Actualiza Pulse y abre una tarjeta con una instrucción disponible."
             return
         }
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
-            userMessage = "Write an instruction before sending it."
+            userMessage = "Escribe una instrucción antes de enviarla."
             return
         }
         guard trimmedText.count <= 4_000 else {
-            userMessage = "Keep instructions to 4,000 characters or fewer."
+            userMessage = "La instrucción debe tener 4.000 caracteres o menos."
             return
         }
-        instructionWasSent = false
+        isSendingInstruction = true
+        defer { isSendingInstruction = false }
         do {
-            let response = try await service.submitInstruction(.init(target: targetID, text: trimmedText))
-            instructionWasSent = true
+            let response = try await service.submitInstruction(.init(target: target.id, text: trimmedText))
             instructionReceipt = OpsInstructionReceipt(title: target.title, action: response.action)
             userMessage = nil
         } catch {
-            userMessage = PresentationMapper.userMessage(for: error)
+            userMessage = pulseMessage(for: error)
         }
     }
 
@@ -159,15 +131,10 @@ public final class MoaOpsAppModel: ObservableObject {
             return
         }
         let question = askText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else {
+        guard !question.isEmpty, question.count <= 1_000 else {
             askFeedback = .unsupported
             return
         }
-        guard question.count <= 1_000 else {
-            askFeedback = .unsupported
-            return
-        }
-
         isAsking = true
         askFeedback = nil
         defer { isAsking = false }
@@ -184,79 +151,79 @@ public final class MoaOpsAppModel: ObservableObject {
         }
     }
 
-    public func useSuggestedAskPrompt(_ prompt: String) {
-        askText = prompt
-        askFeedback = nil
-    }
-
     public func clearMessage() {
         userMessage = nil
+    }
+
+    private func loadPulseWithRecovery(using service: any MoaOpsPresentationService) async throws -> OpsPulse {
+        let cursor = usableCursor()
+        do {
+            return try await service.loadPulse(since: cursor)
+        } catch let error as MoaOpsClientError {
+            guard case let .httpStatus(code, _) = error, code == 410, cursor != nil else { throw error }
+            // A 410 means the server no longer retains this interval. Retry
+            // once without `since`, then explicitly show that changes were lost.
+            cursorStore.clear()
+            let current = try await service.loadPulse(since: nil)
+            historyUnavailable = true
+            return current
+        }
+    }
+
+    private func render(_ loadedPulse: OpsPulse) {
+        pulse = loadedPulse
+        // `pulse` has been installed before the only persisted value is
+        // updated. This is a cursor only, never a response or a secret.
+        if isSafeCursor(loadedPulse.generatedAt) {
+            cursorStore.save(lastSeen: loadedPulse.generatedAt)
+        }
+    }
+
+    private func usableCursor() -> Date? {
+        guard let cursor = cursorStore.lastSeen(), isSafeCursor(cursor) else {
+            if cursorStore.lastSeen() != nil {
+                cursorStore.clear()
+                historyUnavailable = true
+            }
+            return nil
+        }
+        return cursor
+    }
+
+    private func isSafeCursor(_ date: Date) -> Bool {
+        guard !date.timeIntervalSince1970.isNaN else { return false }
+        let now = Date()
+        return date <= now.addingTimeInterval(5 * 60) && now.timeIntervalSince(date) <= maximumCursorAge
     }
 
     private func validateConfiguration() -> ServerConfiguration? {
         do {
             return try ServerConfiguration(urlText: serverURLText)
-        } catch let error as ServerConfigurationError {
-            userMessage = error.userMessage
-            return nil
         } catch {
-            userMessage = "The server address is not valid."
+            userMessage = "Introduce una dirección http:// o https:// válida."
             return nil
         }
     }
 
-    private func install(snapshot: OpsSnapshot, sitrep: OpsBriefing, blockers: OpsBriefing, service: any MoaOpsPresentationService) {
-        disconnect()
-        self.service = service
-        apply(snapshot: snapshot)
-        self.sitrep = sitrep
-        self.blockers = blockers
-        if selectedSessionID == nil { selectedSessionID = sessionTargets.first?.id }
-        if instructionTargetID == nil { instructionTargetID = sessionTargets.first?.id }
-        startUpdates(for: service)
-    }
-
-    private func apply(snapshot: OpsSnapshot) {
-        self.snapshot = snapshot
-        lastSnapshotAt = Date()
-        isSnapshotStale = false
-        retainKnownSelection()
-    }
-
-    private func retainKnownSelection() {
-        let targets = sessionTargets
-        if let selectedSessionID, !targets.contains(where: { $0.id == selectedSessionID }) {
-            self.selectedSessionID = targets.first?.id
+    private func pulseMessage(for error: Error) -> String {
+        guard let error = error as? MoaOpsClientError else {
+            return "No se pudo actualizar Pulse. Comprueba la conexión e inténtalo de nuevo."
         }
-        if let instructionTargetID, !targets.contains(where: { $0.id == instructionTargetID }) {
-            self.instructionTargetID = targets.first?.id
-        }
-    }
-
-    private func startUpdates(for service: any MoaOpsPresentationService) {
-        let generation = updateGeneration
-        updatesTask = Task { [weak self, service] in
-            await service.startUpdates()
-            let updates = await service.snapshotUpdates()
-            for await update in updates {
-                guard !Task.isCancelled else { return }
-                guard self?.updateGeneration == generation else { return }
-                self?.apply(snapshot: update.snapshot)
+        switch error {
+        case .authentication:
+            return "El servidor no aceptó esta conexión."
+        case let .httpStatus(code, _):
+            switch code {
+            case 401, 403: return "No tienes acceso a Pulse en este servidor."
+            case 404: return "Este servidor todavía no ofrece la API Pulse."
+            case 410: return "El historial de cambios ya no está disponible."
+            case 429: return "El servidor está limitando las solicitudes. Prueba dentro de un momento."
+            default: return "El servidor no pudo actualizar Pulse. Prueba más tarde."
             }
+        case .instructionConflict:
+            return "La sesión cambió. Abre de nuevo la tarjeta antes de enviar la instrucción."
+        default:
+            return "No se pudo actualizar Pulse. Comprueba la conexión e inténtalo de nuevo."
         }
-        stateTask = Task { [weak self, service] in
-            while !Task.isCancelled {
-                guard self?.updateGeneration == generation else { return }
-                let state = await service.webSocketState()
-                guard self?.updateGeneration == generation else { return }
-                self?.updateConnection(state)
-                try? await Task.sleep(for: .seconds(5))
-            }
-        }
-    }
-
-    private func updateConnection(_ webSocketState: OpsWebSocketState) {
-        connection = OpsConnectionState(webSocketState: webSocketState)
-        isSnapshotStale = PresentationMapper.isStale(lastSnapshotAt: lastSnapshotAt, connection: connection, now: Date())
     }
 }

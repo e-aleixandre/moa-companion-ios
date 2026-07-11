@@ -28,7 +28,7 @@ xcodebuild \
 ### MoaOpsCore
 
 - Codable models for the server's safe Ops snapshot, sitrep/blocker/status briefings, directed-instruction request, success, and disambiguation response JSON.
-- `MoaOpsClient`, an actor-backed `URLSession` REST client for `GET /api/ops/overview`, the sitrep/blockers/status Ops queries, and `POST /api/ops/instruction`.
+- `MoaOpsClient`, an actor-backed `URLSession` REST client for the primary `GET /api/ops/pulse[?since=...]` inbox, legacy verified Ops queries, and `POST /api/ops/instruction`.
 - Per-request `X-Request-ID` values, plus the same ID in an instruction's `request_id` JSON field. Callers can supply an ID to safely retry an instruction.
 - `MoaOpsWebSocketClient`, a read-only `URLSessionWebSocketTask` abstraction for `/api/ops/ws`. `init` and increasing-version `snapshot` envelopes replace local state atomically; it sends no application messages and reconnects under the supplied bounded policy.
 
@@ -36,10 +36,11 @@ xcodebuild \
 
 `MoaOpsPresentation` is a SwiftUI presentation library above `MoaOpsCore`, suitable for embedding in a future iOS or macOS app. It provides:
 
-- `MoaOpsAppModel`, a `@MainActor` observable model with explicit loading, connection testing, error, reconnect, and stale-snapshot states.
+- `MoaOpsAppModel`, a `@MainActor` observable model with explicit Pulse loading, connection testing, and safe error states.
+- A Spanish-first Pulse inbox: attention first, then retained changes, with active work as a secondary section. It persists only the last successfully rendered non-secret `generated_at` cursor. A `410 Gone` retention gap is retried once without `since` and is shown as unavailable history.
 - Server URL validation and a test-connection action. Configuration is only held in the model; the library persists neither URLs nor credentials.
-- Safe project/session navigation, verified sitrep and blocker views, and a bounded session-detail view.
-- A directed-instruction composer whose target is a `Picker` populated only from the currently loaded snapshot. It has no free-form or fuzzy target field.
+- Card detail sheets with bounded facts and observed/derived provenance; no raw transcripts, logs, or server error bodies are rendered.
+- A directed-instruction composer opened only from a current Pulse card with a server-supplied `target_id`. It confirms the exact resolved title and has no free-form or fuzzy target field.
 - `MoaOpsLiveService`, which adapts the REST and read-only WebSocket facilities in `MoaOpsCore`, plus `MoaOpsPresentationService` for deterministic host integration and tests.
 
 The presentation layer intentionally maps failures to short user-facing messages. It does not render raw server error bodies, logs, or thrown-error descriptions.
@@ -58,7 +59,7 @@ configuration.httpCookieStorage = HTTPCookieStorage.shared
 let session = URLSession(configuration: configuration)
 let auth = CookieTokenBootstrap(token: suppliedAtRuntime)
 let client = try MoaOpsClient(baseURL: serverURL, session: session, authentication: auth)
-let snapshot = try await client.overview()
+let pulse = try await client.pulse()
 ```
 
 The server remains authoritative: the client only renders safe snapshots and requests directed instructions. It does not execute agents or make local production decisions.

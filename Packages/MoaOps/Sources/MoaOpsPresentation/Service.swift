@@ -2,6 +2,7 @@ import Foundation
 import MoaOpsCore
 
 public protocol MoaOpsPresentationService: Sendable {
+    func loadPulse(since: Date?) async throws -> OpsPulse
     func loadOverview() async throws -> OpsSnapshot
     func loadSitrep() async throws -> OpsBriefing
     func loadBlockers() async throws -> OpsBriefing
@@ -22,6 +23,7 @@ public actor MoaOpsLiveService: MoaOpsPresentationService {
         webSocket = try MoaOpsWebSocketClient(baseURL: baseURL, session: session, authentication: authentication)
     }
 
+    public func loadPulse(since: Date?) async throws -> OpsPulse { try await client.pulse(since: since) }
     public func loadOverview() async throws -> OpsSnapshot { try await client.overview() }
     public func loadSitrep() async throws -> OpsBriefing { try await client.sitrep() }
     public func loadBlockers() async throws -> OpsBriefing { try await client.blockers() }

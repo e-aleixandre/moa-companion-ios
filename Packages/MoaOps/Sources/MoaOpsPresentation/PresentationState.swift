@@ -1,6 +1,85 @@
 import Foundation
 import MoaOpsCore
 
+public protocol PulseCursorStore: AnyObject {
+    func lastSeen() -> Date?
+    func save(lastSeen: Date)
+    func clear()
+}
+
+/// Stores only the non-secret Pulse cursor. URLs, credentials, instruction
+/// text, and server payloads are intentionally not persisted.
+public final class UserDefaultsPulseCursorStore: PulseCursorStore {
+    private let defaults: UserDefaults
+    private let key: String
+
+    public init(defaults: UserDefaults = .standard, key: String = "moa.ops.pulse.lastSeen") {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    public func lastSeen() -> Date? { defaults.object(forKey: key) as? Date }
+    public func save(lastSeen: Date) { defaults.set(lastSeen, forKey: key) }
+    public func clear() { defaults.removeObject(forKey: key) }
+}
+
+public struct PulseInstructionTarget: Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let project: String
+
+    public init(id: String, title: String, project: String) {
+        self.id = id
+        self.title = title
+        self.project = project
+    }
+}
+
+public struct PulseFactDisplay: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let provenance: String
+    public let at: Date?
+}
+
+public struct PulseCard: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let project: String
+    public let category: String
+    public let categoryDetail: String
+    public let lifecycle: String
+    public let activity: String
+    public let verification: String?
+    public let freshness: String
+    public let observedAt: Date?
+    public let facts: [PulseFactDisplay]
+    public let instructionTarget: PulseInstructionTarget?
+}
+
+public enum PulseSectionKind: Int, Equatable, Sendable {
+    case needsAttention
+    case changes
+    case inProgress
+    case onTrack
+
+    public var title: String {
+        switch self {
+        case .needsAttention: "Necesita de ti"
+        case .changes: "Cambios desde tu última visita"
+        case .inProgress: "En marcha"
+        case .onTrack: "En buen camino"
+        }
+    }
+}
+
+public struct PulseSection: Identifiable, Equatable, Sendable {
+    public let kind: PulseSectionKind
+    public let cards: [PulseCard]
+
+    public var id: Int { kind.rawValue }
+}
+
 public struct ServerConfiguration: Equatable, Sendable {
     public let baseURL: URL
 
@@ -230,4 +309,129 @@ public enum PresentationMapper {
     static func label(for lifecycle: OpsLifecycle) -> String { lifecycle.rawValue.capitalized }
     static func label(for activity: OpsActivity) -> String { activity.rawValue.capitalized }
     static func label(for state: OpsVerificationState) -> String { state.rawValue.capitalized }
+
+    public static func pulseSections(for pulse: OpsPulse) -> [PulseSection] {
+        let candidates: [(PulseSectionKind, [OpsPulseItem])] = [
+            (.needsAttention, pulse.needsAttention),
+            (.changes, pulse.changes.requested ? pulse.changes.items : []),
+            (.inProgress, pulse.inProgress),
+            (.onTrack, pulse.onTrack),
+        ]
+        return candidates.compactMap { kind, items in
+            let cards = items.compactMap(pulseCard)
+            return cards.isEmpty ? nil : PulseSection(kind: kind, cards: cards)
+        }
+    }
+
+    /// Only known, safe enum values are converted to visible copy. This
+    /// prevents a future wire value from becoming a status or a raw error.
+    public static func pulseCard(_ item: OpsPulseItem) -> PulseCard? {
+        guard let category = pulseCategory(item.category) else { return nil }
+        let verification = knownVerificationLabel(item.verification)
+        let facts = Array(item.facts.prefix(3)).enumerated().compactMap { index, fact in
+            pulseFact(fact, id: "\(item.id):\(index)")
+        }
+        let target = item.directedInstruction.map {
+            PulseInstructionTarget(id: $0.targetID, title: item.session.title, project: item.session.project)
+        }
+        return PulseCard(
+            id: item.id,
+            title: item.session.title,
+            project: item.session.project,
+            category: category.title,
+            categoryDetail: category.detail,
+            lifecycle: pulseLifecycle(item.lifecycle),
+            activity: pulseActivity(item.activity),
+            verification: verification,
+            freshness: pulseFreshness(item.freshness),
+            observedAt: item.observedAt,
+            facts: facts,
+            instructionTarget: target
+        )
+    }
+
+    public static func knownVerificationLabel(_ verification: OpsVerificationState?) -> String? {
+        guard let verification else { return nil }
+        switch verification {
+        case .passed: "Verificación superada"
+        case .pending: "Verificación pendiente"
+        case .failed: "Verificación fallida"
+        case .unknown: nil
+        }
+    }
+
+    private static func pulseCategory(_ value: String) -> (title: String, detail: String)? {
+        switch value {
+        case "lifecycle_error": ("Error de ciclo", "La sesión requiere revisión.")
+        case "activity_error": ("Error de actividad", "La actividad necesita atención.")
+        case "permission_needed": ("Permiso necesario", "Moa espera una decisión o permiso.")
+        case "verification_failed": ("Verificación fallida", "La comprobación conocida no pasó.")
+        case "in_progress": ("En marcha", "La sesión sigue trabajando.")
+        case "on_track": ("En buen camino", "El trabajo sigue en marcha con verificación superada.")
+        case "run_started": ("Trabajo iniciado", "Se registró el inicio de una ejecución.")
+        case "run_ended": ("Trabajo finalizado", "Se registró el final de una ejecución.")
+        case "error": ("Error registrado", "Se registró un cambio de error.")
+        case "permission": ("Permiso registrado", "Se registró una solicitud de permiso.")
+        case "ask_user": ("Respuesta solicitada", "Se registró una solicitud para ti.")
+        case "verification": ("Verificación actualizada", "Se registró un cambio de verificación.")
+        default: nil
+        }
+    }
+
+    private static func pulseFact(_ fact: OpsPulseFact, id: String) -> PulseFactDisplay? {
+        let title: String?
+        switch (fact.kind, fact.value) {
+        case ("attention_reason", "lifecycle_error"): title = "Motivo: error de ciclo"
+        case ("attention_reason", "activity_error"): title = "Motivo: error de actividad"
+        case ("attention_reason", "permission_needed"): title = "Motivo: permiso necesario"
+        case ("attention_reason", "verification_failed"): title = "Motivo: verificación fallida"
+        case ("lifecycle", "idle"): title = "Ciclo: en espera"
+        case ("lifecycle", "running"): title = "Ciclo: en ejecución"
+        case ("lifecycle", "stopped"): title = "Ciclo: detenido"
+        case ("lifecycle", "error"): title = "Ciclo: error"
+        case ("activity", "idle"): title = "Actividad: en espera"
+        case ("activity", "running"): title = "Actividad: trabajando"
+        case ("activity", "permission"): title = "Actividad: espera permiso"
+        case ("activity", "error"): title = "Actividad: error"
+        case ("verification", "pending"): title = "Verificación: pendiente"
+        case ("verification", "passed"): title = "Verificación: superada"
+        case ("verification", "failed"): title = "Verificación: fallida"
+        case ("milestone", "run_started"): title = "Hito: trabajo iniciado"
+        case ("milestone", "run_ended"): title = "Hito: trabajo finalizado"
+        case ("milestone", "error"): title = "Hito: error"
+        case ("milestone", "permission"): title = "Hito: permiso"
+        case ("milestone", "ask_user"): title = "Hito: respuesta solicitada"
+        case ("milestone", "verification"): title = "Hito: verificación"
+        default: title = nil
+        }
+        guard let title else { return nil }
+        let provenance = fact.provenance == .observed ? "Observado" : "Derivado"
+        return PulseFactDisplay(id: id, title: title, provenance: provenance, at: fact.at)
+    }
+
+    private static func pulseLifecycle(_ lifecycle: OpsLifecycle) -> String {
+        switch lifecycle {
+        case .idle: "En espera"
+        case .running: "En ejecución"
+        case .stopped: "Detenido"
+        case .error: "Error"
+        }
+    }
+
+    private static func pulseActivity(_ activity: OpsActivity) -> String {
+        switch activity {
+        case .idle: "En espera"
+        case .running: "Trabajando"
+        case .permission: "Espera permiso"
+        case .error: "Error"
+        }
+    }
+
+    private static func pulseFreshness(_ freshness: OpsPulseFreshness) -> String {
+        switch freshness {
+        case .fresh: "Actual"
+        case .stale: "Puede estar desactualizado"
+        case .unknown: "Fecha no disponible"
+        }
+    }
 }

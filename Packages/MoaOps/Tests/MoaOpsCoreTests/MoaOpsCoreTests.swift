@@ -14,6 +14,38 @@ final class MoaOpsCoreTests: XCTestCase {
         XCTAssertNotNil(snapshot.projects[0].sessions[0].lastTransitionAt)
     }
 
+    func testOverviewDecodesEmptyVerificationStateAsUnknown() throws {
+        let data = Data("""
+        {"projects":[{"canonical_cwd":"/work/moa","sessions":[{"id":"s1","title":"Ops","presence":"active","lifecycle":"running","activity":"running","jobs":{"subagents":0,"bash":0},"verification":{"state":""},"milestones":[]}]}]}
+        """.utf8)
+
+        let overview = try JSONDecoder.moaOps.decode(OpsSnapshot.self, from: data)
+
+        XCTAssertEqual(overview.projects[0].sessions[0].verification.state, .unknown)
+    }
+
+    func testOverviewDecodesUnknownFutureVerificationStateAsUnknown() throws {
+        let data = Data("""
+        {"projects":[{"canonical_cwd":"/work/moa","sessions":[{"id":"s1","title":"Ops","presence":"active","lifecycle":"running","activity":"running","jobs":{"subagents":0,"bash":0},"verification":{"state":"in_progress"},"milestones":[]}]}]}
+        """.utf8)
+
+        let overview = try JSONDecoder.moaOps.decode(OpsSnapshot.self, from: data)
+
+        XCTAssertEqual(overview.projects[0].sessions[0].verification.state, .unknown)
+    }
+
+    func testOverviewRejectsUnknownLifecycleAndActivityStates() throws {
+        let invalidLifecycle = Data("""
+        {"projects":[{"canonical_cwd":"/work/moa","sessions":[{"id":"s1","title":"Ops","presence":"active","lifecycle":"future","activity":"running","jobs":{"subagents":0,"bash":0},"verification":{"state":"unknown"},"milestones":[]}]}]}
+        """.utf8)
+        let invalidActivity = Data("""
+        {"projects":[{"canonical_cwd":"/work/moa","sessions":[{"id":"s1","title":"Ops","presence":"active","lifecycle":"running","activity":"future","jobs":{"subagents":0,"bash":0},"verification":{"state":"unknown"},"milestones":[]}]}]}
+        """.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder.moaOps.decode(OpsSnapshot.self, from: invalidLifecycle))
+        XCTAssertThrowsError(try JSONDecoder.moaOps.decode(OpsSnapshot.self, from: invalidActivity))
+    }
+
     func testInstructionEncodingUsesServerKeysAndCallerRequestID() throws {
         let request = OpsInstructionRequest(target: "s1", text: "continue", requestID: "retry-id")
         let object = try JSONSerialization.jsonObject(with: JSONEncoder.moaOps.encode(request)) as? [String: String]

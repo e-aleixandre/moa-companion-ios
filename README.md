@@ -2,6 +2,10 @@
 
 `MoaOpsCore` is the small iOS 17 / Swift 5.9 package boundary for a future Moa companion app. It has no app target, audio implementation, or CarPlay dependency.
 
+## CI
+
+GitHub Actions validates the package on GitHub-hosted macOS 14 for pull requests and pushes to `main` and `feat/**`, running `swift build` and `swift test`. It does not use signing, secrets, or deployment steps.
+
 ## What it contains
 
 - Codable models for the server's safe Ops snapshot, sitrep/blocker/status briefings, directed-instruction request, success, and disambiguation response JSON.

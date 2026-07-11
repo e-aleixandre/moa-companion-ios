@@ -169,7 +169,7 @@ public final class MoaCompanionAppModel: ObservableObject {
         liveTask = Task { [weak self] in
             for await event in stream {
                 guard !Task.isCancelled else { return }
-                await self?.applyLive(event)
+                self?.applyLive(event)
             }
         }
     }

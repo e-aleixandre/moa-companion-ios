@@ -196,7 +196,9 @@ private struct ConversationDetailView: View {
             } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
         .navigationTitle(session.title)
+#if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+#endif
         .task { await model.openConversation(session) }
         .onDisappear { Task { await model.closeConversation() } }
     }
@@ -216,7 +218,7 @@ private struct MessageRow: View {
     let message: ConversationMessage
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(message.role == "user" ? "Tú" : "Moa").font(.caption.bold()).foregroundStyle(message.role == "user" ? .tint : .secondary)
+            Text(message.role == "user" ? "Tú" : "Moa").font(.caption.bold()).foregroundStyle(message.role == "user" ? Color.accentColor : Color.secondary)
             Text(message.text)
             if message.truncated || message.omitted { Text(message.truncated ? "Texto recortado por el servidor." : "Parte no textual omitida por el servidor.").font(.caption2).foregroundStyle(.secondary) }
         }.padding(.vertical, 5)

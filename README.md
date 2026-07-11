@@ -1,6 +1,6 @@
 # Moa Ops companion packages
 
-This repository provides package libraries plus a minimal iOS 17 host app for the Moa companion, targeting iOS 17 and macOS 13 with Swift 5.10. `MoaCompanion.xcodeproj` uses the local `MoaOpsCore` and `MoaOpsPresentation` package products and launches `MoaOpsRootView`. It is intentionally unsigned and has no audio implementation, CarPlay dependency, or deployment configuration.
+This repository provides package libraries plus a minimal iOS 17 host app for the Moa companion, targeting iOS 17 and macOS 13 with Swift 5.10. `MoaCompanion.xcodeproj` uses the local `MoaOpsCore` and `MoaOpsPresentation` package products and launches `MoaOpsRootView`. The app uses automatic signing, so developers select their own Team in Xcode before running on a physical device. The project contains no signing credentials, team identifiers, audio implementation, CarPlay dependency, or deployment configuration.
 
 ## CI
 

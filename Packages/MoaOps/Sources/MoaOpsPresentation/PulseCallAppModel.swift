@@ -64,6 +64,8 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var snapshot: OpsPulse?
     @Published public private(set) var opsSnapshot: OpsSnapshot?
     @Published public private(set) var lastSuccessfulRefreshAt: Date?
+    @Published public private(set) var hasFreshAuthoritativeProjection = false
+    @Published public private(set) var operationsAreAvailable = false
     @Published public private(set) var brief: PulseDeterministicBrief?
     @Published public private(set) var captions: [PulseCallCaption] = []
     @Published public private(set) var pendingReview: PulsePendingReview?
@@ -78,35 +80,60 @@ public final class PulseCallAppModel: ObservableObject {
     private let providerClient: AnthropicMessagesClient
     private let writeGate = PulseWriteGate()
     private let voice: any PulseVoiceControlling
+    private let streamGraceInterval: TimeInterval
+    private let streamOfflineInterval: TimeInterval
     private var service: (any PulseCallService)?
     private var updatesTask: Task<Void, Never>?
+    private var streamFailureTask: Task<Void, Never>?
+    private var streamFailureID: UUID?
+    private var lastAuthoritativeBrief: PulseDeterministicBrief?
     private var liveOwnerCaptionID: UUID?
     private var isForeground = true
+    private var isConfirmingReview = false
 
     public init(
         store: any PulseSecureStore = KeychainPulseSecureStore(),
         voice: (any PulseVoiceControlling)? = nil,
         providerClient: AnthropicMessagesClient = .init(),
+        streamGraceInterval: TimeInterval = 20,
+        streamOfflineInterval: TimeInterval = 60,
         serviceFactory: @escaping ServiceFactory = { registration in try MoaPulseDeviceService(registration: registration) }
     ) {
         self.store = store
         self.voice = voice ?? NativePulseVoiceController()
         self.providerClient = providerClient
+        self.streamGraceInterval = max(0, streamGraceInterval)
+        self.streamOfflineInterval = max(0, streamOfflineInterval)
         self.serviceFactory = serviceFactory
         configureVoiceCallbacks()
         providerConfigured = (try? store.loadAnthropicAPIKey()) != nil
         restoreRegistration()
     }
 
-    deinit { updatesTask?.cancel() }
+    deinit {
+        updatesTask?.cancel()
+        streamFailureTask?.cancel()
+    }
 
     public var rootDestination: PulseCallRootDestination { hasPairedDevice ? .call : .pairing }
 
     public var freshnessLabel: String {
         guard let last = lastSuccessfulRefreshAt else { return "Sin estado reciente" }
         let age = max(0, Int(Date().timeIntervalSince(last)))
-        if state == .offline || state == .stale { return "Último estado · hace \(relativeAge(age))" }
+        if !hasFreshAuthoritativeProjection { return "Último estado conocido · hace \(relativeAge(age))" }
         return age < 10 ? "Actualizado ahora" : "Actualizado hace \(relativeAge(age))"
+    }
+
+    public var isPTTListening: Bool { pttState == .listening }
+
+    public var canUsePushToTalk: Bool {
+        guard hasPairedDevice, hasFreshAuthoritativeProjection, state != .offline, state != .error else { return false }
+        if let review = pendingReview { return review.isCurrent() && operationsAreAvailable }
+        return true
+    }
+
+    public var canConfirmCurrentReview: Bool {
+        pendingReview?.isCurrent() == true && operationsAreAvailable && hasFreshAuthoritativeProjection && !isConfirmingReview
     }
 
     public var providerAvailabilityLabel: String {
@@ -150,6 +177,7 @@ public final class PulseCallAppModel: ObservableObject {
         service = nil
         updatesTask?.cancel()
         updatesTask = nil
+        clearStreamFailure()
         try? store.clearDeviceRegistration()
         hasPairedDevice = false
         serverName = ""
@@ -157,7 +185,10 @@ public final class PulseCallAppModel: ObservableObject {
         opsSnapshot = nil
         brief = nil
         lastSuccessfulRefreshAt = nil
+        hasFreshAuthoritativeProjection = false
+        operationsAreAvailable = false
         pendingReview = nil
+        isConfirmingReview = false
         lastReceipt = nil
         captions = []
         state = .disconnected
@@ -182,52 +213,74 @@ public final class PulseCallAppModel: ObservableObject {
             lastSuccessfulRefreshAt = Date()
             let currentBrief = PulseBriefBuilder.make(pulse: pulse, sitrep: sitrep)
             brief = currentBrief
+            lastAuthoritativeBrief = currentBrief
+            hasFreshAuthoritativeProjection = true
             appendCaption(currentBrief.spoken, provenance: .moaObserved)
             state = pendingReview == nil ? .ready : .review
             userMessage = nil
-            await writeGate.setOnline(true)
+            clearStreamFailure()
+            await openWriteGate()
             startUpdates(using: service)
             if shouldNarrate { narrate(currentBrief.spoken) }
         } catch {
-            await writeGate.setOnline(false)
+            await closeWriteGate()
             showOffline(error)
         }
     }
 
     public func beginPushToTalk() {
-        guard hasPairedDevice, pendingReview == nil else { return }
+        guard canUsePushToTalk else { return }
         pttState = PulsePTTReducer.reduce(pttState, event: .press)
         guard pttState == .requestingPermission else { return }
-        state = .listening
+        if pendingReview == nil { state = .listening }
+        voice.stopSpeakingForCapture()
         Task { await voice.beginPushToTalk() }
     }
 
     public func endPushToTalk() {
         voice.endPushToTalk()
         pttState = PulsePTTReducer.reduce(pttState, event: .release)
-        if state == .listening { state = .ready }
+        if pendingReview == nil, state == .listening { state = hasFreshAuthoritativeProjection ? .ready : .stale }
     }
 
     public func stop() {
         voice.stopAll()
         pttState = .idle
-        if pendingReview == nil { state = hasPairedDevice ? .ready : .disconnected }
+        if pendingReview == nil { state = settledCallState() }
     }
 
     public func submitText(_ text: String) async { await handleOwnerTurn(text) }
 
+    /// One path for a server-produced immutable review. It is internal so the
+    /// presentation tests can exercise the same confirmation state as the
+    /// provider/tool path without manufacturing a model response.
+    func present(review: PulsePendingReview) {
+        pendingReview = review
+        isConfirmingReview = false
+        state = .review
+    }
+
     public func cancelReview() {
+        guard !isConfirmingReview else { return }
         pendingReview = nil
-        if hasPairedDevice { state = .ready }
+        if hasPairedDevice { state = settledCallState() }
         appendCaption("Revisión cancelada en Pulse. Moa no recibió una confirmación.", provenance: .localFreshness)
     }
 
     public func confirmCurrentReview() async {
-        guard let service, let review = pendingReview, review.isCurrent(), hasPairedDevice else {
+        guard let review = pendingReview, review.isCurrent(), hasPairedDevice else {
             pendingReview = nil
-            state = hasPairedDevice ? .ready : .disconnected
+            state = settledCallState()
             return
         }
+        guard operationsAreAvailable, hasFreshAuthoritativeProjection, let service else {
+            state = .review
+            userMessage = "La revisión sigue visible, pero Moa no está actualizado. Pulse no confirmará ni encolará la acción hasta recibir un estado nuevo."
+            return
+        }
+        guard !isConfirmingReview else { return }
+        isConfirmingReview = true
+        defer { isConfirmingReview = false }
         state = .consulting
         do {
             let response = try await service.confirmOperation(review.operationID)
@@ -236,7 +289,7 @@ public final class PulseCallAppModel: ObservableObject {
             pendingReview = nil
             let narration = PulseOperationNarrator.receipt(receipt)
             appendCaption(narration, provenance: .moaObserved)
-            state = .ready
+            state = settledCallState()
             narrate(narration)
         } catch {
             // The review remains visible for an explicit owner retry/status
@@ -270,6 +323,10 @@ public final class PulseCallAppModel: ObservableObject {
         if !active {
             updatesTask?.cancel()
             updatesTask = nil
+            clearStreamFailure()
+            hasFreshAuthoritativeProjection = false
+            brief = nil
+            operationsAreAvailable = false
             Task { [service, writeGate] in
                 await writeGate.setOnline(false)
                 await service?.stopOpsUpdates()
@@ -286,7 +343,7 @@ public final class PulseCallAppModel: ObservableObject {
             service = try serviceFactory(registration)
             hasPairedDevice = true
             serverName = registration.baseURL.host ?? "Moa"
-            state = .ready
+            state = .stale
         } catch {
             try? store.clearDeviceRegistration()
             userMessage = "La credencial local no está disponible. Empareja Pulse de nuevo."
@@ -296,28 +353,41 @@ public final class PulseCallAppModel: ObservableObject {
     private func startUpdates(using service: any PulseCallService) {
         guard updatesTask == nil else { return }
         updatesTask = Task { [weak self] in
+            guard let self else { return }
+            let events = await service.opsStreamEvents()
             await service.startOpsUpdates()
-            let updates = await service.opsUpdates()
-            for await update in updates {
+            for await event in events {
                 guard !Task.isCancelled else { return }
-                self?.apply(update)
+                self.applyStreamEvent(event)
             }
+            guard !Task.isCancelled else { return }
+            self.scheduleStreamFailure()
+            self.updatesTask = nil
         }
     }
 
-    private func apply(_ update: OpsSnapshotUpdate) {
-        opsSnapshot = update.snapshot
-        // A websocket snapshot is a warm safe projection, but it is not a
-        // replacement for the cursor-free Pulse briefing. Preserve the current
-        // provenance/freshness instead of synthesizing a new spoken claim.
-        if state == .stale || state == .offline { state = pendingReview == nil ? .ready : .review }
+    private func applyStreamEvent(_ event: PulseOpsStreamEvent) {
+        switch event {
+        case let .snapshot(update):
+            opsSnapshot = update.snapshot
+            // A WS snapshot is intentionally not authoritative enough to
+            // reopen writes or turn stale data into a current briefing.
+        case .reconnecting, .stopped:
+            scheduleStreamFailure()
+        }
     }
 
     private func handleOwnerTurn(_ rawText: String) async {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         appendOwnerCaption(text)
-        if let review = pendingReview, review.isCurrent() {
+        if let review = pendingReview {
+            guard review.isCurrent() else {
+                pendingReview = nil
+                state = settledCallState()
+                appendCaption("La revisión de Moa caducó. No se confirmó ninguna acción.", provenance: .localFreshness)
+                return
+            }
             switch PulseReviewVoiceConfirmation.resolve(transcript: text, visibleReviews: [review]) {
             case .confirm:
                 await confirmCurrentReview()
@@ -328,8 +398,7 @@ public final class PulseCallAppModel: ObservableObject {
             }
             return
         }
-        if pendingReview != nil { pendingReview = nil }
-        guard let service, let brief, hasPairedDevice, state != .offline else {
+        guard let service, let brief, hasPairedDevice, hasFreshAuthoritativeProjection, state != .offline else {
             deterministicFallback()
             return
         }
@@ -347,8 +416,7 @@ public final class PulseCallAppModel: ObservableObject {
                 }
             }
             if answer.preparedReviews.count == 1, let review = answer.preparedReviews.first {
-                pendingReview = review
-                state = .review
+                present(review: review)
                 let narration = PulseOperationNarrator.review(review)
                 appendCaption(narration, provenance: .moaObserved)
                 narrate(narration)
@@ -374,12 +442,14 @@ public final class PulseCallAppModel: ObservableObject {
             guard let self else { return }
             self.voiceUnavailable = availability == .unavailable
             self.pttState = PulsePTTReducer.reduce(self.pttState, event: .permission(granted: availability == .available))
-            if availability == .unavailable, self.state == .listening { self.state = .ready }
+            if availability == .unavailable, self.pendingReview == nil, self.state == .listening {
+                self.state = self.settledCallState()
+            }
         }
         voice.onInterruption = { [weak self] in
             guard let self else { return }
             self.pttState = PulsePTTReducer.reduce(self.pttState, event: .interruption)
-            if self.pendingReview == nil { self.state = .ready }
+            if self.pendingReview == nil { self.state = self.settledCallState() }
             self.appendCaption("La captura de voz se interrumpió. Puedes usar texto o volver a pulsar para hablar.", provenance: .localFreshness)
         }
         voice.onTranscript = { [weak self] text, isFinal in
@@ -393,31 +463,91 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func deterministicFallback() {
-        guard let brief else {
+        guard let lastAuthoritativeBrief else {
             appendCaption("Conecta con Moa para recibir un panorama seguro.", provenance: .localFreshness)
             return
         }
         let fallback: PulseDeterministicBrief
-        if let last = lastSuccessfulRefreshAt, state == .offline || state == .stale {
-            fallback = PulseBriefBuilder.offline(last: brief, age: Date().timeIntervalSince(last))
+        if let last = lastSuccessfulRefreshAt, !hasFreshAuthoritativeProjection {
+            fallback = PulseBriefBuilder.offline(last: lastAuthoritativeBrief, age: Date().timeIntervalSince(last))
         } else {
-            fallback = brief
+            fallback = lastAuthoritativeBrief
         }
         appendCaption(fallback.spoken, provenance: .moaObserved)
         narrate(fallback.spoken)
-        if pendingReview == nil { state = hasPairedDevice ? .ready : .disconnected }
+        if pendingReview == nil, hasFreshAuthoritativeProjection { state = settledCallState() }
     }
 
     private func showOffline(_ error: Error) {
-        if let brief, let last = lastSuccessfulRefreshAt {
-            let fallback = PulseBriefBuilder.offline(last: brief, age: Date().timeIntervalSince(last))
-            self.brief = fallback
+        hasFreshAuthoritativeProjection = false
+        brief = nil
+        if let lastAuthoritativeBrief, let last = lastSuccessfulRefreshAt {
+            let fallback = PulseBriefBuilder.offline(last: lastAuthoritativeBrief, age: Date().timeIntervalSince(last))
             appendCaption(fallback.spoken, provenance: .localFreshness)
-            state = .offline
+            state = pendingReview == nil ? .offline : .review
         } else {
-            state = .error
+            state = pendingReview == nil ? .error : .review
         }
         userMessage = connectionMessage(for: error)
+    }
+
+    private func openWriteGate() async {
+        operationsAreAvailable = true
+        await writeGate.setOnline(true)
+    }
+
+    private func closeWriteGate() async {
+        operationsAreAvailable = false
+        await writeGate.setOnline(false)
+    }
+
+    private func clearStreamFailure() {
+        streamFailureTask?.cancel()
+        streamFailureTask = nil
+        streamFailureID = nil
+    }
+
+    /// The WebSocket is a warm hint only. Once it drops, retain the display for
+    /// a short grace period, then close writes and clearly label the old state.
+    /// A reconnecting socket frame cannot reverse this; only `refresh()` can.
+    private func scheduleStreamFailure() {
+        guard isForeground, hasPairedDevice, streamFailureTask == nil else { return }
+        let id = UUID()
+        streamFailureID = id
+        streamFailureTask = Task { [weak self] in
+            guard let self else { return }
+            if self.streamGraceInterval > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(self.streamGraceInterval * 1_000_000_000))
+            }
+            guard !Task.isCancelled, self.streamFailureID == id else { return }
+            await self.transitionToStaleAfterStreamFailure(id: id)
+            if self.streamOfflineInterval > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(self.streamOfflineInterval * 1_000_000_000))
+            }
+            guard !Task.isCancelled, self.streamFailureID == id else { return }
+            await self.transitionToOfflineAfterStreamFailure(id: id)
+        }
+    }
+
+    private func transitionToStaleAfterStreamFailure(id: UUID) async {
+        guard streamFailureID == id else { return }
+        hasFreshAuthoritativeProjection = false
+        brief = nil
+        await closeWriteGate()
+        if pendingReview == nil { state = .stale }
+        userMessage = "La conexión en directo con Moa se perdió. Este es el último estado conocido; Pulse no confirmará ni preparará acciones hasta actualizar."
+    }
+
+    private func transitionToOfflineAfterStreamFailure(id: UUID) async {
+        guard streamFailureID == id, !hasFreshAuthoritativeProjection else { return }
+        if pendingReview == nil { state = .offline }
+        userMessage = "Moa sigue sin conexión. Pulse conserva solo el último estado conocido y no encola acciones."
+    }
+
+    private func settledCallState() -> PulseCallState {
+        guard hasPairedDevice else { return .disconnected }
+        if hasFreshAuthoritativeProjection { return .ready }
+        return lastSuccessfulRefreshAt == nil ? .stale : .offline
     }
 
     private func narrate(_ text: String) {

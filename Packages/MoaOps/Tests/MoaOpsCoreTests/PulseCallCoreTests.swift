@@ -22,10 +22,36 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertNoThrow(try PulseServerConfiguration(urlText: "https://moa.example"))
         XCTAssertNoThrow(try PulseServerConfiguration(urlText: "http://localhost:8080"))
         XCTAssertNoThrow(try PulseServerConfiguration(urlText: "http://127.0.0.1:8080"))
+        XCTAssertNoThrow(try PulseServerConfiguration(urlText: "http://127.255.255.255:8080"))
+        XCTAssertNoThrow(try PulseServerConfiguration(urlText: "http://[::1]:8080"))
         XCTAssertThrowsError(try PulseServerConfiguration(urlText: "http://100.64.0.2:8080")) { error in
             XCTAssertEqual(error as? PulseCallError, .insecureTransport)
         }
         XCTAssertThrowsError(try PulseServerConfiguration(urlText: "https://moa.example/?token=never"))
+    }
+
+    func testHTTPPlaintextLoopbackGuardRejectsPrefixHostnamesAndMalformedIPv4() throws {
+        XCTAssertTrue(PulseServerConfiguration.isLoopback("localhost"))
+        XCTAssertTrue(PulseServerConfiguration.isLoopback("::1"))
+        XCTAssertTrue(PulseServerConfiguration.isLoopback("127.0.0.1"))
+        XCTAssertFalse(PulseServerConfiguration.isLoopback("127.evil.example"))
+        XCTAssertFalse(PulseServerConfiguration.isLoopback("127.0.0.1.evil"))
+        XCTAssertFalse(PulseServerConfiguration.isLoopback("127.0.0.999"))
+        XCTAssertFalse(PulseServerConfiguration.isLoopback("127.1"))
+        XCTAssertFalse(PulseServerConfiguration.isLoopback("128.0.0.1"))
+        XCTAssertFalse(PulseServerConfiguration.isLoopback("localhost.evil.example"))
+
+        for url in [
+            "http://127.evil.example:8080",
+            "http://127.0.0.1.evil:8080",
+            "http://127.0.0.999:8080",
+            "http://127.1:8080",
+            "http://128.0.0.1:8080",
+        ] {
+            XCTAssertThrowsError(try PulseServerConfiguration(urlText: url), "\(url) must not receive the HTTP exception") { error in
+                XCTAssertEqual(error as? PulseCallError, .insecureTransport)
+            }
+        }
     }
 
     func testDeviceRegistrationSecureEncodingRoundTripsWithoutPairingPayload() throws {
@@ -140,6 +166,23 @@ final class PulseCallCoreTests: XCTestCase {
         let narration = PulseOperationNarrator.receipt(receipt).lowercased()
         XCTAssertTrue(narration.contains("no pudo determinar"))
         XCTAssertTrue(narration.contains("no afirmaré"), "An indeterminate receipt must explicitly avoid a completion claim")
+    }
+
+    func testPermissionDenyReceiptNarratesAppliedOwnerDecisionWithoutCompletionClaim() throws {
+        let receipt = try JSONDecoder.moaOps.decode(PulseOperationReceipt.self, from: Data(#"{"operation_id":"AbCdEfGhIjKlMnOpQrStUvWx","kind":"permission_decision","status":"rejected","action":"deny","delivery":"not_applicable","observation":"permission_resolved","at":"2026-07-12T12:00:00Z"}"#.utf8))
+
+        let narration = PulseOperationNarrator.receipt(receipt).lowercased()
+
+        XCTAssertTrue(narration.contains("aplicó tu denegación confirmada"))
+        XCTAssertTrue(narration.contains("única solicitud"))
+        XCTAssertTrue(narration.contains("no afirma nada sobre el trabajo posterior"))
+        XCTAssertFalse(narration.contains("rechazó o dejó caducar"))
+    }
+
+    func testExpiredPermissionDenyReceiptRemainsAnOrdinaryRejection() throws {
+        let receipt = try JSONDecoder.moaOps.decode(PulseOperationReceipt.self, from: Data(#"{"operation_id":"AbCdEfGhIjKlMnOpQrStUvWx","kind":"permission_decision","status":"rejected","action":"deny","delivery":"not_applicable","observation":"not_observed","reason":"review_expired","at":"2026-07-12T12:00:00Z"}"#.utf8))
+
+        XCTAssertTrue(PulseOperationNarrator.receipt(receipt).contains("rechazó o dejó caducar"))
     }
 
     func testAnthropicSSEDecodesTextAndStrictToolInput() throws {

@@ -134,6 +134,24 @@ public enum PulseOperationNarrator {
 
     /// This speaks the canonical receipt, not an inferred work outcome.
     public static func receipt(_ receipt: PulseOperationReceipt) -> String {
+        // A deny is canonically represented as a rejected permission action:
+        // that means the owner-confirmed denial was applied, not that Moa
+        // rejected the owner's request. Its observation disambiguates it from
+        // an expired/stale review, which remains an ordinary rejection below.
+        if receipt.kind == .permissionDecision,
+           receipt.action == PulsePermissionDecision.deny.rawValue,
+           receipt.status == "rejected",
+           receipt.observation == "permission_resolved" {
+            return "Moa aplicó tu denegación confirmada para esta única solicitud de permiso. No afirma nada sobre el trabajo posterior."
+        }
+
+        if receipt.kind == .permissionDecision,
+           receipt.action == PulsePermissionDecision.approveOnce.rawValue,
+           receipt.status == "accepted",
+           receipt.observation == "permission_resolved" {
+            return "Moa aplicó tu aprobación única confirmada para la solicitud revisada. No afirma nada sobre el trabajo posterior."
+        }
+
         switch receipt.status {
         case "accepted":
             if receipt.delivery == "delivered_to_agent" {

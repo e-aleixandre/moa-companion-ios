@@ -1,5 +1,14 @@
 @preconcurrency import Foundation
 
+/// Lifecycle of the read-only Ops projection stream. A socket snapshot is a
+/// warm projection only; callers must still obtain a fresh REST Pulse page
+/// before treating data as authoritative for an owner operation.
+public enum PulseOpsStreamEvent: Equatable, Sendable {
+    case snapshot(OpsSnapshotUpdate)
+    case reconnecting(attempt: Int)
+    case stopped
+}
+
 public protocol PulseCallService: Sendable {
     func loadPulse() async throws -> OpsPulse
     func loadSitrep() async throws -> OpsBriefing
@@ -11,7 +20,26 @@ public protocol PulseCallService: Sendable {
     func startOpsUpdates() async
     func stopOpsUpdates() async
     func opsUpdates() async -> AsyncStream<OpsSnapshotUpdate>
+    func opsStreamEvents() async -> AsyncStream<PulseOpsStreamEvent>
     func invalidate() async
+}
+
+public extension PulseCallService {
+    /// Compatibility adapter for protocol test doubles. Production device
+    /// transport supplies lifecycle events directly below.
+    func opsStreamEvents() async -> AsyncStream<PulseOpsStreamEvent> {
+        let updates = await opsUpdates()
+        return AsyncStream { continuation in
+            let task = Task {
+                for await update in updates {
+                    continuation.yield(.snapshot(update))
+                }
+                if !Task.isCancelled { continuation.yield(.reconnecting(attempt: 1)) }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
 }
 
 /// Device-authenticated, server-to-client-only projection stream. It cannot
@@ -22,6 +50,7 @@ public actor MoaPulseDeviceWebSocketClient {
     private var task: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var continuations: [UUID: AsyncStream<OpsSnapshotUpdate>.Continuation] = [:]
+    private var eventContinuations: [UUID: AsyncStream<PulseOpsStreamEvent>.Continuation] = [:]
     private var version: UInt64?
 
     public init(registration: PulseDeviceRegistration, session: URLSession) throws {
@@ -42,6 +71,18 @@ public actor MoaPulseDeviceWebSocketClient {
         }
     }
 
+    public func events() -> AsyncStream<PulseOpsStreamEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            eventContinuations[id] = continuation
+            continuation.onTermination = { [weak self, id] _ in
+                Task { @Sendable [weak self, id] in
+                    await self?.removeEventContinuation(id)
+                }
+            }
+        }
+    }
+
     public func start() {
         guard runTask == nil else { return }
         runTask = Task { [weak self] in await self?.run() }
@@ -52,6 +93,7 @@ public actor MoaPulseDeviceWebSocketClient {
         runTask = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        yield(.stopped)
     }
 
     private func run() async {
@@ -65,6 +107,7 @@ public actor MoaPulseDeviceWebSocketClient {
                 attempt = 0
             } catch {
                 attempt += 1
+                yield(.reconnecting(attempt: attempt))
             }
             guard !Task.isCancelled else { break }
             let delay = min(pow(2, Double(max(0, attempt - 1))), 30)
@@ -72,6 +115,7 @@ public actor MoaPulseDeviceWebSocketClient {
         }
         task = nil
         runTask = nil
+        if !Task.isCancelled { yield(.stopped) }
     }
 
     private func request() throws -> URLRequest {
@@ -106,11 +150,15 @@ public actor MoaPulseDeviceWebSocketClient {
             switch envelope.type {
             case "init":
                 version = envelope.version
-                yield(.init(version: envelope.version, snapshot: envelope.snapshot, isInitial: true))
+                let update = OpsSnapshotUpdate(version: envelope.version, snapshot: envelope.snapshot, isInitial: true)
+                yield(update)
+                yield(.snapshot(update))
             case "snapshot":
                 guard version == nil || envelope.version > version! else { continue }
                 version = envelope.version
-                yield(.init(version: envelope.version, snapshot: envelope.snapshot, isInitial: false))
+                let update = OpsSnapshotUpdate(version: envelope.version, snapshot: envelope.snapshot, isInitial: false)
+                yield(update)
+                yield(.snapshot(update))
             default:
                 throw PulseCallError.decoding
             }
@@ -121,7 +169,12 @@ public actor MoaPulseDeviceWebSocketClient {
         for continuation in continuations.values { continuation.yield(update) }
     }
 
+    private func yield(_ event: PulseOpsStreamEvent) {
+        for continuation in eventContinuations.values { continuation.yield(event) }
+    }
+
     private func removeContinuation(_ id: UUID) { continuations.removeValue(forKey: id) }
+    private func removeEventContinuation(_ id: UUID) { eventContinuations.removeValue(forKey: id) }
 }
 
 public actor MoaPulseDeviceService: PulseCallService {
@@ -154,6 +207,7 @@ public actor MoaPulseDeviceService: PulseCallService {
     public func startOpsUpdates() async { await socket.start() }
     public func stopOpsUpdates() async { await socket.stop() }
     public func opsUpdates() async -> AsyncStream<OpsSnapshotUpdate> { await socket.updates() }
+    public func opsStreamEvents() async -> AsyncStream<PulseOpsStreamEvent> { await socket.events() }
 
     public func invalidate() async {
         await socket.stop()

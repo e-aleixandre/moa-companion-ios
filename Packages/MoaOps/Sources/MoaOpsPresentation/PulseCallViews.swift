@@ -256,7 +256,7 @@ public struct PulseCallSceneView: View {
                 .foregroundStyle(.white)
                 .accessibilityLabel("Escribir a Pulse")
 
-                PulsePTTButton(isListening: model.state == .listening, disabled: model.pendingReview != nil || model.state == .offline) {
+                PulsePTTButton(isListening: model.isPTTListening, disabled: !model.canUsePushToTalk) {
                     model.beginPushToTalk()
                 } onRelease: {
                     model.endPushToTalk()
@@ -303,9 +303,11 @@ public struct PulseCallSceneView: View {
                     .buttonStyle(.bordered)
                 Button("Confirmar") { Task { await model.confirmCurrentReview() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!review.isCurrent())
+                    .disabled(!model.canConfirmCurrentReview)
             }
-            Text("La confirmación solo envía {} a Moa para esta revisión. Nunca confirma que el trabajo posterior haya terminado.")
+            Text(model.canConfirmCurrentReview
+                ? "La confirmación solo envía {} a Moa para esta revisión. Nunca confirma que el trabajo posterior haya terminado."
+                : "Moa no está actualizado. Esta revisión permanece visible, pero Pulse no puede confirmarla hasta actualizar.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

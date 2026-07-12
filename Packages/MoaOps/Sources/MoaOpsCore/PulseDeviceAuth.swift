@@ -65,8 +65,10 @@ public struct PulsePairingPayload: Equatable, Sendable {
               !parts[2].isEmpty,
               parts[1].count <= 128,
               parts[2].count <= 128,
-              !parts[1].contains(where: { $0.isWhitespace || $0.isControl }),
-              !parts[2].contains(where: { $0.isWhitespace || $0.isControl }) else {
+              !parts[1].contains(where: { $0.isWhitespace }),
+              !parts[2].contains(where: { $0.isWhitespace }),
+              !parts[1].unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              !parts[2].unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw PulseCallError.invalidPairingPayload
         }
         pairingID = String(parts[1])
@@ -238,7 +240,7 @@ public struct PulsePairingClient: Sendable {
 
     public func claim(configuration: PulseServerConfiguration, payload: PulsePairingPayload, deviceLabel: String) async throws -> PulseDeviceRegistration {
         let label = deviceLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !label.isEmpty, label.count <= 80, !label.contains(where: { $0.isControl }) else {
+        guard !label.isEmpty, label.count <= 80, !label.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw PulseCallError.invalidPairingPayload
         }
         var request = URLRequest(url: configuration.baseURL.appendingPathComponent("api/pulse/pairings/claim"))

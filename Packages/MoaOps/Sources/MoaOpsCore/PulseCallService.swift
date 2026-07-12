@@ -35,7 +35,9 @@ public actor MoaPulseDeviceWebSocketClient {
         return AsyncStream { continuation in
             continuations[id] = continuation
             continuation.onTermination = { [weak self, id] _ in
-                Task { await self?.removeContinuation(id) }
+                Task { @Sendable [weak self, id] in
+                    await self?.removeContinuation(id)
+                }
             }
         }
     }

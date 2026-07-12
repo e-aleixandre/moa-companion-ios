@@ -42,16 +42,52 @@ public enum PulseVoiceAvailability: Equatable, Sendable {
     case unavailable
 }
 
+/// A capture token belongs to one explicit PTT gesture. It is supplied by the
+/// call model and echoed by the voice implementation so a delayed Speech
+/// callback can never be mistaken for a later gesture.
+public struct PulseVoiceCaptureToken: Equatable, Hashable, Sendable {
+    public let generation: UInt64
+
+    public init(generation: UInt64) {
+        self.generation = generation
+    }
+}
+
+/// Small deterministic gate shared by the native implementation's async
+/// permission/recognition paths and exercised on non-iOS package builds.
+/// Invalidating a token is final: queued callbacks for it must be ignored.
+public struct PulseVoiceCaptureGate: Equatable, Sendable {
+    public private(set) var activeCapture: PulseVoiceCaptureToken?
+
+    public init() {}
+
+    public mutating func begin(_ capture: PulseVoiceCaptureToken) {
+        activeCapture = capture
+    }
+
+    public mutating func invalidate(_ capture: PulseVoiceCaptureToken? = nil) {
+        guard capture == nil || activeCapture == capture else { return }
+        activeCapture = nil
+    }
+
+    public func accepts(_ capture: PulseVoiceCaptureToken) -> Bool {
+        activeCapture == capture
+    }
+}
+
 @MainActor
 public protocol PulseVoiceControlling: AnyObject {
-    var onTranscript: ((String, Bool) -> Void)? { get set }
-    var onInterruption: (() -> Void)? { get set }
-    var onAvailability: ((PulseVoiceAvailability) -> Void)? { get set }
+    var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)? { get set }
+    var onInterruption: ((PulseVoiceCaptureToken) -> Void)? { get set }
+    var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)? { get set }
     /// Stops narration before Speech permission/recording can begin, so the
     /// recognizer never receives Pulse's own spoken turn.
     func stopSpeakingForCapture()
-    func beginPushToTalk() async
-    func endPushToTalk()
+    func beginPushToTalk(capture: PulseVoiceCaptureToken) async
+    /// Releasing PTT ends audio but leaves the token live until Speech emits
+    /// its final transcript. `invalidateCapture` is used for every abort.
+    func endPushToTalk(capture: PulseVoiceCaptureToken)
+    func invalidateCapture()
     func speak(_ text: String)
     func stopAll()
     func setMuted(_ muted: Bool)
@@ -61,9 +97,9 @@ public protocol PulseVoiceControlling: AnyObject {
 #if os(iOS) && canImport(Speech) && canImport(AVFoundation)
 @MainActor
 public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, AVSpeechSynthesizerDelegate {
-    public var onTranscript: ((String, Bool) -> Void)?
-    public var onInterruption: (() -> Void)?
-    public var onAvailability: ((PulseVoiceAvailability) -> Void)?
+    public var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
+    public var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
+    public var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
 
     private let audioEngine = AVAudioEngine()
     private let synthesizer = AVSpeechSynthesizer()
@@ -74,6 +110,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
     private var recording = false
     private var foreground = true
     private var interruptionObserver: NSObjectProtocol?
+    private var captureGate = PulseVoiceCaptureGate()
 
     public override init() {
         super.init()
@@ -86,8 +123,9 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
             guard let self,
                   let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
-            self.finishRecording(cancel: true)
-            self.onInterruption?()
+            guard let capture = self.captureGate.activeCapture else { return }
+            self.finishRecording(cancel: true, invalidating: capture)
+            self.onInterruption?(capture)
         }
     }
 
@@ -95,15 +133,24 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
         if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
     }
 
-    public func beginPushToTalk() async {
+    public func beginPushToTalk(capture: PulseVoiceCaptureToken) async {
         // Keep this defensive stop inside the native controller too: callers
         // can never accidentally request recognition while narration is live.
         stopSpeakingForCapture()
-        guard foreground, !recording else { onAvailability?(.unavailable); return }
+        captureGate.begin(capture)
+        guard foreground, !recording else {
+            captureGate.invalidate(capture)
+            onAvailability?(capture, .unavailable)
+            return
+        }
         let speechStatus = await speechAuthorization()
         let microphoneGranted = await microphoneAuthorization()
+        // Permission completion can be queued after an interruption, Stop, or
+        // foreground loss. Do not start an old capture in that case.
+        guard captureGate.accepts(capture) else { return }
         guard speechStatus == .authorized, microphoneGranted, recognizer?.isAvailable == true else {
-            onAvailability?(.unavailable)
+            captureGate.invalidate(capture)
+            onAvailability?(capture, .unavailable)
             return
         }
         do {
@@ -122,21 +169,36 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
             recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    // Speech can call its result handler after cancel(). The
+                    // token gate makes every such callback inert.
+                    guard self.captureGate.accepts(capture) else { return }
                     if let result {
-                        self.onTranscript?(result.bestTranscription.formattedString, result.isFinal)
-                        if result.isFinal { self.finishRecording(cancel: false) }
+                        self.onTranscript?(capture, result.bestTranscription.formattedString, result.isFinal)
+                        if result.isFinal { self.finishRecording(cancel: false, invalidating: capture) }
                     }
-                    if error != nil { self.finishRecording(cancel: true) }
+                    if error != nil { self.finishRecording(cancel: true, invalidating: capture) }
                 }
             }
-            onAvailability?(.available)
+            guard captureGate.accepts(capture) else {
+                finishRecording(cancel: true, invalidating: nil)
+                return
+            }
+            onAvailability?(capture, .available)
         } catch {
-            finishRecording(cancel: true)
-            onAvailability?(.unavailable)
+            finishRecording(cancel: true, invalidating: capture)
+            onAvailability?(capture, .unavailable)
         }
     }
 
-    public func endPushToTalk() { finishRecording(cancel: false) }
+    public func endPushToTalk(capture: PulseVoiceCaptureToken) {
+        guard captureGate.accepts(capture) else { return }
+        // Keep `capture` live until the final recognition callback arrives.
+        finishRecording(cancel: false, invalidating: nil)
+    }
+
+    public func invalidateCapture() {
+        finishRecording(cancel: true, invalidating: captureGate.activeCapture)
+    }
 
     public func stopSpeakingForCapture() {
         synthesizer.stopSpeaking(at: .immediate)
@@ -144,7 +206,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
 
     public func speak(_ text: String) {
         guard foreground, !muted, !text.isEmpty else { return }
-        finishRecording(cancel: false)
+        invalidateCapture()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "es-ES")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
@@ -152,7 +214,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
     }
 
     public func stopAll() {
-        finishRecording(cancel: true)
+        invalidateCapture()
         synthesizer.stopSpeaking(at: .immediate)
     }
 
@@ -166,8 +228,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
         if !active { stopAll() }
     }
 
-    private func finishRecording(cancel: Bool) {
-        guard recording || request != nil else { return }
+    private func finishRecording(cancel: Bool, invalidating capture: PulseVoiceCaptureToken?) {
+        guard recording || request != nil || capture != nil else { return }
         recording = false
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -175,6 +237,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
         if cancel { recognitionTask?.cancel() }
         recognitionTask = nil
         request = nil
+        if let capture { captureGate.invalidate(capture) }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -206,13 +269,14 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
 /// fake recorder. The Call scene keeps its text fallback visible.
 @MainActor
 public final class NativePulseVoiceController: PulseVoiceControlling {
-    public var onTranscript: ((String, Bool) -> Void)?
-    public var onInterruption: (() -> Void)?
-    public var onAvailability: ((PulseVoiceAvailability) -> Void)?
+    public var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
+    public var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
+    public var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
     public init() {}
     public func stopSpeakingForCapture() {}
-    public func beginPushToTalk() async { onAvailability?(.unavailable) }
-    public func endPushToTalk() {}
+    public func beginPushToTalk(capture: PulseVoiceCaptureToken) async { onAvailability?(capture, .unavailable) }
+    public func endPushToTalk(capture _: PulseVoiceCaptureToken) {}
+    public func invalidateCapture() {}
     public func speak(_: String) {}
     public func stopAll() {}
     public func setMuted(_: Bool) {}

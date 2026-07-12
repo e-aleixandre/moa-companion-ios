@@ -67,14 +67,15 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertEqual(model.state, .ready)
     }
 
-    func testPTTUnavailableKeepsTextFallbackAndInterruptionDoesNotLeaveListening() async {
-        let store = CallTestStore()
+    func testPTTUnavailableKeepsTextFallbackAndInterruptionDoesNotLeaveListening() async throws {
+        let store = try pairedStore()
+        let service = CallTestService()
+        service.pulseResults = [.success(try fixturePulse())]
         let voice = CallTestVoice(availability: .unavailable)
-        let model = PulseCallAppModel(store: store, voice: voice, serviceFactory: { _ in CallTestService() })
-        // Unpaired Pulse does not record; pairing-only root still supplies the
-        // text/paste flow. Exercise the reducer through the voice controller.
-        XCTAssertEqual(model.rootDestination, .pairing)
-        await voice.beginPushToTalk()
+        let model = PulseCallAppModel(store: store, voice: voice, serviceFactory: { _ in service })
+        await model.refresh()
+        model.beginPushToTalk()
+        await settle()
         XCTAssertEqual(model.voiceUnavailable, true)
         XCTAssertNotEqual(model.pttState, .listening)
     }
@@ -124,21 +125,84 @@ final class PulseCallPresentationTests: XCTestCase {
 
     func testReviewPTTInterruptionKeepsReviewAndNeverOpensProvider() async throws {
         let store = try pairedStore()
+        try store.saveAnthropicAPIKey("device-only-test-key")
         let service = CallTestService()
         service.pulseResults = [.success(try fixturePulse())]
         let voice = CallTestVoice()
-        let model = PulseCallAppModel(store: store, voice: voice, serviceFactory: { _ in service })
+        let provider = RecordingProvider()
+        let model = PulseCallAppModel(
+            store: store,
+            voice: voice,
+            providerFactory: { _, _, _, _ in provider },
+            serviceFactory: { _ in service }
+        )
         await model.refresh()
         model.present(review: try fixtureReview())
 
         model.beginPushToTalk()
         await settle()
-        voice.emitInterruption()
+        let interruptedCapture = try XCTUnwrap(voice.activeCapture)
+        voice.emitInterruption(capture: interruptedCapture)
+        // Speech can queue a final result after cancellation. It carries the
+        // old token, so it must be ignored before it can reach confirmation.
+        voice.emitTranscript("sí", isFinal: true, capture: interruptedCapture)
+        await settle()
 
         XCTAssertEqual(model.pttState, .interrupted)
         XCTAssertEqual(model.state, .review)
         XCTAssertNotNil(model.pendingReview)
         XCTAssertEqual(service.confirmCalls, 0)
+        XCTAssertEqual(service.prepareCalls, 0)
+        let providerCalls = await provider.callCount()
+        XCTAssertEqual(providerCalls, 0, "A late interrupted yes must not open a provider turn")
+    }
+
+    func testOneGlobalTurnReservationRejectsConcurrentVoiceAndTextWithoutOrphanReview() async throws {
+        let store = try pairedStore()
+        try store.saveAnthropicAPIKey("device-only-test-key")
+        let service = CallTestService()
+        service.pulseResults = [.success(try fixturePulse())]
+        let prepared = try fixturePreparedResponse(operationID: "CbCdEfGhIjKlMnOpQrStUvWx")
+        service.prepareResults = [.success(prepared)]
+        let voice = CallTestVoice()
+        let barrier = PrepareBarrier()
+        let model = PulseCallAppModel(
+            store: store,
+            voice: voice,
+            providerFactory: { service, _, _, _ in
+                BlockingPrepareProvider(service: service, barrier: barrier)
+            },
+            serviceFactory: { _ in service }
+        )
+        await model.refresh()
+
+        // First turn arrives by voice and reserves before its provider can
+        // prepare. The barrier makes the second submission deterministic.
+        model.beginPushToTalk()
+        await settle()
+        let firstCapture = try XCTUnwrap(voice.activeCapture)
+        voice.emitTranscript("continúa la entrega", isFinal: true, capture: firstCapture)
+        await barrier.waitForFirstArrival()
+
+        await model.submitText("prepara otra instrucción")
+        model.beginPushToTalk()
+        await settle()
+
+        let arrivalsBeforeRelease = await barrier.arrivalCount()
+        XCTAssertEqual(arrivalsBeforeRelease, 1)
+        XCTAssertEqual(voice.captures.count, 1, "A busy provider turn cannot open a second PTT capture")
+        XCTAssertEqual(service.prepareCalls, 0, "The first prepare remains reserved behind the barrier")
+        XCTAssertTrue(model.captions.contains { $0.text.contains("está atendiendo un turno") })
+
+        await barrier.release()
+        await settle()
+
+        XCTAssertEqual(service.prepareCalls, 1)
+        XCTAssertEqual(service.preparedOperationIDs, ["CbCdEfGhIjKlMnOpQrStUvWx"])
+        XCTAssertEqual(model.pendingReview?.operationID, "CbCdEfGhIjKlMnOpQrStUvWx")
+        XCTAssertTrue(model.isTurnBusy, "The reservation remains held while the one visible review exists")
+        let arrivalsAfterRelease = await barrier.arrivalCount()
+        XCTAssertEqual(arrivalsAfterRelease, 1)
     }
 
     func testStreamDropClosesWritesAndOnlyAuthoritativeRefreshRestoresThem() async throws {
@@ -217,6 +281,12 @@ final class PulseCallPresentationTests: XCTestCase {
         return .init(operationID: operationID, kind: .directedInstruction, expiresAt: .distantFuture, review: review)
     }
 
+    private func fixturePreparedResponse(operationID: String) throws -> PulseOperationResponse {
+        try JSONDecoder.moaOps.decode(PulseOperationResponse.self, from: Data("""
+        {"operation_id":"\(operationID)","kind":"directed_instruction","status":"pending_confirmation","expires_at":"2027-01-01T00:00:00Z","review":{"target":{"id":"s1","title":"Release","project":"/release"},"text":"continúa","action":"steer","risk":"changes","consequence":"delivery is not completion"}}
+        """.utf8))
+    }
+
     private func settle() async {
         for _ in 0..<20 { await Task.yield() }
     }
@@ -244,28 +314,49 @@ private final class CallTestStore: PulseSecureStore, @unchecked Sendable {
 
 @MainActor
 private final class CallTestVoice: PulseVoiceControlling {
-    var onTranscript: ((String, Bool) -> Void)?
-    var onInterruption: (() -> Void)?
-    var onAvailability: ((PulseVoiceAvailability) -> Void)?
+    var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
+    var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
+    var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
     private let availability: PulseVoiceAvailability
     private(set) var events: [String] = []
+    private(set) var activeCapture: PulseVoiceCaptureToken?
+    private(set) var captures: [PulseVoiceCaptureToken] = []
 
     init(availability: PulseVoiceAvailability = .available) { self.availability = availability }
     func stopSpeakingForCapture() { events.append("stopNarration") }
-    func beginPushToTalk() async { events.append("beginCapture"); onAvailability?(availability) }
-    func endPushToTalk() {}
+    func beginPushToTalk(capture: PulseVoiceCaptureToken) async {
+        events.append("beginCapture")
+        activeCapture = capture
+        captures.append(capture)
+        onAvailability?(capture, availability)
+    }
+    func endPushToTalk(capture _: PulseVoiceCaptureToken) { events.append("endCapture") }
+    func invalidateCapture() {
+        events.append("invalidateCapture")
+        activeCapture = nil
+    }
     func speak(_: String) {}
-    func stopAll() {}
+    func stopAll() { invalidateCapture() }
     func setMuted(_: Bool) {}
-    func setForegroundActive(_: Bool) {}
-    func emitTranscript(_ text: String, isFinal: Bool) { onTranscript?(text, isFinal) }
-    func emitInterruption() { onInterruption?() }
+    func setForegroundActive(_ active: Bool) { if !active { invalidateCapture() } }
+    func emitTranscript(_ text: String, isFinal: Bool, capture: PulseVoiceCaptureToken? = nil) {
+        guard let capture = capture ?? activeCapture else { return }
+        onTranscript?(capture, text, isFinal)
+    }
+    func emitInterruption(capture: PulseVoiceCaptureToken? = nil) {
+        guard let capture = capture ?? activeCapture else { return }
+        activeCapture = nil
+        onInterruption?(capture)
+    }
 }
 
 private final class CallTestService: PulseCallService, @unchecked Sendable {
     var pulseResults: [Result<OpsPulse, PulseCallError>] = []
     var streamEvents: [PulseOpsStreamEvent] = []
+    var prepareResults: [Result<PulseOperationResponse, PulseCallError>] = []
     private(set) var confirmCalls = 0
+    private(set) var prepareCalls = 0
+    private(set) var preparedOperationIDs: [String] = []
 
     func loadPulse() async throws -> OpsPulse {
         guard !pulseResults.isEmpty else { throw PulseCallError.transport }
@@ -276,7 +367,13 @@ private final class CallTestService: PulseCallService, @unchecked Sendable {
     }
     func loadStatus(target _: String) async throws -> OpsStatusResult { throw PulseCallError.transport }
     func loadSafeConversationEvidence(sessionID _: String) async throws -> ConversationPage { throw PulseCallError.transport }
-    func prepareOperation(_: PulseOperationPrepare) async throws -> PulseOperationResponse { throw PulseCallError.transport }
+    func prepareOperation(_: PulseOperationPrepare) async throws -> PulseOperationResponse {
+        prepareCalls += 1
+        guard !prepareResults.isEmpty else { throw PulseCallError.transport }
+        let response = try prepareResults.removeFirst().get()
+        preparedOperationIDs.append(response.operationID)
+        return response
+    }
     func confirmOperation(_ id: String) async throws -> PulseOperationResponse {
         confirmCalls += 1
         return try JSONDecoder.moaOps.decode(PulseOperationResponse.self, from: Data("""
@@ -295,4 +392,76 @@ private final class CallTestService: PulseCallService, @unchecked Sendable {
         }
     }
     func invalidate() async {}
+}
+
+private actor RecordingProvider: PulseProviderResponding {
+    private var calls = 0
+
+    func respond(
+        question _: String,
+        context _: PulseProviderContext,
+        onText _: @escaping @Sendable (String) -> Void
+    ) async throws -> PulseProviderAnswer {
+        calls += 1
+        return .init(text: "respuesta", preparedReviews: [])
+    }
+
+    func callCount() -> Int { calls }
+}
+
+private actor PrepareBarrier {
+    private var arrivals = 0
+    private var released = false
+    private var firstArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func arriveAndWait() async {
+        arrivals += 1
+        let waiters = firstArrivalWaiters
+        firstArrivalWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitForFirstArrival() async {
+        guard arrivals > 0 else {
+            await withCheckedContinuation { continuation in
+                firstArrivalWaiters.append(continuation)
+            }
+            return
+        }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func arrivalCount() -> Int { arrivals }
+}
+
+private actor BlockingPrepareProvider: PulseProviderResponding {
+    private let service: any PulseCallService
+    private let barrier: PrepareBarrier
+
+    init(service: any PulseCallService, barrier: PrepareBarrier) {
+        self.service = service
+        self.barrier = barrier
+    }
+
+    func respond(
+        question: String,
+        context _: PulseProviderContext,
+        onText _: @escaping @Sendable (String) -> Void
+    ) async throws -> PulseProviderAnswer {
+        await barrier.arriveAndWait()
+        let response = try await service.prepareOperation(.directedInstruction(target: "s1", text: question))
+        guard let review = response.pendingReview else { throw PulseCallError.decoding }
+        return .init(text: "", preparedReviews: [review])
+    }
 }

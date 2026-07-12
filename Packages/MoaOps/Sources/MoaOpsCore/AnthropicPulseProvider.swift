@@ -371,7 +371,17 @@ public struct PulseProviderAnswer: Equatable, Sendable {
     public let preparedReviews: [PulsePendingReview]
 }
 
-public actor PulseProviderCoordinator {
+/// The app owns turn serialization; this narrow seam keeps that policy
+/// testable without giving a provider any access to Moa transport details.
+public protocol PulseProviderResponding: Sendable {
+    func respond(
+        question: String,
+        context: PulseProviderContext,
+        onText: @escaping @Sendable (String) -> Void
+    ) async throws -> PulseProviderAnswer
+}
+
+public actor PulseProviderCoordinator: PulseProviderResponding {
     private let client: AnthropicMessagesClient
     private let store: any PulseSecureStore
     private let executor: any PulseToolExecuting

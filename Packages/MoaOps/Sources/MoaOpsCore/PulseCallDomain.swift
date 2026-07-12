@@ -80,7 +80,7 @@ public enum PulseBriefBuilder {
     }
 
     public static func offline(last: PulseDeterministicBrief, age: TimeInterval) -> PulseDeterministicBrief {
-        let minutes = max(1, Int(age / 60.0).rounded(.down))
+        let minutes = max(1, Int((age / 60.0).rounded(.down)))
         return .init(
             spoken: "Moa no está disponible. Esto es el último estado conocido de hace \(minutes) \(minutes == 1 ? "minuto" : "minutos"). \(last.spoken)",
             citations: last.citations + [.init(id: "local:freshness", label: "Último estado conocido · hace \(minutes) min", provenance: .localFreshness)],

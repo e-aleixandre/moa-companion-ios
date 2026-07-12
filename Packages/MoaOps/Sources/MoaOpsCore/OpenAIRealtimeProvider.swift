@@ -13,8 +13,15 @@ public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
     public let maxTurnCostUSD: Decimal
     public let pricing: PulseRealtimePricing
     public let budget: PulseRealtimeBudget
-    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.25, pricing: PulseRealtimePricing = .full, budget: PulseRealtimeBudget = .init()) {
+    /// PCM accepted from a PTT turn is bounded locally (24 kHz mono PCM16).
+    /// `maxResponseOutputTokens` is sent in each documented response.create.
+    /// These bounds support conservative reservations; the local cap is not a
+    /// provider billing guarantee and OpenAI account limits remain final.
+    public let maximumAudioInputBytes: Int
+    public let maxResponseOutputTokens: Int
+    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.25, pricing: PulseRealtimePricing = .full, budget: PulseRealtimeBudget = .init(), maximumAudioInputBytes: Int = 1_440_000, maxResponseOutputTokens: Int = 1_024) {
         self.model = model; self.maxTurnCostUSD = maxTurnCostUSD; self.pricing = pricing; self.budget = budget
+        self.maximumAudioInputBytes = max(0, maximumAudioInputBytes); self.maxResponseOutputTokens = max(1, maxResponseOutputTokens)
     }
 }
 
@@ -166,8 +173,8 @@ public actor OpenAIRealtimeClient {
     public static let endpoint = URL(string: "wss://api.openai.com/v1/realtime")!
     private let session: URLSession; private let endpoint: URL
     private let ledger: PulseUsageLedger
-    private let sessionStarted = Date()
-    public init(session: URLSession = PulseTransportFactory.ephemeralSession(), endpoint: URL = OpenAIRealtimeClient.endpoint, ledger: PulseUsageLedger = .init()) { self.session = session; self.endpoint = endpoint; self.ledger = ledger }
+    private let budgetLedger: PulseRealtimeBudgetLedger
+    public init(session: URLSession = PulseTransportFactory.ephemeralSession(), endpoint: URL = OpenAIRealtimeClient.endpoint, ledger: PulseUsageLedger = .init(), budgetLedger: PulseRealtimeBudgetLedger = .init()) { self.session = session; self.endpoint = endpoint; self.ledger = ledger; self.budgetLedger = budgetLedger }
 
     public func makeRequest(apiKey: String, configuration: OpenAIRealtimeProviderConfiguration) throws -> URLRequest {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -182,29 +189,28 @@ public actor OpenAIRealtimeClient {
     /// Opens one explicit PTT turn. Nothing is captured or sent by this
     /// method; callers must append PCM only while their capture token is live.
     public func beginAudioTurn(apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) async throws -> OpenAIRealtimeAudioTurn {
-        let dayStart = Calendar(identifier: .gregorian).startOfDay(for: Date())
-        let dayTotal = await ledger.totalUSD(since: dayStart)
-        guard await permitsReservedTurn(configuration, dayTotal: dayTotal) else { throw OpenAIRealtimeClientError.budgetExceeded }
-        let socket = session.webSocketTask(with: try makeRequest(apiKey: apiKey, configuration: configuration))
+        let request = try makeRequest(apiKey: apiKey, configuration: configuration)
+        guard let turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
+        let socket = session.webSocketTask(with: request)
         socket.resume()
-        let turn = OpenAIRealtimeAudioTurn(socket: socket, model: configuration.model, pricing: configuration.pricing, maxTurnCostUSD: configuration.maxTurnCostUSD, ledger: ledger, onText: onText, onAudio: onAudio, onFinished: onFinished)
-        try await turn.configure(context: context)
-        return turn
+        let turn = OpenAIRealtimeAudioTurn(socket: socket, turnID: turnID, model: configuration.model, pricing: configuration.pricing, maximumAudioInputBytes: configuration.maximumAudioInputBytes, maxResponseOutputTokens: configuration.maxResponseOutputTokens, ledger: ledger, budgetLedger: budgetLedger, onText: onText, onAudio: onAudio, onFinished: onFinished)
+        do { try Task.checkCancellation(); await budgetLedger.markRequestSent(turnID: turnID); try await turn.configure(context: context); return turn }
+        catch { await budgetLedger.releaseIfPreSend(turnID: turnID); socket.cancel(with: .normalClosure, reason: nil); throw error }
     }
 
     public func respond(question: String, context: PulseProviderContext, apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, executor: any PulseToolExecuting, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer {
-        let dayStart = Calendar(identifier: .gregorian).startOfDay(for: Date())
-        let dayTotal = await ledger.totalUSD(since: dayStart)
-        guard await permitsReservedTurn(configuration, dayTotal: dayTotal) else { throw OpenAIRealtimeClientError.budgetExceeded }
         let startedAt = Date()
-        let socket = session.webSocketTask(with: try makeRequest(apiKey: apiKey, configuration: configuration))
+        let request = try makeRequest(apiKey: apiKey, configuration: configuration)
+        guard var turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
+        let socket = session.webSocketTask(with: request)
         socket.resume(); defer { socket.cancel(with: .normalClosure, reason: nil) }
+        await budgetLedger.markRequestSent(turnID: turnID)
         try await send(["type": "session.update", "session": realtimeSession(instructions: PulseProviderPrompt.system, tools: try toolJSONArray(PulseProviderPrompt.tools))], socket)
         try await send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": "<owner_request>\n\(question)\n</owner_request>\n\n\(context.ownerMessageData)"]]]], socket)
-        try await send(["type": "response.create"], socket)
+        try await send(responseCreateEvent(maxOutputTokens: configuration.maxResponseOutputTokens), socket)
         var text = ""; var reviews: [PulsePendingReview] = []; var rounds = 0
         while rounds < 4 {
-            let outcome = try await receiveResponse(socket, onText: onText, model: configuration.model, startedAt: startedAt, pricing: configuration.pricing, maxTurnCostUSD: configuration.maxTurnCostUSD)
+            let outcome = try await receiveResponse(socket, turnID: turnID, onText: onText, model: configuration.model, startedAt: startedAt, pricing: configuration.pricing)
             text += outcome.text
             guard !outcome.calls.isEmpty else { return .init(text: text, preparedReviews: reviews) }
             rounds += 1
@@ -215,12 +221,15 @@ public actor OpenAIRealtimeClient {
                 try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": call.id, "output": result.content]], socket)
             }
             if !reviews.isEmpty { return .init(text: text, preparedReviews: reviews) }
-            try await send(["type": "response.create"], socket)
+            guard let nextTurnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
+            turnID = nextTurnID
+            await budgetLedger.markRequestSent(turnID: turnID)
+            try await send(responseCreateEvent(maxOutputTokens: configuration.maxResponseOutputTokens), socket)
         }
         throw OpenAIRealtimeClientError.tooManyToolRounds
     }
 
-    private func receiveResponse(_ socket: URLSessionWebSocketTask, onText: @escaping @Sendable (String) -> Void, model: String, startedAt: Date, pricing: PulseRealtimePricing?, maxTurnCostUSD: Decimal) async throws -> (text: String, calls: [PulseToolUse]) {
+    private func receiveResponse(_ socket: URLSessionWebSocketTask, turnID: UUID, onText: @escaping @Sendable (String) -> Void, model: String, startedAt: Date, pricing: PulseRealtimePricing?) async throws -> (text: String, calls: [PulseToolUse]) {
         var text = ""; var arguments: [String: (id: String, name: String, json: String)] = [:]
         while true {
             let message = try await socket.receive()
@@ -240,7 +249,7 @@ public actor OpenAIRealtimeClient {
             case "response.done":
                 if let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing) {
                     await ledger.record(entry)
-                    if let cost = entry.estimatedCostUSD, cost > maxTurnCostUSD { throw OpenAIRealtimeClientError.budgetExceeded }
+                    if let cost = entry.estimatedCostUSD { await budgetLedger.settle(turnID: turnID, knownCostUSD: cost) }
                 }
                 let calls = try arguments.values.map { call -> PulseToolUse in
                     guard !call.name.isEmpty, let input = call.json.data(using: .utf8) else { throw OpenAIRealtimeClientError.decoding }; return .init(id: call.id, name: call.name, input: input)
@@ -252,12 +261,7 @@ public actor OpenAIRealtimeClient {
         }
     }
     private func send(_ object: [String: Any], _ socket: URLSessionWebSocketTask) async throws { try await socket.send(.data(try JSONSerialization.data(withJSONObject: object))) }
-    private func permitsReservedTurn(_ configuration: OpenAIRealtimeProviderConfiguration, dayTotal: Decimal) async -> Bool {
-        // Reserve the configured turn maximum before opening a cloud call.
-        // This makes hard caps real even though usage arrives only at done.
-        let sessionTotal = await ledger.totalUSD(since: sessionStarted)
-        return sessionTotal + configuration.maxTurnCostUSD <= configuration.budget.perSessionHardUSD && dayTotal + configuration.maxTurnCostUSD <= configuration.budget.perDayHardUSD
-    }
+    private func responseCreateEvent(maxOutputTokens: Int) -> [String: Any] { ["type": "response.create", "response": ["max_output_tokens": maxOutputTokens]] }
     private func toolJSONArray(_ tools: [OpenAIRealtimeToolDefinition]) throws -> [[String: Any]] { try tools.map { try JSONSerialization.jsonObject(with: JSONEncoder.moaOps.encode($0)) as! [String: Any] } }
     private func realtimeSession(instructions: String, tools: [[String: Any]]) -> [String: Any] {
         ["type": "realtime", "instructions": instructions, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]], "tools": tools, "tool_choice": "auto"]
@@ -271,10 +275,10 @@ public actor OpenAIRealtimeClient {
 /// audio output can narrate, but any operation still requires the existing
 /// typed prepare/review path.
 public actor OpenAIRealtimeAudioTurn {
-    private let socket: URLSessionWebSocketTask; private let model: String; private let pricing: PulseRealtimePricing?; private let maxTurnCostUSD: Decimal; private let ledger: PulseUsageLedger
+    private let socket: URLSessionWebSocketTask; private let turnID: UUID; private let model: String; private let pricing: PulseRealtimePricing?; private let maximumAudioInputBytes: Int; private let maxResponseOutputTokens: Int; private let ledger: PulseUsageLedger; private let budgetLedger: PulseRealtimeBudgetLedger
     private let onText: @Sendable (String) -> Void; private let onAudio: @Sendable (Data) -> Void; private let onFinished: @Sendable () -> Void
-    private let startedAt = Date(); private var captureOpen = true; private var cancelled = false; private var receiveTask: Task<Void, Never>?
-    init(socket: URLSessionWebSocketTask, model: String, pricing: PulseRealtimePricing?, maxTurnCostUSD: Decimal, ledger: PulseUsageLedger, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.model = model; self.pricing = pricing; self.maxTurnCostUSD = maxTurnCostUSD; self.ledger = ledger; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
+    private let startedAt = Date(); private var captureOpen = true; private var cancelled = false; private var sentAudioBytes = 0; private var receiveTask: Task<Void, Never>?
+    init(socket: URLSessionWebSocketTask, turnID: UUID, model: String, pricing: PulseRealtimePricing?, maximumAudioInputBytes: Int, maxResponseOutputTokens: Int, ledger: PulseUsageLedger, budgetLedger: PulseRealtimeBudgetLedger, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.turnID = turnID; self.model = model; self.pricing = pricing; self.maximumAudioInputBytes = maximumAudioInputBytes; self.maxResponseOutputTokens = maxResponseOutputTokens; self.ledger = ledger; self.budgetLedger = budgetLedger; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
     deinit { receiveTask?.cancel(); socket.cancel(with: .goingAway, reason: nil) }
     func configure(context: PulseProviderContext) async throws {
         try await send(["type": "session.update", "session": ["type": "realtime", "instructions": PulseProviderPrompt.system, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
@@ -283,14 +287,15 @@ public actor OpenAIRealtimeAudioTurn {
         receiveTask = Task { [weak self] in await self?.receive() }
     }
     public func appendPCM16(_ pcm: Data) async throws {
-        guard captureOpen, !cancelled, !pcm.isEmpty, pcm.count.isMultiple(of: 2) else { return }
+        guard captureOpen, !cancelled, !pcm.isEmpty, pcm.count.isMultiple(of: 2), sentAudioBytes + pcm.count <= maximumAudioInputBytes else { return }
+        sentAudioBytes += pcm.count
         try await send(OpenAIRealtimePCM16.appendEvent(pcm))
     }
     public func endCapture() async throws {
         guard captureOpen, !cancelled else { return }
         captureOpen = false
         try await send(OpenAIRealtimePCM16.commitEvent)
-        try await send(["type": "response.create", "response": ["output_modalities": ["text", "audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
+        try await send(["type": "response.create", "response": ["max_output_tokens": maxResponseOutputTokens, "output_modalities": ["text", "audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
     }
     public func cancelForBargeIn() async {
         cancelled = true; captureOpen = false
@@ -311,7 +316,7 @@ public actor OpenAIRealtimeAudioTurn {
             case "response.done":
                 if let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing) {
                     await ledger.record(entry)
-                    if let cost = entry.estimatedCostUSD, cost > maxTurnCostUSD { return }
+                    if let cost = entry.estimatedCostUSD { await budgetLedger.settle(turnID: turnID, knownCostUSD: cost) }
                 }
                 onFinished()
                 return

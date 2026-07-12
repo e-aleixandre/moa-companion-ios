@@ -192,7 +192,7 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(request.url?.scheme, "wss")
         XCTAssertEqual(request.url?.host, "api.openai.com")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-openai-secret")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "OpenAI-Beta"), "realtime=v1")
+        XCTAssertNil(request.value(forHTTPHeaderField: "OpenAI-Beta"))
         XCTAssertFalse(request.url?.absoluteString.contains("Moa-Device") == true)
         XCTAssertFalse(request.url?.absoluteString.contains("moa.example") == true)
     }
@@ -212,6 +212,7 @@ final class PulseCallCoreTests: XCTestCase {
     func testRealtimeGAAudioSessionAndResponseFixturesUseNestedDescriptors() throws {
         let fixture = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"session.update","session":{"output_modalities":["text","audio"],"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null},"output":{"format":{"type":"audio/pcm"},"voice":"marin"}}}}"#.utf8)) as? [String: Any])
         let session = try XCTUnwrap(fixture["session"] as? [String: Any])
+        XCTAssertEqual(session["type"] as? String, "realtime")
         XCTAssertNil(session["modalities"])
         XCTAssertNil(session["input_audio_format"])
         let audio = try XCTUnwrap(session["audio"] as? [String: Any])
@@ -220,6 +221,19 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual((try XCTUnwrap(input["format"] as? [String: Any]))["rate"] as? Int, 24_000)
         let response = ["type": "response.create", "response": ["output_modalities": ["text", "audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]] as [String : Any]
         XCTAssertNotNil((((response["response"] as? [String: Any])?["audio"] as? [String: Any])?["output"] as? [String: Any])?["format"])
+    }
+
+    func testPTTPreconnectBufferKeepsShortPressOrderAndNeverCommitsEmpty() {
+        var buffer = PulsePTTPreconnectBuffer(maximumBytes: 6)
+        buffer.append(Data([1, 0])); buffer.append(Data([2, 0])); buffer.release()
+        let flushed = buffer.takeForFlush()
+        XCTAssertEqual(flushed.chunks, [Data([1, 0]), Data([2, 0])])
+        XCTAssertTrue(flushed.shouldCommit)
+        var capped = PulsePTTPreconnectBuffer(maximumBytes: 2)
+        capped.append(Data([1, 0])); capped.append(Data([2, 0])); capped.release()
+        XCTAssertEqual(capped.takeForFlush().chunks, [Data([1, 0])])
+        var cancelled = PulsePTTPreconnectBuffer(); cancelled.append(Data([1, 0])); cancelled.cancel()
+        XCTAssertFalse(cancelled.takeForFlush().shouldCommit)
     }
 
     func testRealtimeUsagePreservesUnknownAndAppliesBudget() throws {

@@ -2,6 +2,9 @@ import Foundation
 #if os(iOS) && canImport(AVFoundation)
 import AVFoundation
 import UIKit
+#if canImport(Speech)
+import Speech
+#endif
 #endif
 
 public enum PulsePTTState: Equatable, Sendable {
@@ -95,6 +98,7 @@ public protocol PulseVoiceControlling: AnyObject {
     /// recognizer never receives Pulse's own spoken turn.
     func stopSpeakingForCapture()
     func beginPushToTalk(capture: PulseVoiceCaptureToken) async
+    func beginReviewConfirmation(capture: PulseVoiceCaptureToken) async
     /// Releasing PTT ends audio but leaves the token live until Speech emits
     /// its final transcript. `invalidateCapture` is used for every abort.
     func endPushToTalk(capture: PulseVoiceCaptureToken)
@@ -122,6 +126,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var audioSessionActive = false
     private var interruptionObserver: NSObjectProtocol?
     private var captureGate = PulseVoiceCaptureGate()
+#if canImport(Speech)
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+#endif
 
     public override init() {
         super.init()
@@ -194,6 +203,31 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         }
     }
 
+    public func beginReviewConfirmation(capture: PulseVoiceCaptureToken) async {
+#if canImport(Speech)
+        stopSpeakingForCapture(); captureGate.begin(capture)
+        guard foreground, !recording, await microphoneAuthorization(), await speechAuthorization(), recognizer?.isAvailable == true else { captureGate.invalidate(capture); onAvailability?(capture, .unavailable); return }
+        do {
+            try configureAudioSession()
+            let request = SFSpeechAudioBufferRecognitionRequest(); request.shouldReportPartialResults = true
+            recognitionRequest = request
+            let input = audioEngine.inputNode; input.removeTap(onBus: 0)
+            input.installTap(onBus: 0, bufferSize: 1_024, format: input.outputFormat(forBus: 0)) { [weak request] buffer, _ in request?.append(buffer) }
+            audioEngine.prepare(); try audioEngine.start(); recording = true
+            recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
+                Task { @MainActor [weak self] in
+                    guard let self, self.captureGate.accepts(capture) else { return }
+                    if let result { self.onTranscript?(capture, result.bestTranscription.formattedString, result.isFinal); if result.isFinal { self.finishRecording(cancel: false, invalidating: capture) } }
+                    if error != nil { self.finishRecording(cancel: true, invalidating: capture) }
+                }
+            }
+            onAvailability?(capture, .available)
+        } catch { finishRecording(cancel: true, invalidating: capture); onAvailability?(capture, .unavailable) }
+#else
+        onAvailability?(capture, .unavailable)
+#endif
+    }
+
     public func endPushToTalk(capture: PulseVoiceCaptureToken) {
         guard captureGate.accepts(capture) else { return }
         // Keep `capture` live until the final recognition callback arrives.
@@ -234,6 +268,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         recording = false
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
+#if canImport(Speech)
+        recognitionRequest?.endAudio()
+        if cancel { recognitionTask?.cancel() }
+        recognitionTask = nil; recognitionRequest = nil
+#endif
         if let capture { captureGate.invalidate(capture) }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioSessionActive = false
@@ -280,6 +319,14 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             session.requestRecordPermission { continuation.resume(returning: $0) }
         }
     }
+#if canImport(Speech)
+    private func speechAuthorization() async -> Bool {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        if status == .authorized { return true }
+        guard status == .notDetermined else { return false }
+        return await withCheckedContinuation { continuation in SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) } }
+    }
+#endif
 }
 #else
 /// Package CI and macOS hosts deliberately get a truthful no-op rather than a
@@ -293,6 +340,7 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public init() {}
     public func stopSpeakingForCapture() {}
     public func beginPushToTalk(capture: PulseVoiceCaptureToken) async { onAvailability?(capture, .unavailable) }
+    public func beginReviewConfirmation(capture: PulseVoiceCaptureToken) async { onAvailability?(capture, .unavailable) }
     public func endPushToTalk(capture _: PulseVoiceCaptureToken) {}
     public func invalidateCapture() {}
     public func speak(_: String) {}

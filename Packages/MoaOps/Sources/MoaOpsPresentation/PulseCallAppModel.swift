@@ -128,6 +128,7 @@ public final class PulseCallAppModel: ObservableObject {
     private var providerTask: Task<Void, Never>?
     private var realtimeAudioTurn: OpenAIRealtimeAudioTurn?
     private var endedAudioCapture: PulseVoiceCaptureToken?
+    private var preconnectPCM = PulsePTTPreconnectBuffer()
 
     public init(
         store: any PulseSecureStore = KeychainPulseSecureStore(),
@@ -339,7 +340,10 @@ public final class PulseCallAppModel: ObservableObject {
         activeVoiceCapture = capture
         if pendingReview == nil { state = .listening }
         voice.stopSpeakingForCapture()
-        Task { await voice.beginPushToTalk(capture: capture.token) }
+        switch intent {
+        case .ownerTurn: Task { await voice.beginPushToTalk(capture: capture.token) }
+        case .review: Task { await voice.beginReviewConfirmation(capture: capture.token) }
+        }
     }
 
     public func endPushToTalk() {
@@ -347,6 +351,7 @@ public final class PulseCallAppModel: ObservableObject {
         voice.endPushToTalk(capture: capture.token)
         if capture.intent == .ownerTurn {
             endedAudioCapture = capture.token
+            preconnectPCM.release()
             Task { [weak self] in try? await self?.realtimeAudioTurn?.endCapture() }
         }
         pttState = PulsePTTReducer.reduce(pttState, event: .release)
@@ -676,7 +681,11 @@ public final class PulseCallAppModel: ObservableObject {
         }
         voice.onPCM16 = { [weak self] capture, pcm in
             guard let self, self.activeVoiceCapture?.token == capture else { return }
-            Task { [weak self] in try? await self?.realtimeAudioTurn?.appendPCM16(pcm) }
+            if let turn = self.realtimeAudioTurn {
+                Task { try? await turn.appendPCM16(pcm) }
+            } else {
+                self.preconnectPCM.append(pcm)
+            }
         }
     }
 
@@ -686,28 +695,32 @@ public final class PulseCallAppModel: ObservableObject {
         let reservation = TurnReservation(id: UUID(), phase: .provider)
         turnReservation = reservation
         state = .thinking
-        Task { [weak self, store, providerClient] in
-            guard let self else { return }
+        let model = self
+        Task { [weak model, store, providerClient] in
+            guard let model else { return }
             do {
                 guard let key = try store.loadOpenAIRealtimeAPIKey(), !key.isEmpty else { throw OpenAIRealtimeClientError.missingAPIKey }
-                let turn = try await providerClient.beginAudioTurn(apiKey: key, configuration: realtimeConfiguration(), context: .init(brief: brief), onText: { [weak self] delta in
-                    Task { @MainActor in self?.appendProviderDelta(delta, for: reservation.id) }
-                }, onAudio: { [weak self] pcm in
-                    Task { @MainActor in self?.voice.playPCM16(pcm) }
-                }, onFinished: { [weak self] in
-                    Task { @MainActor in
-                        guard let self, self.reservationIsProvider(reservation.id) else { return }
-                        self.realtimeAudioTurn = nil; self.clearActiveVoiceCapture(invalidateNative: false); self.pttState = .idle; self.releaseTurnReservation(reservation.id); self.state = self.settledCallState()
+                let turn = try await providerClient.beginAudioTurn(apiKey: key, configuration: await MainActor.run { model.realtimeConfiguration() }, context: .init(brief: brief), onText: { [weak model] delta in
+                    Task { @MainActor [weak model] in model?.appendProviderDelta(delta, for: reservation.id) }
+                }, onAudio: { [weak model] pcm in
+                    Task { @MainActor [weak model] in model?.voice.playPCM16(pcm) }
+                }, onFinished: { [weak model] in
+                    Task { @MainActor [weak model] in
+                        guard let model, model.reservationIsProvider(reservation.id) else { return }
+                        model.realtimeAudioTurn = nil; model.clearActiveVoiceCapture(invalidateNative: false); model.pttState = .idle; model.releaseTurnReservation(reservation.id); model.state = model.settledCallState()
                     }
                 })
-                guard self.activeVoiceCapture?.token == capture else { await turn.cancelForBargeIn(); return }
-                self.realtimeAudioTurn = turn
-                if self.endedAudioCapture == capture { try? await turn.endCapture() }
+                guard await MainActor.run(body: { model.activeVoiceCapture?.token == capture }) else { await turn.cancelForBargeIn(); return }
+                await MainActor.run { model.realtimeAudioTurn = turn }
+                let flush = await MainActor.run { model.preconnectPCM.takeForFlush() }
+                for chunk in flush.chunks { try await turn.appendPCM16(chunk) }
+                if flush.shouldCommit { try await turn.endCapture() }
             } catch {
-                guard self.reservationIsProvider(reservation.id) else { return }
-                self.releaseTurnReservation(reservation.id)
-                self.state = self.settledCallState()
-                self.deterministicFallback()
+                await MainActor.run {
+                    guard model.reservationIsProvider(reservation.id) else { return }
+                    model.preconnectPCM.cancel(); model.releaseTurnReservation(reservation.id)
+                    model.state = model.settledCallState(); model.deterministicFallback()
+                }
             }
         }
     }
@@ -730,6 +743,7 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func invalidateActiveVoiceCapture() {
+        preconnectPCM.cancel()
         if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
         clearActiveVoiceCapture(invalidateNative: true)
     }

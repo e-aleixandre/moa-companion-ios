@@ -74,6 +74,17 @@ public struct PulseVoiceCaptureGate: Equatable, Sendable {
     }
 }
 
+public enum PulseAudioPlaybackStep: Equatable, Sendable { case activateSession, startEngine, schedule }
+public enum PulseAudioPlaybackPlan {
+    /// Session activation is always ordered before engine startup/scheduling.
+    public static func steps(sessionIsActive: Bool, engineIsRunning: Bool) -> [PulseAudioPlaybackStep] {
+        var steps: [PulseAudioPlaybackStep] = sessionIsActive ? [] : [.activateSession]
+        if !engineIsRunning { steps.append(.startEngine) }
+        steps.append(.schedule)
+        return steps
+    }
+}
+
 @MainActor
 public protocol PulseVoiceControlling: AnyObject {
     var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)? { get set }
@@ -108,6 +119,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var muted = false
     private var recording = false
     private var foreground = true
+    private var audioSessionActive = false
     private var interruptionObserver: NSObjectProtocol?
     private var captureGate = PulseVoiceCaptureGate()
 
@@ -224,12 +236,21 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         audioEngine.inputNode.removeTap(onBus: 0)
         if let capture { captureGate.invalidate(capture) }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        audioSessionActive = false
     }
 
     private func configureAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.duckOthers, .defaultToSpeaker, .allowBluetooth])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+        audioSessionActive = true
+    }
+
+    private func configurePlaybackSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.duckOthers, .defaultToSpeaker, .allowBluetooth])
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
+        audioSessionActive = true
     }
 
     public func playPCM16(_ pcm: Data) {
@@ -238,7 +259,15 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
         buffer.frameLength = frames
         pcm.withUnsafeBytes { raw in memcpy(buffer.int16ChannelData![0], raw.baseAddress!, pcm.count) }
-        if !audioEngine.isRunning { try? audioEngine.start() }
+        do {
+            // PTT teardown deactivates the session; never start playback into
+            // that inactive route.
+            try configurePlaybackSession()
+            if !audioEngine.isRunning { try audioEngine.start() }
+        } catch {
+            onAvailability?(captureGate.activeCapture ?? .init(generation: 0), .unavailable)
+            return
+        }
         player.scheduleBuffer(buffer)
         if !player.isPlaying { player.play() }
     }

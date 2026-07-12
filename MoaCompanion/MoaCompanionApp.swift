@@ -4,11 +4,11 @@ import MoaOpsPresentation
 
 @main
 struct MoaCompanionApp: App {
-    @StateObject private var companion = MoaCompanionAppModel()
+    @StateObject private var pulse = PulseCallAppModel()
 
     var body: some Scene {
         WindowGroup {
-            MoaCompanionRootView(model: companion)
+            PulseCallRootView(model: pulse)
         }
     }
 }

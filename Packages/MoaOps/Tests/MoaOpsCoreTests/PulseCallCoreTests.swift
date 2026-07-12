@@ -185,7 +185,7 @@ final class PulseCallCoreTests: XCTestCase {
         state = PulsePTTReducer.reduce(state, event: .permission(granted: true))
         XCTAssertEqual(state, .listening)
         XCTAssertEqual(PulsePTTReducer.reduce(state, event: .interruption), .interrupted)
-        XCTAssertEqual(PulsePTTReducer.reduce(state, event: .foreground(active: true)), .idle)
+        XCTAssertEqual(PulsePTTReducer.reduce(.interrupted, event: .foreground(active: true)), .idle)
         XCTAssertEqual(PulsePTTReducer.reduce(.listening, event: .foreground(active: false)), .interrupted)
     }
 

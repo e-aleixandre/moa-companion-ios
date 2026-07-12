@@ -197,6 +197,32 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(request.url?.absoluteString.contains("moa.example") == true)
     }
 
+    func testRealtimePCMAppendCommitAndCancelUseDocumentedSchema() throws {
+        let pcm = Data([0, 0, 1, 0])
+        let append = OpenAIRealtimePCM16.appendEvent(pcm)
+        XCTAssertEqual(append["type"] as? String, "input_audio_buffer.append")
+        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(append["audio"] as? String)), pcm)
+        XCTAssertEqual(OpenAIRealtimePCM16.commitEvent["type"] as? String, "input_audio_buffer.commit")
+        XCTAssertEqual(OpenAIRealtimePCM16.cancelEvent["type"] as? String, "response.cancel")
+        XCTAssertEqual(OpenAIRealtimePCM16.clearEvent["type"] as? String, "input_audio_buffer.clear")
+        XCTAssertEqual(OpenAIRealtimePCM16.sampleRate, 24_000)
+        XCTAssertEqual(OpenAIRealtimePCM16.channels, 1)
+    }
+
+    func testRealtimeUsagePreservesUnknownAndAppliesBudget() throws {
+        let pricing = PulseRealtimePricing(textInput: 5, cachedTextInput: 2.5, textOutput: 20, audioInput: 40, audioOutput: 80)
+        let event = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"usage":{"input_tokens":100,"output_tokens":20,"input_token_details":{"cached_tokens":10,"audio_tokens":30},"output_token_details":{"audio_tokens":40}}}"#.utf8)) as? [String: Any])
+        let entry = try XCTUnwrap(OpenAIRealtimeUsage.entry(from: event, model: "gpt-realtime", startedAt: Date(), pricing: pricing))
+        XCTAssertEqual(entry.audioInputTokens, 30)
+        XCTAssertEqual(entry.audioOutputTokens, 40)
+        XCTAssertNotNil(entry.estimatedCostUSD)
+        XCTAssertNil(OpenAIRealtimeUsage.entry(from: ["type": "response.done"], model: "gpt-realtime", startedAt: Date(), pricing: pricing))
+        let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 2)
+        XCTAssertTrue(budget.permitsNewCall(sessionTotal: 0.99, dayTotal: 1.99))
+        XCTAssertFalse(budget.permitsNewCall(sessionTotal: 1, dayTotal: 0))
+        XCTAssertFalse(budget.permitsNewCall(sessionTotal: 0, dayTotal: 2))
+    }
+
     func testPTTReducerStopsOnInterruptionAndForegroundLoss() {
         var state = PulsePTTState.idle
         state = PulsePTTReducer.reduce(state, event: .press)

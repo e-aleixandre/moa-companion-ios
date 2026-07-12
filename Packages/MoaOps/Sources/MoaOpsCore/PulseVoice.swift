@@ -1,7 +1,6 @@
 import Foundation
-#if os(iOS) && canImport(Speech) && canImport(AVFoundation)
+#if os(iOS) && canImport(AVFoundation)
 import AVFoundation
-import Speech
 import UIKit
 #endif
 
@@ -80,6 +79,7 @@ public protocol PulseVoiceControlling: AnyObject {
     var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)? { get set }
     var onInterruption: ((PulseVoiceCaptureToken) -> Void)? { get set }
     var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)? { get set }
+    var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)? { get set }
     /// Stops narration before Speech permission/recording can begin, so the
     /// recognizer never receives Pulse's own spoken turn.
     func stopSpeakingForCapture()
@@ -92,20 +92,19 @@ public protocol PulseVoiceControlling: AnyObject {
     func stopAll()
     func setMuted(_ muted: Bool)
     func setForegroundActive(_ active: Bool)
+    func playPCM16(_ pcm: Data)
 }
 
-#if os(iOS) && canImport(Speech) && canImport(AVFoundation)
+#if os(iOS) && canImport(AVFoundation)
 @MainActor
-public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, AVSpeechSynthesizerDelegate {
+public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
     public var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
     public var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
+    public var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)?
 
     private let audioEngine = AVAudioEngine()
-    private let synthesizer = AVSpeechSynthesizer()
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
+    private let player = AVAudioPlayerNode()
     private var muted = false
     private var recording = false
     private var foreground = true
@@ -114,7 +113,9 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
 
     public override init() {
         super.init()
-        synthesizer.delegate = self
+        audioEngine.attach(player)
+        let output = audioEngine.mainMixerNode
+        audioEngine.connect(player, to: output, format: output.outputFormat(forBus: 0))
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
@@ -143,42 +144,33 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
             onAvailability?(capture, .unavailable)
             return
         }
-        let speechStatus = await speechAuthorization()
         let microphoneGranted = await microphoneAuthorization()
         // Permission completion can be queued after an interruption, Stop, or
         // foreground loss. Do not start an old capture in that case.
         guard captureGate.accepts(capture) else { return }
-        guard speechStatus == .authorized, microphoneGranted, recognizer?.isAvailable == true else {
+        guard microphoneGranted else {
             captureGate.invalidate(capture)
             onAvailability?(capture, .unavailable)
             return
         }
         do {
             try configureAudioSession()
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            self.request = request
             let input = audioEngine.inputNode
             input.removeTap(onBus: 0)
-            input.installTap(onBus: 0, bufferSize: 1_024, format: input.outputFormat(forBus: 0)) { [weak request] buffer, _ in
-                request?.append(buffer)
+            let sourceFormat = input.outputFormat(forBus: 0)
+            guard let realtimeFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1, interleaved: true), let converter = AVAudioConverter(from: sourceFormat, to: realtimeFormat) else { throw PulseCallError.decoding }
+            input.installTap(onBus: 0, bufferSize: 1_024, format: sourceFormat) { [weak self] buffer, _ in
+                guard let self, self.captureGate.accepts(capture), self.recording else { return }
+                let ratio = realtimeFormat.sampleRate / sourceFormat.sampleRate
+                let output = AVAudioPCMBuffer(pcmFormat: realtimeFormat, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1))!
+                var error: NSError?
+                converter.convert(to: output, error: &error) { _, status in status.pointee = .haveData; return buffer }
+                guard error == nil, let samples = output.int16ChannelData else { return }
+                self.onPCM16?(capture, Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size))
             }
             audioEngine.prepare()
             try audioEngine.start()
             recording = true
-            recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    // Speech can call its result handler after cancel(). The
-                    // token gate makes every such callback inert.
-                    guard self.captureGate.accepts(capture) else { return }
-                    if let result {
-                        self.onTranscript?(capture, result.bestTranscription.formattedString, result.isFinal)
-                        if result.isFinal { self.finishRecording(cancel: false, invalidating: capture) }
-                    }
-                    if error != nil { self.finishRecording(cancel: true, invalidating: capture) }
-                }
-            }
             guard captureGate.accepts(capture) else {
                 finishRecording(cancel: true, invalidating: nil)
                 return
@@ -201,26 +193,23 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
     }
 
     public func stopSpeakingForCapture() {
-        synthesizer.stopSpeaking(at: .immediate)
+        player.stop()
     }
 
     public func speak(_ text: String) {
         guard foreground, !muted, !text.isEmpty else { return }
-        invalidateCapture()
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "es-ES")
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-        synthesizer.speak(utterance)
+        // Cloud narration arrives as PCM through playPCM16. Do not silently
+        // replace it with local TTS, which would hide a failed Realtime path.
     }
 
     public func stopAll() {
         invalidateCapture()
-        synthesizer.stopSpeaking(at: .immediate)
+        player.stop()
     }
 
     public func setMuted(_ muted: Bool) {
         self.muted = muted
-        if muted { synthesizer.stopSpeaking(at: .immediate) }
+        if muted { player.stop() }
     }
 
     public func setForegroundActive(_ active: Bool) {
@@ -229,14 +218,10 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
     }
 
     private func finishRecording(cancel: Bool, invalidating capture: PulseVoiceCaptureToken?) {
-        guard recording || request != nil || capture != nil else { return }
+        guard recording || capture != nil else { return }
         recording = false
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-        if cancel { recognitionTask?.cancel() }
-        recognitionTask = nil
-        request = nil
         if let capture { captureGate.invalidate(capture) }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -247,12 +232,15 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
-    private func speechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-        let status = SFSpeechRecognizer.authorizationStatus()
-        if status != .notDetermined { return status }
-        return await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-        }
+    public func playPCM16(_ pcm: Data) {
+        guard foreground, !muted, !pcm.isEmpty, pcm.count.isMultiple(of: 2), let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1, interleaved: true) else { return }
+        let frames = AVAudioFrameCount(pcm.count / MemoryLayout<Int16>.size)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
+        buffer.frameLength = frames
+        pcm.withUnsafeBytes { raw in memcpy(buffer.int16ChannelData![0], raw.baseAddress!, pcm.count) }
+        if !audioEngine.isRunning { try? audioEngine.start() }
+        player.scheduleBuffer(buffer)
+        if !player.isPlaying { player.play() }
     }
 
     private func microphoneAuthorization() async -> Bool {
@@ -272,6 +260,7 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
     public var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
     public var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
+    public var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)?
     public init() {}
     public func stopSpeakingForCapture() {}
     public func beginPushToTalk(capture: PulseVoiceCaptureToken) async { onAvailability?(capture, .unavailable) }
@@ -281,5 +270,6 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public func stopAll() {}
     public func setMuted(_: Bool) {}
     public func setForegroundActive(_: Bool) {}
+    public func playPCM16(_: Data) {}
 }
 #endif

@@ -210,7 +210,7 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeGAAudioSessionAndResponseFixturesUseNestedDescriptors() throws {
-        let fixture = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"session.update","session":{"output_modalities":["text","audio"],"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null},"output":{"format":{"type":"audio/pcm"},"voice":"marin"}}}}"#.utf8)) as? [String: Any])
+        let fixture = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"session.update","session":{"type":"realtime","output_modalities":["text","audio"],"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null},"output":{"format":{"type":"audio/pcm"},"voice":"marin"}}}}"#.utf8)) as? [String: Any])
         let session = try XCTUnwrap(fixture["session"] as? [String: Any])
         XCTAssertEqual(session["type"] as? String, "realtime")
         XCTAssertNil(session["modalities"])

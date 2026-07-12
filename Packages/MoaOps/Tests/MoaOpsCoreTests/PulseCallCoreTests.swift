@@ -209,9 +209,22 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(OpenAIRealtimePCM16.channels, 1)
     }
 
+    func testRealtimeGAAudioSessionAndResponseFixturesUseNestedDescriptors() throws {
+        let fixture = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"session.update","session":{"output_modalities":["text","audio"],"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null},"output":{"format":{"type":"audio/pcm"},"voice":"marin"}}}}"#.utf8)) as? [String: Any])
+        let session = try XCTUnwrap(fixture["session"] as? [String: Any])
+        XCTAssertNil(session["modalities"])
+        XCTAssertNil(session["input_audio_format"])
+        let audio = try XCTUnwrap(session["audio"] as? [String: Any])
+        let input = try XCTUnwrap(audio["input"] as? [String: Any])
+        XCTAssertEqual((try XCTUnwrap(input["format"] as? [String: Any]))["type"] as? String, "audio/pcm")
+        XCTAssertEqual((try XCTUnwrap(input["format"] as? [String: Any]))["rate"] as? Int, 24_000)
+        let response = ["type": "response.create", "response": ["output_modalities": ["text", "audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]] as [String : Any]
+        XCTAssertNotNil((((response["response"] as? [String: Any])?["audio"] as? [String: Any])?["output"] as? [String: Any])?["format"])
+    }
+
     func testRealtimeUsagePreservesUnknownAndAppliesBudget() throws {
         let pricing = PulseRealtimePricing(textInput: 5, cachedTextInput: 2.5, textOutput: 20, audioInput: 40, audioOutput: 80)
-        let event = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"usage":{"input_tokens":100,"output_tokens":20,"input_token_details":{"cached_tokens":10,"audio_tokens":30},"output_token_details":{"audio_tokens":40}}}"#.utf8)) as? [String: Any])
+        let event = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":20,"input_token_details":{"cached_tokens":10,"audio_tokens":30},"output_token_details":{"audio_tokens":40}}}}"#.utf8)) as? [String: Any])
         let entry = try XCTUnwrap(OpenAIRealtimeUsage.entry(from: event, model: "gpt-realtime", startedAt: Date(), pricing: pricing))
         XCTAssertEqual(entry.audioInputTokens, 30)
         XCTAssertEqual(entry.audioOutputTokens, 40)
@@ -221,6 +234,11 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertTrue(budget.permitsNewCall(sessionTotal: 0.99, dayTotal: 1.99))
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 1, dayTotal: 0))
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 0, dayTotal: 2))
+    }
+
+    func testAudioPlaybackPlanActivatesBeforeEngineAndScheduling() {
+        XCTAssertEqual(PulseAudioPlaybackPlan.steps(sessionIsActive: false, engineIsRunning: false), [.activateSession, .startEngine, .schedule])
+        XCTAssertEqual(PulseAudioPlaybackPlan.steps(sessionIsActive: true, engineIsRunning: true), [.schedule])
     }
 
     func testPTTReducerStopsOnInterruptionAndForegroundLoss() {

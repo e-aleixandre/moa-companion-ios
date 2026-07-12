@@ -690,7 +690,7 @@ public final class PulseCallAppModel: ObservableObject {
             guard let self else { return }
             do {
                 guard let key = try store.loadOpenAIRealtimeAPIKey(), !key.isEmpty else { throw OpenAIRealtimeClientError.missingAPIKey }
-                let turn = try await providerClient.beginAudioTurn(apiKey: key, configuration: .init(), context: .init(brief: brief), onText: { [weak self] delta in
+                let turn = try await providerClient.beginAudioTurn(apiKey: key, configuration: realtimeConfiguration(), context: .init(brief: brief), onText: { [weak self] delta in
                     Task { @MainActor in self?.appendProviderDelta(delta, for: reservation.id) }
                 }, onAudio: { [weak self] pcm in
                     Task { @MainActor in self?.voice.playPCM16(pcm) }
@@ -828,6 +828,15 @@ public final class PulseCallAppModel: ObservableObject {
         guard hasPairedDevice else { return .disconnected }
         if hasFreshAuthoritativeProjection { return .ready }
         return lastSuccessfulRefreshAt == nil ? .stale : .offline
+    }
+
+    private func realtimeConfiguration() -> OpenAIRealtimeProviderConfiguration {
+        switch responseScope {
+        case .mini:
+            return .init(model: "gpt-realtime-mini", maxTurnCostUSD: 0.05, pricing: .mini)
+        case .full:
+            return .init(model: OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: 0.25, pricing: .full)
+        }
     }
 
     private func narrate(_ text: String) {

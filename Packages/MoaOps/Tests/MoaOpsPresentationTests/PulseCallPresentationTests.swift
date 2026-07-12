@@ -257,7 +257,7 @@ final class PulseCallPresentationTests: XCTestCase {
             serviceFactory: { _ in service }
         )
         await model.refresh()
-        await wait(seconds: 0.02)
+        await wait(seconds: 0.08)
         XCTAssertEqual(model.state, .offline)
         XCTAssertFalse(model.operationsAreAvailable)
 

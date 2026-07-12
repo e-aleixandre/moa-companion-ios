@@ -99,6 +99,9 @@ final class PulseCallPresentationTests: XCTestCase {
         await settle()
         XCTAssertEqual(service.confirmCalls, 1)
         XCTAssertNil(model.pendingReview)
+        voice.emitTranscript("sí", isFinal: true)
+        await settle()
+        XCTAssertEqual(service.confirmCalls, 1, "A second yes cannot confirm a review that is no longer visible")
 
         model.present(review: try fixtureReview(operationID: "ZbCdEfGhIjKlMnOpQrStUvWx"))
         model.beginPushToTalk()

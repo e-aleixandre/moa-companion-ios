@@ -100,8 +100,14 @@ public struct PulseRealtimePricing: Equatable, Sendable {
     public init(textInput: Decimal, cachedTextInput: Decimal, textOutput: Decimal, audioInput: Decimal, audioOutput: Decimal) { self.textInput = textInput; self.cachedTextInput = cachedTextInput; self.textOutput = textOutput; self.audioInput = audioInput; self.audioOutput = audioOutput }
     public func estimate(input: Int?, cached: Int?, output: Int?, audioInput: Int?, audioOutput: Int?) -> Decimal? {
         guard input != nil || cached != nil || output != nil || audioInput != nil || audioOutput != nil else { return nil }
-        let million = Decimal(1_000_000)
-        return (Decimal(input ?? 0) * textInput + Decimal(cached ?? 0) * cachedTextInput + Decimal(output ?? 0) * textOutput + Decimal(audioInput ?? 0) * audioInput + Decimal(audioOutput ?? 0) * audioOutput) / million
+        let million: Decimal = 1_000_000
+        let textInputCost: Decimal = Decimal(input ?? 0) * textInput
+        let cachedInputCost: Decimal = Decimal(cached ?? 0) * cachedTextInput
+        let textOutputCost: Decimal = Decimal(output ?? 0) * textOutput
+        let audioInputCost: Decimal = Decimal(audioInput ?? 0) * self.audioInput
+        let audioOutputCost: Decimal = Decimal(audioOutput ?? 0) * self.audioOutput
+        let total: Decimal = textInputCost + cachedInputCost + textOutputCost + audioInputCost + audioOutputCost
+        return total / million
     }
     /// Published Realtime list prices in USD / 1M tokens. Keep tier selection
     /// local and explicit; absent usage remains unknown, never free.

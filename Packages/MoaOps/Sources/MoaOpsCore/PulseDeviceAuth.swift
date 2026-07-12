@@ -1,4 +1,7 @@
 @preconcurrency import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 #if canImport(Security)
 import Security
 #endif
@@ -48,8 +51,16 @@ public struct PulseServerConfiguration: Codable, Equatable, Sendable {
     }
 
     public static func isLoopback(_ host: String) -> Bool {
-        let normalized = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        return normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.")
+        let normalized = host.lowercased()
+        if normalized == "localhost" || normalized == "::1" { return true }
+
+        // `inet_pton` accepts only a complete dotted-quad here. In particular,
+        // hostnames such as `127.evil.example` or `127.0.0.1.evil` cannot
+        // enter the HTTP loopback exception merely by sharing a prefix.
+        var address = in_addr()
+        guard normalized.withCString({ inet_pton(AF_INET, $0, &address) }) == 1 else { return false }
+        let hostOrder = UInt32(bigEndian: address.s_addr)
+        return (hostOrder & 0xFF00_0000) == 0x7F00_0000
     }
 }
 

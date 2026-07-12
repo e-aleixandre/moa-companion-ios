@@ -47,6 +47,9 @@ public protocol PulseVoiceControlling: AnyObject {
     var onTranscript: ((String, Bool) -> Void)? { get set }
     var onInterruption: (() -> Void)? { get set }
     var onAvailability: ((PulseVoiceAvailability) -> Void)? { get set }
+    /// Stops narration before Speech permission/recording can begin, so the
+    /// recognizer never receives Pulse's own spoken turn.
+    func stopSpeakingForCapture()
     func beginPushToTalk() async
     func endPushToTalk()
     func speak(_ text: String)
@@ -93,6 +96,9 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
     }
 
     public func beginPushToTalk() async {
+        // Keep this defensive stop inside the native controller too: callers
+        // can never accidentally request recognition while narration is live.
+        stopSpeakingForCapture()
         guard foreground, !recording else { onAvailability?(.unavailable); return }
         let speechStatus = await speechAuthorization()
         let microphoneGranted = await microphoneAuthorization()
@@ -131,6 +137,10 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling, 
     }
 
     public func endPushToTalk() { finishRecording(cancel: false) }
+
+    public func stopSpeakingForCapture() {
+        synthesizer.stopSpeaking(at: .immediate)
+    }
 
     public func speak(_ text: String) {
         guard foreground, !muted, !text.isEmpty else { return }
@@ -200,6 +210,7 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public var onInterruption: (() -> Void)?
     public var onAvailability: ((PulseVoiceAvailability) -> Void)?
     public init() {}
+    public func stopSpeakingForCapture() {}
     public func beginPushToTalk() async { onAvailability?(.unavailable) }
     public func endPushToTalk() {}
     public func speak(_: String) {}

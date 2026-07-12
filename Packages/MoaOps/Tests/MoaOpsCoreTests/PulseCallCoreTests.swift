@@ -33,6 +33,7 @@ final class PulseCallCoreTests: XCTestCase {
     func testHTTPPlaintextLoopbackGuardRejectsPrefixHostnamesAndMalformedIPv4() throws {
         XCTAssertTrue(PulseServerConfiguration.isLoopback("localhost"))
         XCTAssertTrue(PulseServerConfiguration.isLoopback("::1"))
+        XCTAssertTrue(PulseServerConfiguration.isLoopback("[::1]"), "URLComponents may retain IPv6 brackets")
         XCTAssertTrue(PulseServerConfiguration.isLoopback("127.0.0.1"))
         XCTAssertFalse(PulseServerConfiguration.isLoopback("127.evil.example"))
         XCTAssertFalse(PulseServerConfiguration.isLoopback("127.0.0.1.evil"))

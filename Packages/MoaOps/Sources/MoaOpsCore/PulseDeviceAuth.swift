@@ -52,7 +52,7 @@ public struct PulseServerConfiguration: Codable, Equatable, Sendable {
 
     public static func isLoopback(_ host: String) -> Bool {
         let normalized = host.lowercased()
-        if normalized == "localhost" || normalized == "::1" { return true }
+        if normalized == "localhost" || normalized == "::1" || normalized == "[::1]" { return true }
 
         // `inet_pton` accepts only a complete dotted-quad here. In particular,
         // hostnames such as `127.evil.example` or `127.0.0.1.evil` cannot

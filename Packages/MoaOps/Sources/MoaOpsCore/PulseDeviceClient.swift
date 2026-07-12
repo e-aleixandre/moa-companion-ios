@@ -1,0 +1,280 @@
+@preconcurrency import Foundation
+
+public enum PulseOperationKind: String, Codable, Equatable, Sendable {
+    case directedInstruction = "directed_instruction"
+    case permissionDecision = "permission_decision"
+}
+
+public enum PulsePermissionDecision: String, Codable, Equatable, Sendable {
+    case approveOnce = "approve_once"
+    case deny
+}
+
+/// The two prepare bodies are constructed by code, never by passing through a
+/// model-generated dictionary. Their encoders expose only the server contract.
+public enum PulseOperationPrepare: Equatable, Sendable {
+    case directedInstruction(target: String, text: String)
+    case permissionDecision(target: String, decision: PulsePermissionDecision)
+
+    var kind: PulseOperationKind {
+        switch self {
+        case .directedInstruction: .directedInstruction
+        case .permissionDecision: .permissionDecision
+        }
+    }
+}
+
+extension PulseOperationPrepare: Encodable {
+    enum CodingKeys: String, CodingKey { case kind, target, text, decision }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        switch self {
+        case let .directedInstruction(target, text):
+            try container.encode(target, forKey: .target)
+            try container.encode(text, forKey: .text)
+        case let .permissionDecision(target, decision):
+            try container.encode(target, forKey: .target)
+            try container.encode(decision, forKey: .decision)
+        }
+    }
+}
+
+public struct PulseOperationTarget: Codable, Equatable, Sendable {
+    public let id: String
+    public let title: String?
+    public let project: String?
+
+    public init(id: String, title: String? = nil, project: String? = nil) {
+        self.id = id
+        self.title = title
+        self.project = project
+    }
+}
+
+public struct PulseOperationReview: Codable, Equatable, Sendable {
+    public let target: PulseOperationTarget
+    public let text: String?
+    public let action: String
+    public let risk: String
+    public let consequence: String
+    public let tool: String?
+    public let decision: String?
+    public let scope: String?
+}
+
+public struct PulseOperationReceipt: Codable, Equatable, Sendable {
+    public let operationID: String
+    public let kind: PulseOperationKind
+    public let status: String
+    public let action: String?
+    public let delivery: String?
+    public let observation: String
+    public let completion: String?
+    public let reason: String?
+    public let at: Date
+
+    enum CodingKeys: String, CodingKey {
+        case kind, status, action, delivery, observation, completion, reason, at
+        case operationID = "operation_id"
+    }
+}
+
+public struct PulseOperationResponse: Codable, Equatable, Sendable {
+    public let operationID: String
+    public let kind: PulseOperationKind
+    public let status: String
+    public let expiresAt: Date?
+    public let review: PulseOperationReview?
+    public let receipt: PulseOperationReceipt?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, status, review, receipt
+        case operationID = "operation_id"
+        case expiresAt = "expires_at"
+    }
+
+    public var pendingReview: PulsePendingReview? {
+        guard status == "pending_confirmation", let expiresAt, let review else { return nil }
+        return PulsePendingReview(operationID: operationID, kind: kind, expiresAt: expiresAt, review: review)
+    }
+}
+
+public struct PulsePendingReview: Equatable, Sendable, Identifiable {
+    public let operationID: String
+    public let kind: PulseOperationKind
+    public let expiresAt: Date
+    public let review: PulseOperationReview
+    public var id: String { operationID }
+
+    public init(operationID: String, kind: PulseOperationKind, expiresAt: Date, review: PulseOperationReview) {
+        self.operationID = operationID
+        self.kind = kind
+        self.expiresAt = expiresAt
+        self.review = review
+    }
+
+    public func isCurrent(now: Date = Date()) -> Bool { expiresAt > now }
+}
+
+public enum PulseOperationNarrator {
+    public static func review(_ pending: PulsePendingReview) -> String {
+        let target = pending.review.target.title ?? "el destino seleccionado"
+        switch pending.kind {
+        case .directedInstruction:
+            let text = pending.review.text ?? ""
+            return "Revisión de Moa. Destino: \(target). Texto: \(text). \(pending.review.consequence) Confirma o cancela."
+        case .permissionDecision:
+            let decision = pending.review.decision == PulsePermissionDecision.approveOnce.rawValue ? "aprobar una vez" : "denegar"
+            let tool = pending.review.tool.map { " para \($0)" } ?? ""
+            return "Revisión de Moa. \(decision.capitalized)\(tool) en \(target), alcance: \(pending.review.scope ?? "solo esta solicitud"). \(pending.review.consequence) Confirma o cancela."
+        }
+    }
+
+    /// This speaks the canonical receipt, not an inferred work outcome.
+    public static func receipt(_ receipt: PulseOperationReceipt) -> String {
+        switch receipt.status {
+        case "accepted":
+            if receipt.delivery == "delivered_to_agent" {
+                return "Moa aceptó la operación y entregó la instrucción al agente. No confirma que el trabajo esté terminado."
+            }
+            return "Moa aceptó la decisión revisada. La consecuencia posterior todavía no está confirmada."
+        case "indeterminate":
+            return "Moa no pudo determinar si la operación llegó a ejecutarse. No afirmaré que se haya completado ni la reintentaré automáticamente."
+        case "rejected":
+            return "Moa rechazó o dejó caducar la revisión. No se realizó una acción confirmada."
+        default:
+            return "Moa devolvió un recibo de estado no reconocido. Revisa la operación antes de continuar."
+        }
+    }
+}
+
+public actor MoaPulseDeviceClient {
+    public let registration: PulseDeviceRegistration
+    private let session: URLSession
+
+    public init(registration: PulseDeviceRegistration, session: URLSession = PulseTransportFactory.ephemeralSession()) throws {
+        _ = try PulseServerConfiguration(baseURL: registration.baseURL)
+        self.registration = registration
+        self.session = session
+    }
+
+    public func pulse() async throws -> OpsPulse {
+        try await get(path: "api/ops/pulse", as: OpsPulse.self)
+    }
+
+    public func sitrep() async throws -> OpsBriefing {
+        try await ops(view: "sitrep", target: nil, as: OpsBriefing.self)
+    }
+
+    public func blockers() async throws -> OpsBriefing {
+        try await ops(view: "blockers", target: nil, as: OpsBriefing.self)
+    }
+
+    public func status(target: String) async throws -> OpsStatusResult {
+        guard validReference(target, limit: 256) else { throw PulseCallError.operationUnavailable }
+        return try await ops(view: "status", target: target, as: OpsStatusResult.self)
+    }
+
+    /// This is the only conversation evidence route exposed to Call Moa. It
+    /// returns Serve's display DTO; this client never connects to a normal
+    /// session WebSocket or receives raw agent/tool frames.
+    public func displayMessages(sessionID: String, limit: Int = 8) async throws -> ConversationPage {
+        guard validReference(sessionID, limit: 256), (1...20).contains(limit) else { throw PulseCallError.operationUnavailable }
+        var components = URLComponents(url: endpoint("api/sessions/\(sessionID)/messages"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = components?.url else { throw PulseCallError.invalidServerURL }
+        let page: ConversationPage = try await get(url: url, as: ConversationPage.self)
+        guard page.sessionID == sessionID, page.order == "newest_first" else { throw PulseCallError.decoding }
+        return page
+    }
+
+    public func prepare(_ operation: PulseOperationPrepare) async throws -> PulseOperationResponse {
+        switch operation {
+        case let .directedInstruction(target, text):
+            guard validReference(target, limit: 256), validReference(text, limit: 1_024) else { throw PulseCallError.operationUnavailable }
+        case let .permissionDecision(target, _):
+            guard validReference(target, limit: 256) else { throw PulseCallError.operationUnavailable }
+        }
+        return try await post(path: "api/pulse/operations/prepare", body: operation, as: PulseOperationResponse.self)
+    }
+
+    /// Confirm has an intentionally immutable empty body. There is no API here
+    /// that accepts model text, a boolean, a URL, or a generic action.
+    public func confirm(operationID: String) async throws -> PulseOperationResponse {
+        guard validOperationID(operationID) else { throw PulseCallError.operationUnavailable }
+        return try await post(path: "api/pulse/operations/\(operationID)/confirm", body: PulseEmptyObject(), as: PulseOperationResponse.self)
+    }
+
+    public func operation(operationID: String) async throws -> PulseOperationResponse {
+        guard validOperationID(operationID) else { throw PulseCallError.operationUnavailable }
+        return try await get(path: "api/pulse/operations/\(operationID)", as: PulseOperationResponse.self)
+    }
+
+    private func ops<T: Decodable>(view: String, target: String?, as type: T.Type) async throws -> T {
+        var components = URLComponents(url: endpoint("api/ops"), resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "view", value: view)]
+        if let target { items.append(URLQueryItem(name: "target", value: target)) }
+        components?.queryItems = items
+        guard let url = components?.url else { throw PulseCallError.invalidServerURL }
+        return try await get(url: url, as: type)
+    }
+
+    private func get<T: Decodable>(path: String, as type: T.Type) async throws -> T {
+        try await get(url: endpoint(path), as: type)
+    }
+
+    private func get<T: Decodable>(url: URL, as type: T.Type) async throws -> T {
+        var request = authenticatedRequest(url: url)
+        request.httpMethod = "GET"
+        let (data, response) = try await perform(request, session: session)
+        guard let http = response as? HTTPURLResponse else { throw PulseCallError.invalidResponse }
+        try validate(http)
+        do {
+            return try JSONDecoder.moaOps.decode(type, from: data)
+        } catch {
+            throw PulseCallError.decoding
+        }
+    }
+
+    private func post<Body: Encodable, Response: Decodable>(path: String, body: Body, as type: Response.Type) async throws -> Response {
+        var request = authenticatedRequest(url: endpoint(path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = try JSONEncoder.moaOps.encode(body)
+        let (data, response) = try await perform(request, session: session)
+        guard let http = response as? HTTPURLResponse else { throw PulseCallError.invalidResponse }
+        try validate(http)
+        do {
+            return try JSONDecoder.moaOps.decode(type, from: data)
+        } catch {
+            throw PulseCallError.decoding
+        }
+    }
+
+    private func authenticatedRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("Moa-Device \(registration.credential)", forHTTPHeaderField: "Authorization")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-ID")
+        return request
+    }
+
+    private func endpoint(_ path: String) -> URL {
+        registration.baseURL.appendingPathComponent(path)
+    }
+}
+
+private struct PulseEmptyObject: Encodable {}
+
+func validReference(_ value: String, limit: Int) -> Bool {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !trimmed.isEmpty && trimmed.unicodeScalars.count <= limit && !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+}
+
+private func validOperationID(_ value: String) -> Bool {
+    value.count == 24 && value.unicodeScalars.allSatisfy {
+        ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122) || ($0.value >= 48 && $0.value <= 57) || $0 == "-" || $0 == "_"
+    }
+}

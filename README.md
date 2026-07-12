@@ -1,5 +1,16 @@
 # Moa Ops companion packages
 
+## Pulse direct Realtime boundary
+
+Pulse stores an owner-supplied OpenAI API key only in the device Keychain
+(`pulse.openai.api-key.v1`). It opens the documented `wss://api.openai.com/v1/realtime`
+connection directly from the companion with `Authorization: Bearer …`; Moa never receives,
+stores, relays, or logs that key. The Realtime adapter accepts only fixed typed Moa tools and
+the bounded safe Ops brief, never raw conversation context or a generic HTTP tool. It uses the
+documented PCM16 Realtime session format on iOS; macOS and Simulator retain the explicit text
+fallback rather than claiming microphone support. Pulse remains PTT-only, keeps one turn/review
+reservation, and requires the existing visible immutable Moa review before confirmation.
+
 This repository provides package libraries plus a minimal iOS 17 host app for the Moa companion, targeting iOS 17 and macOS 13 with Swift 5.10. `MoaCompanion.xcodeproj` uses the local `MoaOpsCore` and `MoaOpsPresentation` package products and launches `MoaOpsRootView`. The app uses automatic signing, so developers select their own Team in Xcode before running on a physical device. The project contains no signing credentials, team identifiers, audio implementation, CarPlay dependency, or deployment configuration.
 
 ## CI

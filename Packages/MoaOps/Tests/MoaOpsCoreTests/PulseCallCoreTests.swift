@@ -12,7 +12,7 @@ final class PulseCallCoreTests: XCTestCase {
 
         let store = MemorySecureStore()
         XCTAssertNil(try store.loadDeviceRegistration())
-        XCTAssertNil(try store.loadAnthropicAPIKey())
+        XCTAssertNil(try store.loadOpenAIRealtimeAPIKey())
         // The secure-store API has no payload save method. Only a claimed
         // registration may be persisted after this one-use string is gone.
         XCTAssertFalse(String(describing: store).contains(payload.secret))
@@ -186,41 +186,15 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertTrue(PulseOperationNarrator.receipt(receipt).contains("rechazó o dejó caducar"))
     }
 
-    func testAnthropicSSEDecodesTextAndStrictToolInput() throws {
-        var sse = AnthropicSSEDecoder()
-        var events = AnthropicEventDecoder()
-        let lines = [
-            "event: content_block_delta",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hola\"}}",
-            "",
-            "event: content_block_start",
-            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"get_status\",\"input\":{}}}",
-            "",
-            "event: content_block_delta",
-            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"target\\\":\\\"s1\\\"}\"}}",
-            "",
-            "event: content_block_stop",
-            "data: {\"type\":\"content_block_stop\",\"index\":1}",
-            "",
-        ]
-        var decoded: [AnthropicStreamEvent] = []
-        for line in lines {
-            if let frame = sse.consume(line: line) { decoded += try events.decode(frame) }
-        }
-        XCTAssertTrue(decoded.contains(.textDelta("Hola")))
-        guard case let .toolUse(tool)? = decoded.last else { return XCTFail("missing tool") }
-        XCTAssertEqual(try PulseToolRequest(toolUse: tool), .getStatus(target: "s1"))
-    }
-
-    func testAnthropicBodyContainsOnlyPromptDataAndNoMoaCredential() async throws {
-        let client = AnthropicMessagesClient(endpoint: URL(string: "https://api.anthropic.com/v1/messages")!)
-        let request = try await client.makeRequest(messages: [.init(role: "user", content: [.text("<owner_request>estado</owner_request>")])], apiKey: "sk-ant-secret")
-        let body = String(data: try XCTUnwrap(request.httpBody), encoding: .utf8) ?? ""
-        XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "sk-ant-secret")
-        XCTAssertFalse(body.contains("Moa-Device"))
-        XCTAssertFalse(body.contains("Authorization"))
-        XCTAssertFalse(body.contains("moa.example"))
-        XCTAssertFalse(body.contains("sk-ant-secret"))
+    func testOpenAIRealtimeRequestIsDirectAndNeverContainsMoaCredential() async throws {
+        let client = OpenAIRealtimeClient(endpoint: URL(string: "wss://api.openai.com/v1/realtime")!)
+        let request = try await client.makeRequest(apiKey: "sk-openai-secret", configuration: .init())
+        XCTAssertEqual(request.url?.scheme, "wss")
+        XCTAssertEqual(request.url?.host, "api.openai.com")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-openai-secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "OpenAI-Beta"), "realtime=v1")
+        XCTAssertFalse(request.url?.absoluteString.contains("Moa-Device") == true)
+        XCTAssertFalse(request.url?.absoluteString.contains("moa.example") == true)
     }
 
     func testPTTReducerStopsOnInterruptionAndForegroundLoss() {
@@ -264,9 +238,9 @@ private final class MemorySecureStore: PulseSecureStore, @unchecked Sendable {
     func loadDeviceRegistration() throws -> PulseDeviceRegistration? { registration }
     func saveDeviceRegistration(_ registration: PulseDeviceRegistration) throws { self.registration = registration }
     func clearDeviceRegistration() throws { registration = nil }
-    func loadAnthropicAPIKey() throws -> String? { providerKey }
-    func saveAnthropicAPIKey(_ key: String) throws { providerKey = key }
-    func clearAnthropicAPIKey() throws { providerKey = nil }
+    func loadOpenAIRealtimeAPIKey() throws -> String? { providerKey }
+    func saveOpenAIRealtimeAPIKey(_ key: String) throws { providerKey = key }
+    func clearOpenAIRealtimeAPIKey() throws { providerKey = nil }
 }
 
 private final class PulseRequestRecorder: @unchecked Sendable {

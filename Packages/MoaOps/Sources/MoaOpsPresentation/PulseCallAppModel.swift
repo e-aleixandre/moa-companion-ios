@@ -56,7 +56,7 @@ public final class PulseCallAppModel: ObservableObject {
         any PulseCallService,
         any PulseSecureStore,
         PulseWriteGate,
-        AnthropicMessagesClient
+        OpenAIRealtimeClient
     ) -> any PulseProviderResponding
 
     private enum TurnReservationPhase: Equatable {
@@ -88,6 +88,8 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var isPairing = false
     @Published public private(set) var isRefreshing = false
     @Published public private(set) var providerConfigured = false
+    @Published public private(set) var privacyMode: PulsePrivacyMode = .automatic
+    @Published public private(set) var responseScope: PulseResponseScope = .mini
     @Published public private(set) var snapshot: OpsPulse?
     @Published public private(set) var opsSnapshot: OpsSnapshot?
     @Published public private(set) var lastSuccessfulRefreshAt: Date?
@@ -104,7 +106,7 @@ public final class PulseCallAppModel: ObservableObject {
 
     private let store: any PulseSecureStore
     private let serviceFactory: ServiceFactory
-    private let providerClient: AnthropicMessagesClient
+    private let providerClient: OpenAIRealtimeClient
     private let providerFactory: ProviderFactory
     private let writeGate = PulseWriteGate()
     private let voice: any PulseVoiceControlling
@@ -128,7 +130,7 @@ public final class PulseCallAppModel: ObservableObject {
     public init(
         store: any PulseSecureStore = KeychainPulseSecureStore(),
         voice: (any PulseVoiceControlling)? = nil,
-        providerClient: AnthropicMessagesClient = .init(),
+        providerClient: OpenAIRealtimeClient = .init(),
         providerFactory: @escaping ProviderFactory = { service, store, writeGate, providerClient in
             PulseProviderCoordinator(
                 client: providerClient,
@@ -136,7 +138,7 @@ public final class PulseCallAppModel: ObservableObject {
                 executor: PulseMoaToolExecutor(service: service, writeGate: writeGate)
             )
         },
-        streamGraceInterval: TimeInterval = 20,
+        streamGraceInterval: TimeInterval = 45,
         streamOfflineInterval: TimeInterval = 60,
         serviceFactory: @escaping ServiceFactory = { registration in try MoaPulseDeviceService(registration: registration) }
     ) {
@@ -148,7 +150,7 @@ public final class PulseCallAppModel: ObservableObject {
         self.streamOfflineInterval = max(0, streamOfflineInterval)
         self.serviceFactory = serviceFactory
         configureVoiceCallbacks()
-        providerConfigured = (try? store.loadAnthropicAPIKey()) != nil
+        providerConfigured = (try? store.loadOpenAIRealtimeAPIKey()) != nil
         restoreRegistration()
     }
 
@@ -195,9 +197,20 @@ public final class PulseCallAppModel: ObservableObject {
 
     public var providerAvailabilityLabel: String {
         providerConfigured
-            ? "Anthropic Messages API configurado en este dispositivo"
+            ? "OpenAI Realtime configurado solo en este dispositivo"
             : "Proveedor no configurado · Pulse usa un panorama determinista"
     }
+
+    public func setPrivacyMode(_ mode: PulsePrivacyMode) {
+        privacyMode = mode
+        if mode == .privateSaving {
+            invalidateActiveVoiceCapture()
+            voice.stopAll()
+            appendCaption("Modo Privado-ahorro: Pulse no envía audio ni texto a OpenAI; conserva solo el panorama local seguro.", provenance: .localFreshness)
+        }
+    }
+
+    public func setResponseScope(_ scope: PulseResponseScope) { responseScope = scope }
 
     public func start() async {
         guard hasPairedDevice else { return }
@@ -410,9 +423,9 @@ public final class PulseCallAppModel: ObservableObject {
         }
     }
 
-    public func saveAnthropicAPIKey(_ value: String) {
+    public func saveOpenAIRealtimeAPIKey(_ value: String) {
         do {
-            try store.saveAnthropicAPIKey(value)
+            try store.saveOpenAIRealtimeAPIKey(value)
             providerConfigured = true
             userMessage = nil
         } catch {
@@ -421,8 +434,8 @@ public final class PulseCallAppModel: ObservableObject {
         }
     }
 
-    public func clearAnthropicAPIKey() {
-        try? store.clearAnthropicAPIKey()
+    public func clearOpenAIRealtimeAPIKey() {
+        try? store.clearOpenAIRealtimeAPIKey()
         providerConfigured = false
     }
 
@@ -514,7 +527,7 @@ public final class PulseCallAppModel: ObservableObject {
             deterministicFallback()
             return
         }
-        guard providerConfigured else {
+        guard providerConfigured, privacyMode.permitsCloudAudio else {
             deterministicFallback()
             return
         }
@@ -583,7 +596,7 @@ public final class PulseCallAppModel: ObservableObject {
             providerTask = nil
             releaseTurnReservation(reservation.id)
             state = settledCallState()
-            appendCaption("El proveedor Anthropic no está disponible. Mantengo el panorama determinista de Moa.", provenance: .localFreshness)
+            appendCaption("El proveedor OpenAI Realtime no está disponible. Mantengo el panorama determinista de Moa.", provenance: .localFreshness)
             deterministicFallback()
         }
     }

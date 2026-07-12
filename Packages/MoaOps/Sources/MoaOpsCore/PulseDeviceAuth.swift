@@ -111,9 +111,9 @@ public protocol PulseSecureStore: Sendable {
     func loadDeviceRegistration() throws -> PulseDeviceRegistration?
     func saveDeviceRegistration(_ registration: PulseDeviceRegistration) throws
     func clearDeviceRegistration() throws
-    func loadAnthropicAPIKey() throws -> String?
-    func saveAnthropicAPIKey(_ key: String) throws
-    func clearAnthropicAPIKey() throws
+    func loadOpenAIRealtimeAPIKey() throws -> String?
+    func saveOpenAIRealtimeAPIKey(_ key: String) throws
+    func clearOpenAIRealtimeAPIKey() throws
 }
 
 enum PulseDeviceRegistrationCodec {
@@ -134,7 +134,7 @@ enum PulseDeviceRegistrationCodec {
 public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendable {
     private let service: String
     private let deviceAccount = "pulse.device.registration.v1"
-    private let providerAccount = "pulse.anthropic.api-key.v1"
+    private let providerAccount = "pulse.openai.api-key.v1"
 
     public init(service: String = "com.ealeixandre.moa-companion.pulse") {
         self.service = service
@@ -155,20 +155,20 @@ public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendab
 
     public func clearDeviceRegistration() throws { try clear(account: deviceAccount) }
 
-    public func loadAnthropicAPIKey() throws -> String? {
+    public func loadOpenAIRealtimeAPIKey() throws -> String? {
         guard let data = try load(account: providerAccount),
               let key = String(data: data, encoding: .utf8),
               !key.isEmpty else { return nil }
         return key
     }
 
-    public func saveAnthropicAPIKey(_ key: String) throws {
+    public func saveOpenAIRealtimeAPIKey(_ key: String) throws {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 512 else { throw PulseCallError.secureStorageUnavailable }
         try save(Data(trimmed.utf8), account: providerAccount)
     }
 
-    public func clearAnthropicAPIKey() throws { try clear(account: providerAccount) }
+    public func clearOpenAIRealtimeAPIKey() throws { try clear(account: providerAccount) }
 
     private func load(account: String) throws -> Data? {
 #if canImport(Security)

@@ -288,6 +288,14 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func beginPushToTalk() {
+        if activeVoiceCapture != nil {
+            appendCaption("Pulse sigue cerrando la captura anterior. Espera antes de hablar de nuevo.", provenance: .localFreshness)
+            return
+        }
+        if turnReservation != nil, pendingReview == nil {
+            appendCaption("Pulse está atendiendo un turno. Espera a que termine antes de hablar de nuevo.", provenance: .localFreshness)
+            return
+        }
         guard canUsePushToTalk else { return }
         let intent: VoiceCaptureIntent
         if let review = pendingReview {

@@ -203,8 +203,16 @@ private final class PulseRequestRecorder: @unchecked Sendable {
     func record(_ request: URLRequest) {
         var copy = request
         if copy.httpBody == nil, let stream = copy.httpBodyStream {
-            stream.open(); defer { stream.close() }
-            copy.httpBody = stream.readDataToEndOfFile()
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 1_024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+            copy.httpBody = data
         }
         lock.lock(); values.append(copy); lock.unlock()
     }
@@ -216,7 +224,10 @@ private final class PulseURLProtocol: URLProtocol {
     override class func canInit(with _: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        guard let handler = Self.handler else { return client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)) }
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
         let (response, data) = handler(request)
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)

@@ -180,7 +180,15 @@ public struct PulseCallSceneView: View {
             Spacer()
             Menu {
                 Button("Actualizar", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
-                Button("Proveedor Anthropic", systemImage: "key") { showingProvider = true }
+                Button("OpenAI Realtime", systemImage: "key") { showingProvider = true }
+                Menu("Modo \(model.privacyMode.spanishLabel)") {
+                    ForEach(PulsePrivacyMode.allCases, id: \.self) { mode in
+                        Button(mode.spanishLabel) { model.setPrivacyMode(mode) }
+                    }
+                }
+                Button("Respuesta \(model.responseScope.spanishLabel)") {
+                    model.setResponseScope(model.responseScope == .mini ? .full : .mini)
+                }
                 Button("Desconectar este iPhone", systemImage: "iphone.slash", role: .destructive) { showingDisconnect = true }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -407,10 +415,10 @@ public struct PulseProviderConfigurationView: View {
                     .foregroundStyle(.tint)
                 Text("Proveedor directo")
                     .font(.title2.bold())
-                Text("Pulse usa directamente Anthropic Messages API con el modelo \(AnthropicProviderConfiguration.defaultModel). La clave es independiente de Moa, se guarda solo en el Llavero de este dispositivo y nunca se envía a Serve.")
+                Text("Pulse conecta directamente con OpenAI Realtime mediante WebSocket nativo y PCM16. La clave es independiente de Moa, se guarda solo en el Llavero de este dispositivo y nunca se envía a Serve. En macOS y simulador la voz no se finge: usa texto.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                SecureField("Clave API de Anthropic", text: $apiKey)
+                SecureField("Clave API de OpenAI", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
 #if os(iOS)
@@ -420,17 +428,17 @@ public struct PulseProviderConfigurationView: View {
                     .font(.footnote)
                     .foregroundStyle(model.providerConfigured ? .green : .secondary)
                 HStack {
-                    Button("Eliminar clave", role: .destructive) { model.clearAnthropicAPIKey(); apiKey = "" }
+                    Button("Eliminar clave", role: .destructive) { model.clearOpenAIRealtimeAPIKey(); apiKey = "" }
                         .disabled(!model.providerConfigured)
                     Spacer()
-                    Button("Guardar") { model.saveAnthropicAPIKey(apiKey); apiKey = "" }
+                    Button("Guardar") { model.saveOpenAIRealtimeAPIKey(apiKey); apiKey = "" }
                         .buttonStyle(.borderedProminent)
                         .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 Spacer()
             }
             .padding()
-            .navigationTitle("Anthropic")
+            .navigationTitle("OpenAI Realtime")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
         }
         .presentationDetents([.medium])

@@ -105,6 +105,19 @@ public protocol PulseSecureStore: Sendable {
     func clearAnthropicAPIKey() throws
 }
 
+enum PulseDeviceRegistrationCodec {
+    static func encode(_ registration: PulseDeviceRegistration) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(registration)
+    }
+
+    static func decode(_ data: Data) throws -> PulseDeviceRegistration {
+        try JSONDecoder.moaOps.decode(PulseDeviceRegistration.self, from: data)
+    }
+}
+
 /// The only durable local storage used by Call Moa. Pairing payloads are never
 /// accepted here, so a one-use pairing secret cannot accidentally be retained.
 public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendable {
@@ -119,14 +132,14 @@ public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendab
     public func loadDeviceRegistration() throws -> PulseDeviceRegistration? {
         guard let data = try load(account: deviceAccount) else { return nil }
         do {
-            return try JSONDecoder.moaOps.decode(PulseDeviceRegistration.self, from: data)
+            return try PulseDeviceRegistrationCodec.decode(data)
         } catch {
             throw PulseCallError.secureStorageUnavailable
         }
     }
 
     public func saveDeviceRegistration(_ registration: PulseDeviceRegistration) throws {
-        try save(try JSONEncoder.moaOps.encode(registration), account: deviceAccount)
+        try save(try PulseDeviceRegistrationCodec.encode(registration), account: deviceAccount)
     }
 
     public func clearDeviceRegistration() throws { try clear(account: deviceAccount) }

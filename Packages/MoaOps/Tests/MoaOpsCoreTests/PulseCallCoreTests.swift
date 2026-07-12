@@ -28,6 +28,19 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertThrowsError(try PulseServerConfiguration(urlText: "https://moa.example/?token=never"))
     }
 
+    func testDeviceRegistrationSecureEncodingRoundTripsWithoutPairingPayload() throws {
+        let registration = try PulseDeviceRegistration(
+            baseURL: URL(string: "https://moa.example")!,
+            deviceID: "device_1",
+            credential: "device_1.credential-secret",
+            expiresAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let encoded = try PulseDeviceRegistrationCodec.encode(registration)
+        let json = String(data: encoded, encoding: .utf8) ?? ""
+        XCTAssertFalse(json.contains("moa-pair-v1"))
+        XCTAssertEqual(try PulseDeviceRegistrationCodec.decode(encoded), registration)
+    }
+
     func testClaimAndDeviceRequestsUseStrictJSONAndDeviceAuthorizationOnly() async throws {
         let recorder = PulseRequestRecorder()
         PulseURLProtocol.handler = { request in

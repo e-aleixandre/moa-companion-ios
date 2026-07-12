@@ -92,6 +92,27 @@ public enum OpenAIRealtimePCM16 {
     }
 }
 
+/// Bounded local-only PCM staging for the explicit PTT/socket startup race.
+/// It never exists before PTT, preserves capture order, and an empty press is
+/// never committed.
+public struct PulsePTTPreconnectBuffer: Sendable {
+    public let maximumBytes: Int
+    private(set) var chunks: [Data] = []
+    private(set) var bytes = 0
+    private(set) var released = false
+    public init(maximumBytes: Int = 240_000) { self.maximumBytes = maximumBytes }
+    public mutating func append(_ pcm: Data) {
+        guard !released, !pcm.isEmpty, pcm.count.isMultiple(of: 2), bytes + pcm.count <= maximumBytes else { return }
+        chunks.append(pcm); bytes += pcm.count
+    }
+    public mutating func release() { released = true }
+    public mutating func takeForFlush() -> (chunks: [Data], shouldCommit: Bool) {
+        defer { chunks = []; bytes = 0 }
+        return (chunks, released && !chunks.isEmpty)
+    }
+    public mutating func cancel() { chunks = []; bytes = 0; released = false }
+}
+
 public struct PulseRealtimePricing: Equatable, Sendable {
     /// USD per million tokens. Values are deliberately configuration rather
     /// than guessed from events: callers can update them with the model SKU.
@@ -101,9 +122,12 @@ public struct PulseRealtimePricing: Equatable, Sendable {
     public func estimate(input: Int?, cached: Int?, output: Int?, audioInput: Int?, audioOutput: Int?) -> Decimal? {
         guard input != nil || cached != nil || output != nil || audioInput != nil || audioOutput != nil else { return nil }
         let million: Decimal = 1_000_000
-        let textInputCost: Decimal = Decimal(input ?? 0) * textInput
+        // GA totals include cached/audio tokens, so each component is charged once.
+        let textInputTokens = max(0, (input ?? 0) - (cached ?? 0) - (audioInput ?? 0))
+        let textOutputTokens = max(0, (output ?? 0) - (audioOutput ?? 0))
+        let textInputCost: Decimal = Decimal(textInputTokens) * textInput
         let cachedInputCost: Decimal = Decimal(cached ?? 0) * cachedTextInput
-        let textOutputCost: Decimal = Decimal(output ?? 0) * textOutput
+        let textOutputCost: Decimal = Decimal(textOutputTokens) * textOutput
         let audioInputCost: Decimal = Decimal(audioInput ?? 0) * self.audioInput
         let audioOutputCost: Decimal = Decimal(audioOutput ?? 0) * self.audioOutput
         let total: Decimal = textInputCost + cachedInputCost + textOutputCost + audioInputCost + audioOutputCost
@@ -152,7 +176,6 @@ public actor OpenAIRealtimeClient {
         components.queryItems = [URLQueryItem(name: "model", value: configuration.model)]
         var request = URLRequest(url: components.url!)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("realtime=v1", forHTTPHeaderField: "OpenAI-Beta")
         return request
     }
 
@@ -237,7 +260,7 @@ public actor OpenAIRealtimeClient {
     }
     private func toolJSONArray(_ tools: [OpenAIRealtimeToolDefinition]) throws -> [[String: Any]] { try tools.map { try JSONSerialization.jsonObject(with: JSONEncoder.moaOps.encode($0)) as! [String: Any] } }
     private func realtimeSession(instructions: String, tools: [[String: Any]]) -> [String: Any] {
-        ["instructions": instructions, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]], "tools": tools, "tool_choice": "auto"]
+        ["type": "realtime", "instructions": instructions, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]], "tools": tools, "tool_choice": "auto"]
     }
     private func isPrepare(_ call: PulseToolUse) -> Bool { call.name == PulseToolName.prepareDirectedInstruction.rawValue || call.name == PulseToolName.preparePermissionDecision.rawValue }
 }
@@ -254,7 +277,7 @@ public actor OpenAIRealtimeAudioTurn {
     init(socket: URLSessionWebSocketTask, model: String, pricing: PulseRealtimePricing?, maxTurnCostUSD: Decimal, ledger: PulseUsageLedger, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.model = model; self.pricing = pricing; self.maxTurnCostUSD = maxTurnCostUSD; self.ledger = ledger; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
     deinit { receiveTask?.cancel(); socket.cancel(with: .goingAway, reason: nil) }
     func configure(context: PulseProviderContext) async throws {
-        try await send(["type": "session.update", "session": ["instructions": PulseProviderPrompt.system, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
+        try await send(["type": "session.update", "session": ["type": "realtime", "instructions": PulseProviderPrompt.system, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
         // Bounded safe context is text, never raw Moa credentials or context.
         try await send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": context.ownerMessageData]]]])
         receiveTask = Task { [weak self] in await self?.receive() }

@@ -331,6 +331,12 @@ private final class CallTestVoice: PulseVoiceControlling {
         captures.append(capture)
         onAvailability?(capture, availability)
     }
+    func beginReviewConfirmation(capture: PulseVoiceCaptureToken) async {
+        events.append("beginReviewCapture")
+        activeCapture = capture
+        captures.append(capture)
+        onAvailability?(capture, availability)
+    }
     func endPushToTalk(capture _: PulseVoiceCaptureToken) { events.append("endCapture") }
     func invalidateCapture() {
         events.append("invalidateCapture")

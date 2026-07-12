@@ -117,7 +117,7 @@ public final class PulseCallAppModel: ObservableObject {
 
     public func start() async {
         guard hasPairedDevice else { return }
-        await refresh(narrate: true)
+        await refresh(narrating: true)
     }
 
     /// The pairing payload is parsed and claimed in this scope. It is never
@@ -135,7 +135,7 @@ public final class PulseCallAppModel: ObservableObject {
             serverName = configuration.baseURL.host ?? "Moa"
             userMessage = nil
             state = .consulting
-            await refresh(narrate: true)
+            await refresh(narrating: true)
         } catch {
             state = .disconnected
             userMessage = pairingMessage(for: error)
@@ -168,7 +168,7 @@ public final class PulseCallAppModel: ObservableObject {
         }
     }
 
-    public func refresh(narrate: Bool = false) async {
+    public func refresh(narrating shouldNarrate: Bool = false) async {
         guard let service, hasPairedDevice, isForeground else { return }
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -187,7 +187,7 @@ public final class PulseCallAppModel: ObservableObject {
             userMessage = nil
             await writeGate.setOnline(true)
             startUpdates(using: service)
-            if narrate { narrate(currentBrief.spoken) }
+            if shouldNarrate { narrate(currentBrief.spoken) }
         } catch {
             await writeGate.setOnline(false)
             showOffline(error)
@@ -276,7 +276,7 @@ public final class PulseCallAppModel: ObservableObject {
             }
             if hasPairedDevice, pendingReview == nil { state = .stale }
         } else if hasPairedDevice {
-            Task { await self.refresh(narrate: false) }
+            Task { await self.refresh(narrating: false) }
         }
     }
 
@@ -300,7 +300,7 @@ public final class PulseCallAppModel: ObservableObject {
             let updates = await service.opsUpdates()
             for await update in updates {
                 guard !Task.isCancelled else { return }
-                await self?.apply(update)
+                self?.apply(update)
             }
         }
     }

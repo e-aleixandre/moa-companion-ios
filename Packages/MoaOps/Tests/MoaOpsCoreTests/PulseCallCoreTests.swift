@@ -233,6 +233,21 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(PulsePTTReducer.reduce(.listening, event: .foreground(active: false)), .interrupted)
     }
 
+    func testVoiceCaptureGateRejectsLateCallbacksAfterInvalidation() {
+        let interrupted = PulseVoiceCaptureToken(generation: 41)
+        let next = PulseVoiceCaptureToken(generation: 42)
+        var gate = PulseVoiceCaptureGate()
+
+        gate.begin(interrupted)
+        XCTAssertTrue(gate.accepts(interrupted))
+        gate.invalidate(interrupted)
+        XCTAssertFalse(gate.accepts(interrupted), "An interrupted Speech callback must be ignored")
+
+        gate.begin(next)
+        XCTAssertTrue(gate.accepts(next))
+        XCTAssertFalse(gate.accepts(interrupted), "A prior generation cannot become a later capture")
+    }
+
     private func fixturePulse() throws -> OpsPulse {
         try JSONDecoder.moaOps.decode(OpsPulse.self, from: Data(#"{"generated_at":"2026-07-12T12:00:00Z","summary":{"needs_attention":1,"in_progress":1,"stale_work":0,"on_track":0,"changes":0},"needs_attention":[{"id":"a","session":{"id":"s1","title":"Release","project":"/release"},"category":"permission_needed","priority":1,"lifecycle":"running","activity":"permission","freshness":"fresh","facts":[{"kind":"activity","value":"permission","provenance":"observed"}]}],"in_progress":[{"id":"b","session":{"id":"s2","title":"Build","project":"/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"activity","value":"running","provenance":"observed"}]}],"stale_work":[],"on_track":[],"changes":{"requested":false,"until":"2026-07-12T12:00:00Z","items":[],"next_cursor":"cursor","has_more":false}}"#.utf8))
     }

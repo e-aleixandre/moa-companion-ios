@@ -11,8 +11,10 @@ public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
     public static let defaultModel = "gpt-realtime"
     public let model: String
     public let maxTurnCostUSD: Decimal
-    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.25) {
-        self.model = model; self.maxTurnCostUSD = maxTurnCostUSD
+    public let pricing: PulseRealtimePricing?
+    public let budget: PulseRealtimeBudget
+    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.25, pricing: PulseRealtimePricing? = nil, budget: PulseRealtimeBudget = .init()) {
+        self.model = model; self.maxTurnCostUSD = maxTurnCostUSD; self.pricing = pricing; self.budget = budget
     }
 }
 
@@ -61,13 +63,66 @@ public struct PulseProviderAnswer: Equatable, Sendable { public let text: String
 public protocol PulseProviderResponding: Sendable { func respond(question: String, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer }
 
 public struct PulseUsageLedgerEntry: Equatable, Sendable {
-    public let at: Date; public let inputTokens: Int; public let outputTokens: Int; public let audioInputTokens: Int; public let audioOutputTokens: Int; public let estimatedCostUSD: Decimal
+    public let at: Date; public let model: String; public let inputTokens: Int?; public let outputTokens: Int?; public let cachedInputTokens: Int?; public let audioInputTokens: Int?; public let audioOutputTokens: Int?; public let duration: TimeInterval?; public let estimatedCostUSD: Decimal?
+    public init(at: Date = Date(), model: String, inputTokens: Int? = nil, outputTokens: Int? = nil, cachedInputTokens: Int? = nil, audioInputTokens: Int? = nil, audioOutputTokens: Int? = nil, duration: TimeInterval? = nil, estimatedCostUSD: Decimal? = nil) {
+        self.at = at; self.model = model; self.inputTokens = inputTokens; self.outputTokens = outputTokens; self.cachedInputTokens = cachedInputTokens; self.audioInputTokens = audioInputTokens; self.audioOutputTokens = audioOutputTokens; self.duration = duration; self.estimatedCostUSD = estimatedCostUSD
+    }
 }
 public actor PulseUsageLedger {
     private var entries: [PulseUsageLedgerEntry] = []
     public init() {}
     public func record(_ entry: PulseUsageLedgerEntry) { entries = Array((entries + [entry]).suffix(200)) }
-    public func totalUSD(since date: Date) -> Decimal { entries.filter { $0.at >= date }.reduce(0) { $0 + $1.estimatedCostUSD } }
+    public func totalUSD(since date: Date) -> Decimal { entries.filter { $0.at >= date }.reduce(Decimal.zero) { $0 + ($1.estimatedCostUSD ?? .zero) } }
+}
+
+/// Realtime PCM is always signed 16-bit little-endian, mono, 24 kHz. Keeping
+/// this codec Foundation-only makes the wire contract testable on macOS.
+public enum OpenAIRealtimePCM16 {
+    public static let sampleRate = 24_000
+    public static let channels = 1
+    public static func appendEvent(_ pcm: Data) -> [String: Any] {
+        ["type": "input_audio_buffer.append", "audio": pcm.base64EncodedString()]
+    }
+    public static let commitEvent: [String: Any] = ["type": "input_audio_buffer.commit"]
+    public static let clearEvent: [String: Any] = ["type": "input_audio_buffer.clear"]
+    public static let cancelEvent: [String: Any] = ["type": "response.cancel"]
+    public static func outputDelta(_ object: [String: Any]) -> Data? {
+        guard let encoded = object["delta"] as? String else { return nil }
+        return Data(base64Encoded: encoded)
+    }
+}
+
+public struct PulseRealtimePricing: Equatable, Sendable {
+    /// USD per million tokens. Values are deliberately configuration rather
+    /// than guessed from events: callers can update them with the model SKU.
+    public let textInput: Decimal; public let cachedTextInput: Decimal; public let textOutput: Decimal
+    public let audioInput: Decimal; public let audioOutput: Decimal
+    public init(textInput: Decimal, cachedTextInput: Decimal, textOutput: Decimal, audioInput: Decimal, audioOutput: Decimal) { self.textInput = textInput; self.cachedTextInput = cachedTextInput; self.textOutput = textOutput; self.audioInput = audioInput; self.audioOutput = audioOutput }
+    public func estimate(input: Int?, cached: Int?, output: Int?, audioInput: Int?, audioOutput: Int?) -> Decimal? {
+        guard input != nil || cached != nil || output != nil || audioInput != nil || audioOutput != nil else { return nil }
+        let million = Decimal(1_000_000)
+        return (Decimal(input ?? 0) * textInput + Decimal(cached ?? 0) * cachedTextInput + Decimal(output ?? 0) * textOutput + Decimal(audioInput ?? 0) * audioInput + Decimal(audioOutput ?? 0) * audioOutput) / million
+    }
+}
+
+public struct PulseRealtimeBudget: Equatable, Sendable {
+    public let perSessionHardUSD: Decimal; public let perDayHardUSD: Decimal
+    public init(perSessionHardUSD: Decimal = 2, perDayHardUSD: Decimal = 10) { self.perSessionHardUSD = perSessionHardUSD; self.perDayHardUSD = perDayHardUSD }
+    public func permitsNewCall(sessionTotal: Decimal, dayTotal: Decimal) -> Bool { sessionTotal < perSessionHardUSD && dayTotal < perDayHardUSD }
+}
+
+public enum OpenAIRealtimeUsage {
+    public static func entry(from object: [String: Any], model: String, startedAt: Date, now: Date = Date(), pricing: PulseRealtimePricing?) -> PulseUsageLedgerEntry? {
+        guard let usage = object["usage"] as? [String: Any] else { return nil }
+        let input = usage["input_tokens"] as? Int
+        let output = usage["output_tokens"] as? Int
+        let inputDetails = usage["input_token_details"] as? [String: Any]
+        let outputDetails = usage["output_token_details"] as? [String: Any]
+        let cached = inputDetails?["cached_tokens"] as? Int
+        let audioIn = inputDetails?["audio_tokens"] as? Int
+        let audioOut = outputDetails?["audio_tokens"] as? Int
+        return .init(at: now, model: model, inputTokens: input, outputTokens: output, cachedInputTokens: cached, audioInputTokens: audioIn, audioOutputTokens: audioOut, duration: now.timeIntervalSince(startedAt), estimatedCostUSD: pricing?.estimate(input: input, cached: cached, output: output, audioInput: audioIn, audioOutput: audioOut))
+    }
 }
 
 /// URLSession WebSocket implementation of the documented Realtime WebSocket
@@ -76,7 +131,9 @@ public actor PulseUsageLedger {
 public actor OpenAIRealtimeClient {
     public static let endpoint = URL(string: "wss://api.openai.com/v1/realtime")!
     private let session: URLSession; private let endpoint: URL
-    public init(session: URLSession = PulseTransportFactory.ephemeralSession(), endpoint: URL = OpenAIRealtimeClient.endpoint) { self.session = session; self.endpoint = endpoint }
+    private let ledger: PulseUsageLedger
+    private var sessionSpend: Decimal = .zero
+    public init(session: URLSession = PulseTransportFactory.ephemeralSession(), endpoint: URL = OpenAIRealtimeClient.endpoint, ledger: PulseUsageLedger = .init()) { self.session = session; self.endpoint = endpoint; self.ledger = ledger }
 
     public func makeRequest(apiKey: String, configuration: OpenAIRealtimeProviderConfiguration) throws -> URLRequest {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -89,7 +146,22 @@ public actor OpenAIRealtimeClient {
         return request
     }
 
+    /// Opens one explicit PTT turn. Nothing is captured or sent by this
+    /// method; callers must append PCM only while their capture token is live.
+    public func beginAudioTurn(apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) async throws -> OpenAIRealtimeAudioTurn {
+        let dayStart = Calendar(identifier: .gregorian).startOfDay(for: Date())
+        guard configuration.budget.permitsNewCall(sessionTotal: sessionSpend, dayTotal: await ledger.totalUSD(since: dayStart)) else { throw OpenAIRealtimeClientError.budgetExceeded }
+        let socket = session.webSocketTask(with: try makeRequest(apiKey: apiKey, configuration: configuration))
+        socket.resume()
+        let turn = OpenAIRealtimeAudioTurn(socket: socket, model: configuration.model, pricing: configuration.pricing, ledger: ledger, onText: onText, onAudio: onAudio, onFinished: onFinished)
+        try await turn.configure(context: context)
+        return turn
+    }
+
     public func respond(question: String, context: PulseProviderContext, apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, executor: any PulseToolExecuting, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer {
+        let dayStart = Calendar(identifier: .gregorian).startOfDay(for: Date())
+        guard configuration.budget.permitsNewCall(sessionTotal: sessionSpend, dayTotal: await ledger.totalUSD(since: dayStart)) else { throw OpenAIRealtimeClientError.budgetExceeded }
+        let startedAt = Date()
         let socket = session.webSocketTask(with: try makeRequest(apiKey: apiKey, configuration: configuration))
         socket.resume(); defer { socket.cancel(with: .normalClosure, reason: nil) }
         try await send(["type": "session.update", "session": ["instructions": PulseProviderPrompt.system, "modalities": ["text", "audio"], "voice": "marin", "input_audio_format": "pcm16", "output_audio_format": "pcm16", "tools": try toolJSONArray(PulseProviderPrompt.tools), "tool_choice": "auto"]], socket)
@@ -97,7 +169,7 @@ public actor OpenAIRealtimeClient {
         try await send(["type": "response.create"], socket)
         var text = ""; var reviews: [PulsePendingReview] = []; var rounds = 0
         while rounds < 4 {
-            let outcome = try await receiveResponse(socket, onText: onText)
+            let outcome = try await receiveResponse(socket, onText: onText, model: configuration.model, startedAt: startedAt, pricing: configuration.pricing)
             text += outcome.text
             guard !outcome.calls.isEmpty else { return .init(text: text, preparedReviews: reviews) }
             rounds += 1
@@ -113,7 +185,7 @@ public actor OpenAIRealtimeClient {
         throw OpenAIRealtimeClientError.tooManyToolRounds
     }
 
-    private func receiveResponse(_ socket: URLSessionWebSocketTask, onText: @escaping @Sendable (String) -> Void) async throws -> (text: String, calls: [PulseToolUse]) {
+    private func receiveResponse(_ socket: URLSessionWebSocketTask, onText: @escaping @Sendable (String) -> Void, model: String, startedAt: Date, pricing: PulseRealtimePricing?) async throws -> (text: String, calls: [PulseToolUse]) {
         var text = ""; var arguments: [String: (id: String, name: String, json: String)] = [:]
         while true {
             let message = try await socket.receive()
@@ -131,6 +203,10 @@ public actor OpenAIRealtimeClient {
                 guard let callID = object["call_id"] as? String else { continue }
                 arguments[callID] = (callID, object["name"] as? String ?? arguments[callID]?.name ?? "", object["arguments"] as? String ?? arguments[callID]?.json ?? "{}")
             case "response.done":
+                if let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing) {
+                    await ledger.record(entry)
+                    if let cost = entry.estimatedCostUSD { sessionSpend += cost }
+                }
                 let calls = try arguments.values.map { call -> PulseToolUse in
                     guard !call.name.isEmpty, let input = call.json.data(using: .utf8) else { throw OpenAIRealtimeClientError.decoding }; return .init(id: call.id, name: call.name, input: input)
                 }
@@ -143,6 +219,60 @@ public actor OpenAIRealtimeClient {
     private func send(_ object: [String: Any], _ socket: URLSessionWebSocketTask) async throws { try await socket.send(.data(try JSONSerialization.data(withJSONObject: object))) }
     private func toolJSONArray(_ tools: [OpenAIRealtimeToolDefinition]) throws -> [[String: Any]] { try tools.map { try JSONSerialization.jsonObject(with: JSONEncoder.moaOps.encode($0)) as! [String: Any] } }
     private func isPrepare(_ call: PulseToolUse) -> Bool { call.name == PulseToolName.prepareDirectedInstruction.rawValue || call.name == PulseToolName.preparePermissionDecision.rawValue }
+}
+
+/// A single, explicitly-owned Realtime PTT transport. `endCapture` commits
+/// exactly once and creates a response; `cancel` clears both server input and
+/// current output for barge-in. It is intentionally separate from Moa tools:
+/// audio output can narrate, but any operation still requires the existing
+/// typed prepare/review path.
+public actor OpenAIRealtimeAudioTurn {
+    private let socket: URLSessionWebSocketTask; private let model: String; private let pricing: PulseRealtimePricing?; private let ledger: PulseUsageLedger
+    private let onText: @Sendable (String) -> Void; private let onAudio: @Sendable (Data) -> Void; private let onFinished: @Sendable () -> Void
+    private let startedAt = Date(); private var captureOpen = true; private var cancelled = false; private var receiveTask: Task<Void, Never>?
+    init(socket: URLSessionWebSocketTask, model: String, pricing: PulseRealtimePricing?, ledger: PulseUsageLedger, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.model = model; self.pricing = pricing; self.ledger = ledger; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
+    deinit { receiveTask?.cancel(); socket.cancel(with: .goingAway, reason: nil) }
+    func configure(context: PulseProviderContext) async throws {
+        try await send(["type": "session.update", "session": ["instructions": PulseProviderPrompt.system, "modalities": ["text", "audio"], "voice": "marin", "input_audio_format": "pcm16", "output_audio_format": "pcm16", "turn_detection": NSNull()]])
+        // Bounded safe context is text, never raw Moa credentials or context.
+        try await send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": context.ownerMessageData]]]])
+        receiveTask = Task { [weak self] in await self?.receive() }
+    }
+    public func appendPCM16(_ pcm: Data) async throws {
+        guard captureOpen, !cancelled, !pcm.isEmpty, pcm.count.isMultiple(of: 2) else { return }
+        try await send(OpenAIRealtimePCM16.appendEvent(pcm))
+    }
+    public func endCapture() async throws {
+        guard captureOpen, !cancelled else { return }
+        captureOpen = false
+        try await send(OpenAIRealtimePCM16.commitEvent)
+        try await send(["type": "response.create", "response": ["modalities": ["text", "audio"]]])
+    }
+    public func cancelForBargeIn() async {
+        cancelled = true; captureOpen = false
+        try? await send(OpenAIRealtimePCM16.cancelEvent)
+        try? await send(OpenAIRealtimePCM16.clearEvent)
+    }
+    private func receive() async {
+        while !Task.isCancelled {
+            guard let message = try? await socket.receive() else { return }
+            let data: Data
+            switch message { case let .string(value): data = Data(value.utf8); case let .data(value): data = value; @unknown default: return }
+            guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let type = object["type"] as? String else { continue }
+            switch type {
+            case "response.output_audio.delta", "response.audio.delta":
+                if !cancelled, let pcm = OpenAIRealtimePCM16.outputDelta(object) { onAudio(pcm) }
+            case "response.output_audio_transcript.delta", "response.audio_transcript.delta", "response.output_text.delta", "response.text.delta":
+                if let delta = object["delta"] as? String { onText(delta) }
+            case "response.done":
+                if let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing) { await ledger.record(entry) }
+                onFinished()
+                return
+            default: continue
+            }
+        }
+    }
+    private func send(_ object: [String: Any]) async throws { try await socket.send(.data(try JSONSerialization.data(withJSONObject: object))) }
 }
 
 public actor PulseProviderCoordinator: PulseProviderResponding {

@@ -126,6 +126,8 @@ public final class PulseCallAppModel: ObservableObject {
     /// owned through an immutable review until cancel, failure, or receipt.
     private var turnReservation: TurnReservation?
     private var providerTask: Task<Void, Never>?
+    private var realtimeAudioTurn: OpenAIRealtimeAudioTurn?
+    private var endedAudioCapture: PulseVoiceCaptureToken?
 
     public init(
         store: any PulseSecureStore = KeychainPulseSecureStore(),
@@ -301,6 +303,15 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func beginPushToTalk() {
+        // A new explicit PTT gesture is barge-in: locally stop queued PCM and
+        // atomically cancel/clear the matching Realtime response before any
+        // microphone buffer is accepted for the next capture.
+        if let realtimeAudioTurn {
+            Task { await realtimeAudioTurn.cancelForBargeIn() }
+            self.realtimeAudioTurn = nil
+            releaseTurnReservation()
+            voice.stopSpeakingForCapture()
+        }
         if activeVoiceCapture != nil {
             appendCaption("Pulse sigue cerrando la captura anterior. Espera antes de hablar de nuevo.", provenance: .localFreshness)
             return
@@ -334,6 +345,10 @@ public final class PulseCallAppModel: ObservableObject {
     public func endPushToTalk() {
         guard let capture = activeVoiceCapture else { return }
         voice.endPushToTalk(capture: capture.token)
+        if capture.intent == .ownerTurn {
+            endedAudioCapture = capture.token
+            Task { [weak self] in try? await self?.realtimeAudioTurn?.endCapture() }
+        }
         pttState = PulsePTTReducer.reduce(pttState, event: .release)
         if pendingReview == nil, state == .listening { state = hasFreshAuthoritativeProjection ? .ready : .stale }
     }
@@ -627,6 +642,8 @@ public final class PulseCallAppModel: ObservableObject {
                 if self.pendingReview == nil, self.state == .listening {
                     self.state = self.settledCallState()
                 }
+            } else if case .ownerTurn? = self.activeVoiceCapture?.intent {
+                self.startRealtimeAudioTurn(capture)
             }
         }
         voice.onInterruption = { [weak self] capture in
@@ -657,6 +674,42 @@ public final class PulseCallAppModel: ObservableObject {
                 }
             }
         }
+        voice.onPCM16 = { [weak self] capture, pcm in
+            guard let self, self.activeVoiceCapture?.token == capture else { return }
+            Task { [weak self] in try? await self?.realtimeAudioTurn?.appendPCM16(pcm) }
+        }
+    }
+
+    private func startRealtimeAudioTurn(_ capture: PulseVoiceCaptureToken) {
+        guard realtimeAudioTurn == nil, providerConfigured, privacyMode.permitsCloudAudio,
+              let brief, activeVoiceCapture?.token == capture, turnReservation == nil else { return }
+        let reservation = TurnReservation(id: UUID(), phase: .provider)
+        turnReservation = reservation
+        state = .thinking
+        Task { [weak self, store, providerClient] in
+            guard let self else { return }
+            do {
+                guard let key = try store.loadOpenAIRealtimeAPIKey(), !key.isEmpty else { throw OpenAIRealtimeClientError.missingAPIKey }
+                let turn = try await providerClient.beginAudioTurn(apiKey: key, configuration: .init(), context: .init(brief: brief), onText: { [weak self] delta in
+                    Task { @MainActor in self?.appendProviderDelta(delta, for: reservation.id) }
+                }, onAudio: { [weak self] pcm in
+                    Task { @MainActor in self?.voice.playPCM16(pcm) }
+                }, onFinished: { [weak self] in
+                    Task { @MainActor in
+                        guard let self, self.reservationIsProvider(reservation.id) else { return }
+                        self.realtimeAudioTurn = nil; self.clearActiveVoiceCapture(invalidateNative: false); self.pttState = .idle; self.releaseTurnReservation(reservation.id); self.state = self.settledCallState()
+                    }
+                })
+                guard self.activeVoiceCapture?.token == capture else { await turn.cancelForBargeIn(); return }
+                self.realtimeAudioTurn = turn
+                if self.endedAudioCapture == capture { try? await turn.endCapture() }
+            } catch {
+                guard self.reservationIsProvider(reservation.id) else { return }
+                self.releaseTurnReservation(reservation.id)
+                self.state = self.settledCallState()
+                self.deterministicFallback()
+            }
+        }
     }
 
     private func reservationIsProvider(_ id: UUID) -> Bool {
@@ -677,12 +730,14 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func invalidateActiveVoiceCapture() {
+        if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
         clearActiveVoiceCapture(invalidateNative: true)
     }
 
     private func clearActiveVoiceCapture(invalidateNative: Bool) {
         guard activeVoiceCapture != nil else { return }
         activeVoiceCapture = nil
+        endedAudioCapture = nil
         liveOwnerCaptionID = nil
         if invalidateNative { voice.invalidateCapture() }
     }

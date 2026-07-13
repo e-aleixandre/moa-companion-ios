@@ -358,17 +358,20 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 0, dayTotal: 2))
     }
 
-    func testADurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() async {
+    func testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() async {
         let suite = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
         let store = UserDefaultsPulseRealtimeBudgetStore(defaults: defaults, key: "ledger")
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 1)
         let firstLedger = PulseRealtimeBudgetLedger(store: store)
         let secondLedger = PulseRealtimeBudgetLedger(store: store)
-        async let first = firstLedger.reserve(amountUSD: 0.6, budget: budget)
-        async let second = secondLedger.reserve(amountUSD: 0.6, budget: budget)
-        let (firstID, secondID) = await (first, second)
-        let reservations = [firstID, secondID].compactMap { $0 }
+        let reservations = await withTaskGroup(of: UUID?.self, returning: [UUID].self) { group in
+            group.addTask { await firstLedger.reserve(amountUSD: 0.6, budget: budget) }
+            group.addTask { await secondLedger.reserve(amountUSD: 0.6, budget: budget) }
+            return await group.reduce(into: []) { reservations, turnID in
+                if let turnID { reservations.append(turnID) }
+            }
+        }
         XCTAssertEqual(reservations.count, 1, "concurrent turns must not oversubscribe a hard cap")
         let recovered = PulseRealtimeBudgetLedger(store: store)
         let recoveredActive = await recovered.activeReservations()

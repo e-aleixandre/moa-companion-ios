@@ -3,3 +3,23 @@
 DerivedData/
 xcuserdata/
 *.xcuserstate
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pem
+*.key
+*.cer
+*.csr
+*.mobileprovision
+*.provisionprofile
+AuthKey_*.p8
+GoogleService-Info.plist
+Secrets.xcconfig
+
+# Signed distributables
+*.ipa
+*.xcarchive/

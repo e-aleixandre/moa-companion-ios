@@ -3,16 +3,6 @@ import XCTest
 @testable import MoaOpsCore
 
 final class PulseCallCoreTests: XCTestCase {
-    private var temporaryBudgetKeys: [String] = []
-
-    override func tearDown() {
-        for key in temporaryBudgetKeys {
-            UserDefaults.standard.removeObject(forKey: key)
-        }
-        temporaryBudgetKeys = []
-        super.tearDown()
-    }
-
     func testPairingPayloadIsStrictAndNeverAStoreValue() throws {
         let payload = try PulsePairingPayload(parsing: " moa-pair-v1:pair_abc:one-use-secret ")
         XCTAssertEqual(payload.pairingID, "pair_abc")
@@ -369,7 +359,9 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() async {
-        let store = temporaryBudgetStore()
+        let suite = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UserDefaultsPulseRealtimeBudgetStore(defaults: defaults, key: "ledger")
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 1)
         let firstLedger = PulseRealtimeBudgetLedger(store: store)
         let secondLedger = PulseRealtimeBudgetLedger(store: store)
@@ -389,8 +381,10 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeBudgetSettlesKnownOnceAndRetainsUnknownUntilNextDay() async {
+        let suite = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let ledger = PulseRealtimeBudgetLedger(store: temporaryBudgetStore(), calendar: calendar)
+        let ledger = PulseRealtimeBudgetLedger(store: .init(defaults: defaults, key: "ledger"), calendar: calendar)
         let budget = PulseRealtimeBudget(perSessionHardUSD: 2, perDayHardUSD: 2)
         let now = Date(timeIntervalSince1970: 1_735_689_600) // 2025-01-01 UTC
         let known = await ledger.reserve(amountUSD: 0.5, budget: budget, now: now)!
@@ -412,7 +406,9 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeBudgetReleasesOnlyFailedPreSendAndSessionRotationIsExplicit() async {
-        let ledger = PulseRealtimeBudgetLedger(store: temporaryBudgetStore())
+        let suite = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
+        let ledger = PulseRealtimeBudgetLedger(store: .init(defaults: defaults, key: "ledger"))
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 2)
         let preSend = await ledger.reserve(amountUSD: 0.6, budget: budget)!
         await ledger.releaseIfPreSend(turnID: preSend)
@@ -429,7 +425,9 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeBudgetEnforcesDailyHardLimitIndependentlyOfSessionLimit() async {
-        let ledger = PulseRealtimeBudgetLedger(store: temporaryBudgetStore())
+        let suite = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
+        let ledger = PulseRealtimeBudgetLedger(store: .init(defaults: defaults, key: "ledger"))
         let budget = PulseRealtimeBudget(perSessionHardUSD: 5, perDayHardUSD: 1)
         let accepted = await ledger.reserve(amountUSD: 0.6, budget: budget)
         let rejected = await ledger.reserve(amountUSD: 0.5, budget: budget)
@@ -482,12 +480,6 @@ final class PulseCallCoreTests: XCTestCase {
     private func pendingReview() throws -> PulsePendingReview {
         let review = try JSONDecoder.moaOps.decode(PulseOperationReview.self, from: Data(#"{"target":{"id":"s1","title":"Release","project":"/release"},"text":"continúa","action":"steer","risk":"changes","consequence":"delivery is not completion"}"#.utf8))
         return .init(operationID: "AbCdEfGhIjKlMnOpQrStUvWx", kind: .directedInstruction, expiresAt: .distantFuture, review: review)
-    }
-
-    private func temporaryBudgetStore() -> UserDefaultsPulseRealtimeBudgetStore {
-        let key = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
-        temporaryBudgetKeys.append(key)
-        return .init(defaults: .standard, key: key)
     }
 }
 

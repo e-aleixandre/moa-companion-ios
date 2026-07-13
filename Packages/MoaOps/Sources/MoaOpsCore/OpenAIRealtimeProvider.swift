@@ -44,7 +44,7 @@ public struct PulseRealtimeClientCredential: Decodable, Equatable, Sendable {
 /// is intentionally not implemented here; this transport accepts a caller
 /// supplied short-lived credential only.
 public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
-    public static let defaultModel = "gpt-realtime-mini"
+    public static let defaultModel = "gpt-realtime-2.1-mini"
     public static let approvedModels: Set<String> = [defaultModel]
     public let model: String
     public let maxTurnCostUSD: Decimal
@@ -56,7 +56,7 @@ public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
     /// provider billing guarantee and OpenAI account limits remain final.
     public let maximumAudioInputBytes: Int
     public let maxResponseOutputTokens: Int
-    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.05, pricing: PulseRealtimePricing = .mini, budget: PulseRealtimeBudget = .init(), maximumAudioInputBytes: Int = 1_440_000, maxResponseOutputTokens: Int = 1_024) {
+    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.05, pricing: PulseRealtimePricing = .realtime21Mini, budget: PulseRealtimeBudget = .init(), maximumAudioInputBytes: Int = 1_440_000, maxResponseOutputTokens: Int = 1_024) {
         self.model = model; self.maxTurnCostUSD = maxTurnCostUSD; self.pricing = pricing; self.budget = budget
         self.maximumAudioInputBytes = max(0, maximumAudioInputBytes); self.maxResponseOutputTokens = max(1, maxResponseOutputTokens)
     }
@@ -187,7 +187,7 @@ public struct PulseRealtimePricing: Equatable, Sendable {
     /// Published Realtime list prices in USD / 1M tokens. Keep tier selection
     /// local and explicit; absent usage remains unknown, never free.
     public static let full = PulseRealtimePricing(textInput: 4, cachedTextInput: 0.40, textOutput: 16, audioInput: 32, audioOutput: 64)
-    public static let mini = PulseRealtimePricing(textInput: 0.60, cachedTextInput: 0.06, textOutput: 2.40, audioInput: 10, audioOutput: 20)
+    public static let realtime21Mini = PulseRealtimePricing(textInput: 0.60, cachedTextInput: 0.06, textOutput: 2.40, audioInput: 10, audioOutput: 20)
 }
 
 public struct PulseRealtimeBudget: Equatable, Sendable {
@@ -214,7 +214,7 @@ public enum OpenAIRealtimeUsage {
 /// protocol. It uses JSON events and PCM16/base64 audio events; no unsupported
 /// WebRTC shim or Moa relay is involved.
 public actor OpenAIRealtimeClient {
-    public static let endpoint = URL(string: "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini")!
+    public static let endpoint = URL(string: "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini")!
     private let session: URLSession; private let endpoint: URL
     private let ledger: PulseUsageLedger
     private let budgetLedger: PulseRealtimeBudgetLedger

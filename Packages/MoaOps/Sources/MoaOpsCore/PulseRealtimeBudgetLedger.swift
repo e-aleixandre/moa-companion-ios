@@ -26,7 +26,6 @@ public final class UserDefaultsPulseRealtimeBudgetStore: @unchecked Sendable {
         defer { Self.transactionLock.unlock() }
         let (updated, result) = body(defaults.data(forKey: key))
         defaults.set(updated, forKey: key)
-        defaults.synchronize()
         return result
     }
 }

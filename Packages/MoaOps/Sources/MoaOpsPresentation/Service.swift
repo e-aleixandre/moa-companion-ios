@@ -21,12 +21,16 @@ public enum MoaOpsSessionFactory {
     }
 
     static func ephemeralSession() -> URLSession {
+        URLSession(configuration: ephemeralConfiguration())
+    }
+
+    static func ephemeralConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpShouldSetCookies = true
         configuration.httpCookieStorage = HTTPCookieStorage()
-        return URLSession(configuration: configuration)
+        return configuration
     }
 }
 

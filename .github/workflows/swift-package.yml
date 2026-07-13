@@ -25,13 +25,7 @@ jobs:
       # Xcode's shared XCTest process reproducibly hangs around the durable budget ledger group.
       # Keep exactly that group in its own SwiftPM XCTest process; all other core tests stay together.
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsCoreTests
-      # Diagnostic: XCTest can leave async presentation work alive between test
-      # classes. Keep the class boundaries visible until the offending lifecycle
-      # is identified; remove this split or retain it with evidence afterwards.
-      - run: swift test --package-path Packages/MoaOps --filter CompanionAppModelTests
-      - run: swift test --package-path Packages/MoaOps --filter CompanionPresentationTests
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsPresentationTests
-      - run: swift test --package-path Packages/MoaOps --filter PulseCallPresentationTests
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsBudgetTests
       - run: >-
           xcodebuild

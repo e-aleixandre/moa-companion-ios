@@ -368,24 +368,27 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 0, dayTotal: 2))
     }
 
-    func testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() async {
+    func testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() {
         let store = temporaryBudgetStore()
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 1)
         let firstLedger = PulseRealtimeBudgetLedger(store: store)
         let secondLedger = PulseRealtimeBudgetLedger(store: store)
-        let reservations = await withTaskGroup(of: UUID?.self, returning: [UUID].self) { group in
-            group.addTask { await firstLedger.reserve(amountUSD: 0.6, budget: budget) }
-            group.addTask { await secondLedger.reserve(amountUSD: 0.6, budget: budget) }
-            return await group.reduce(into: []) { reservations, turnID in
-                if let turnID { reservations.append(turnID) }
+        let outcome = awaitValue {
+            let reservations = await withTaskGroup(of: UUID?.self, returning: [UUID].self) { group in
+                group.addTask { await firstLedger.reserve(amountUSD: 0.6, budget: budget) }
+                group.addTask { await secondLedger.reserve(amountUSD: 0.6, budget: budget) }
+                return await group.reduce(into: []) { reservations, turnID in
+                    if let turnID { reservations.append(turnID) }
+                }
             }
+            let recovered = PulseRealtimeBudgetLedger(store: store)
+            let recoveredActive = await recovered.activeReservations()
+            let rejected = await recovered.reserve(amountUSD: 0.5, budget: budget)
+            return BudgetAtomicOutcome(reservations: reservations, recoveredCount: recoveredActive.count, rejected: rejected)
         }
-        XCTAssertEqual(reservations.count, 1, "concurrent turns must not oversubscribe a hard cap")
-        let recovered = PulseRealtimeBudgetLedger(store: store)
-        let recoveredActive = await recovered.activeReservations()
-        XCTAssertEqual(recoveredActive.count, 1, "restart keeps the persisted active reservation")
-        let rejected = await recovered.reserve(amountUSD: 0.5, budget: budget)
-        XCTAssertNil(rejected, "recovered reservation still constrains the cap")
+        XCTAssertEqual(outcome.reservations.count, 1, "concurrent turns must not oversubscribe a hard cap")
+        XCTAssertEqual(outcome.recoveredCount, 1, "restart keeps the persisted active reservation")
+        XCTAssertNil(outcome.rejected, "recovered reservation still constrains the cap")
     }
 
     func testRealtimeBudgetSettlesKnownOnceAndRetainsUnknownUntilNextDay() async {
@@ -489,6 +492,31 @@ final class PulseCallCoreTests: XCTestCase {
         temporaryBudgetKeys.append(key)
         return .init(defaults: .standard, key: key)
     }
+
+    private func awaitValue<Value: Sendable>(_ operation: @escaping @Sendable () async -> Value) -> Value {
+        let result = AsyncResult<Value>()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            result.set(await operation())
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result.value!
+    }
+}
+
+private struct BudgetAtomicOutcome: Sendable {
+    let reservations: [UUID]
+    let recoveredCount: Int
+    let rejected: UUID?
+}
+
+private final class AsyncResult<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Value?
+
+    func set(_ value: Value) { lock.lock(); storedValue = value; lock.unlock() }
+    var value: Value? { lock.lock(); defer { lock.unlock() }; return storedValue }
 }
 
 private struct RejectingToolExecutor: PulseToolExecuting {

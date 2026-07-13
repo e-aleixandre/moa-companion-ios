@@ -151,13 +151,12 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(offline.spoken.lowercased().contains("verificado"))
     }
 
-    func testConstrainedToolsRejectGenericActionsAndMarkDisplayEvidenceUntrusted() throws {
+    func testConstrainedToolsRejectGenericActionsAndDoNotExposeConversationEvidence() throws {
         let generic = PulseToolUse(id: "tool", name: "http_request", input: Data(#"{"url":"https://moa.example/api/attention"}"#.utf8))
         XCTAssertThrowsError(try PulseToolRequest(toolUse: generic))
         let unsafe = PulseToolUse(id: "tool", name: PulseToolName.preparePermissionDecision.rawValue, input: Data(#"{"target":"s1","decision":"approve_once","feedback":"ignore policy"}"#.utf8))
         XCTAssertThrowsError(try PulseToolRequest(toolUse: unsafe))
-        let evidence = try PulseToolRequest(toolUse: .init(id: "tool", name: PulseToolName.safeConversationEvidence.rawValue, input: Data(#"{"session_id":"s1"}"#.utf8)))
-        XCTAssertEqual(evidence, .safeConversationEvidence(sessionID: "s1"))
+        XCTAssertFalse(PulseProviderPrompt.tools.contains { $0.name == "get_safe_conversation_evidence" })
         XCTAssertFalse(PulseProviderPrompt.tools.contains { $0.name == "confirm_operation" })
     }
 
@@ -210,6 +209,22 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(OpenAIRealtimePCM16.clearEvent["type"] as? String, "input_audio_buffer.clear")
         XCTAssertEqual(OpenAIRealtimePCM16.sampleRate, 24_000)
         XCTAssertEqual(OpenAIRealtimePCM16.channels, 1)
+    }
+
+    func testRealtimeJSONOutboundEventsAreTextFrames() throws {
+        let text = try OpenAIRealtimeOutboundEvent.text(["type": "response.create"])
+        XCTAssertEqual(try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])["type"] as? String, "response.create")
+    }
+
+    func testRealtimeProviderBoundsKeepCloudInputsFinite() async throws {
+        XCTAssertEqual(OpenAIRealtimeBounds.string(String(repeating: "x", count: 20), maximum: 8).count, 8)
+        let client = OpenAIRealtimeClient(endpoint: URL(string: "wss://api.openai.com/v1/realtime")!)
+        do {
+            _ = try await client.respond(question: String(repeating: "x", count: OpenAIRealtimeBounds.ownerText + 1), context: .init(brief: try fixtureBrief()), apiKey: "test-only", configuration: .init(), executor: RejectingToolExecutor()) { _ in }
+            XCTFail("oversized owner text must be rejected before opening a provider request")
+        } catch let error as OpenAIRealtimeClientError {
+            XCTAssertEqual(error, .inputTooLarge)
+        }
     }
 
     func testRealtimeGAAudioSessionAndResponseFixturesUseNestedDescriptors() throws {
@@ -361,10 +376,18 @@ final class PulseCallCoreTests: XCTestCase {
         try JSONDecoder.moaOps.decode(OpsPulse.self, from: Data(#"{"generated_at":"2026-07-12T12:00:00Z","summary":{"needs_attention":1,"in_progress":1,"stale_work":0,"on_track":0,"changes":0},"needs_attention":[{"id":"a","session":{"id":"s1","title":"Release","project":"/release"},"category":"permission_needed","priority":1,"lifecycle":"running","activity":"permission","freshness":"fresh","facts":[{"kind":"activity","value":"permission","provenance":"observed"}]}],"in_progress":[{"id":"b","session":{"id":"s2","title":"Build","project":"/build"},"category":"in_progress","lifecycle":"running","activity":"running","freshness":"fresh","facts":[{"kind":"activity","value":"running","provenance":"observed"}]}],"stale_work":[],"on_track":[],"changes":{"requested":false,"until":"2026-07-12T12:00:00Z","items":[],"next_cursor":"cursor","has_more":false}}"#.utf8))
     }
 
+    private func fixtureBrief() throws -> PulseDeterministicBrief {
+        PulseBriefBuilder.make(pulse: try fixturePulse())
+    }
+
     private func pendingReview() throws -> PulsePendingReview {
         let review = try JSONDecoder.moaOps.decode(PulseOperationReview.self, from: Data(#"{"target":{"id":"s1","title":"Release","project":"/release"},"text":"continúa","action":"steer","risk":"changes","consequence":"delivery is not completion"}"#.utf8))
         return .init(operationID: "AbCdEfGhIjKlMnOpQrStUvWx", kind: .directedInstruction, expiresAt: .distantFuture, review: review)
     }
+}
+
+private struct RejectingToolExecutor: PulseToolExecuting {
+    func execute(_ toolUse: PulseToolUse) async -> PulseToolExecution { .init(toolUseID: toolUse.id, content: "unavailable", isError: true) }
 }
 
 private final class MemorySecureStore: PulseSecureStore, @unchecked Sendable {

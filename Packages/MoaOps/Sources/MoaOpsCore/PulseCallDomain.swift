@@ -146,7 +146,6 @@ public enum PulseBriefBuilder {
 public enum PulseToolName: String, CaseIterable, Sendable {
     case getPulse = "get_pulse"
     case getStatus = "get_status"
-    case safeConversationEvidence = "get_safe_conversation_evidence"
     case prepareDirectedInstruction = "prepare_directed_instruction"
     case preparePermissionDecision = "prepare_permission_decision"
 }
@@ -166,7 +165,6 @@ public struct PulseToolUse: Equatable, Sendable {
 public enum PulseToolRequest: Equatable, Sendable {
     case getPulse
     case getStatus(target: String)
-    case safeConversationEvidence(sessionID: String)
     case prepareDirectedInstruction(target: String, text: String)
     case preparePermissionDecision(target: String, decision: PulsePermissionDecision)
 
@@ -188,9 +186,6 @@ public enum PulseToolRequest: Equatable, Sendable {
         case .getStatus:
             guard exact(["target"]), let target = safeString("target", maximum: 256) else { throw PulseCallError.operationUnavailable }
             self = .getStatus(target: target)
-        case .safeConversationEvidence:
-            guard exact(["session_id"]), let id = safeString("session_id", maximum: 256) else { throw PulseCallError.operationUnavailable }
-            self = .safeConversationEvidence(sessionID: id)
         case .prepareDirectedInstruction:
             guard exact(["target", "text"]), let target = safeString("target", maximum: 256), let text = safeString("text", maximum: 1_024) else { throw PulseCallError.operationUnavailable }
             self = .prepareDirectedInstruction(target: target, text: text)
@@ -250,12 +245,6 @@ public actor PulseMoaToolExecutor: PulseToolExecuting {
             case let .getStatus(target):
                 let status = try await service.loadStatus(target: target)
                 return .init(toolUseID: toolUse.id, content: toolResult("safe_status", PulseBriefBuilder.statusText(status), provenance: "moa_observed"))
-            case let .safeConversationEvidence(sessionID):
-                let page = try await service.loadSafeConversationEvidence(sessionID: sessionID)
-                let excerpts = page.messages.reversed().prefix(6).map { message in
-                    "\(message.role == "assistant" ? "agent_reported" : "owner_message"): \(message.text)"
-                }.joined(separator: "\n")
-                return .init(toolUseID: toolUse.id, content: toolResult("display_conversation_untrusted", excerpts.isEmpty ? "No hay extractos seguros disponibles." : excerpts, provenance: "agent_reported"))
             case let .prepareDirectedInstruction(target, text):
                 guard await writeGate.allowsWrites() else { return unavailable(toolUse.id) }
                 let response = try await service.prepareOperation(.directedInstruction(target: target, text: text))

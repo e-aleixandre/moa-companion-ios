@@ -127,6 +127,7 @@ public final class PulseCallAppModel: ObservableObject {
     private var turnReservation: TurnReservation?
     private var providerTask: Task<Void, Never>?
     private var realtimeAudioTurn: OpenAIRealtimeAudioTurn?
+    private var isBargingIn = false
     private var endedAudioCapture: PulseVoiceCaptureToken?
     private var preconnectPCM = PulsePTTPreconnectBuffer()
 
@@ -200,13 +201,14 @@ public final class PulseCallAppModel: ObservableObject {
 
     public var providerAvailabilityLabel: String {
         providerConfigured
-            ? "OpenAI Realtime configurado solo en este dispositivo"
-            : "Proveedor no configurado · Pulse usa un panorama determinista"
+            ? "Credencial efímera del proveedor disponible"
+            : "Proveedor no disponible sin credencial efímera · Pulse usa un panorama determinista"
     }
 
     public func setPrivacyMode(_ mode: PulsePrivacyMode) {
         privacyMode = mode
         if mode == .privateSaving {
+            cancelActiveProviderTurn()
             invalidateActiveVoiceCapture()
             voice.stopAll()
             appendCaption("Modo Privado-ahorro: Pulse no envía audio ni texto a OpenAI; conserva solo el panorama local seguro.", provenance: .localFreshness)
@@ -304,15 +306,25 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func beginPushToTalk() {
-        // A new explicit PTT gesture is barge-in: locally stop queued PCM and
-        // atomically cancel/clear the matching Realtime response before any
-        // microphone buffer is accepted for the next capture.
+        // Per-turn sockets are discarded on barge-in. Do not begin a new
+        // capture until the old socket and local playback are stopped.
         if let realtimeAudioTurn {
-            Task { await realtimeAudioTurn.cancelForBargeIn() }
-            self.realtimeAudioTurn = nil
-            releaseTurnReservation()
+            guard !isBargingIn else { return }
+            isBargingIn = true
             voice.stopSpeakingForCapture()
+            Task { [weak self] in
+                await realtimeAudioTurn.cancelForBargeIn()
+                await MainActor.run {
+                    guard let self else { return }
+                    self.realtimeAudioTurn = nil
+                    self.releaseTurnReservation()
+                    self.isBargingIn = false
+                    self.beginPushToTalk()
+                }
+            }
+            return
         }
+        guard !isBargingIn else { return }
         if activeVoiceCapture != nil {
             appendCaption("Pulse sigue cerrando la captura anterior. Espera antes de hablar de nuevo.", provenance: .localFreshness)
             return
@@ -444,6 +456,7 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func saveOpenAIRealtimeAPIKey(_ value: String) {
+        cancelActiveProviderTurn()
         do {
             try store.saveOpenAIRealtimeAPIKey(value)
             providerConfigured = true
@@ -455,6 +468,7 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func clearOpenAIRealtimeAPIKey() {
+        cancelActiveProviderTurn()
         try? store.clearOpenAIRealtimeAPIKey()
         providerConfigured = false
     }
@@ -714,7 +728,18 @@ public final class PulseCallAppModel: ObservableObject {
                 await MainActor.run { model.realtimeAudioTurn = turn }
                 let flush = await MainActor.run { model.preconnectPCM.takeForFlush() }
                 for chunk in flush.chunks { try await turn.appendPCM16(chunk) }
-                if flush.shouldCommit { try await turn.endCapture() }
+                let wasReleased = await MainActor.run { model.endedAudioCapture == capture }
+                if flush.shouldCommit || wasReleased {
+                    try await turn.endCapture()
+                    await MainActor.run {
+                        guard model.reservationIsProvider(reservation.id), model.realtimeAudioTurn === turn else { return }
+                        if !flush.shouldCommit {
+                            model.realtimeAudioTurn = nil
+                            model.releaseTurnReservation(reservation.id)
+                            model.state = model.settledCallState()
+                        }
+                    }
+                }
             } catch {
                 await MainActor.run {
                     guard model.reservationIsProvider(reservation.id) else { return }
@@ -746,6 +771,12 @@ public final class PulseCallAppModel: ObservableObject {
         preconnectPCM.cancel()
         if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
         clearActiveVoiceCapture(invalidateNative: true)
+    }
+
+    private func cancelActiveProviderTurn() {
+        providerTask?.cancel()
+        providerTask = nil
+        if let reservation = turnReservation, reservation.phase == .provider { releaseTurnReservation() }
     }
 
     private func clearActiveVoiceCapture(invalidateNative: Bool) {
@@ -786,8 +817,8 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func openWriteGate() async {
-        operationsAreAvailable = true
         await writeGate.setOnline(true)
+        operationsAreAvailable = true
     }
 
     private func closeWriteGate() async {

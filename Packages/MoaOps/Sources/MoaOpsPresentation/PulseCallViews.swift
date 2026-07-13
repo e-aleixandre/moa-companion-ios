@@ -403,8 +403,6 @@ private struct PulsePTTButton: View {
 public struct PulseProviderConfigurationView: View {
     @ObservedObject var model: PulseCallAppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var apiKey = ""
-
     public init(model: PulseCallAppModel) { self.model = model }
 
     public var body: some View {
@@ -415,29 +413,15 @@ public struct PulseProviderConfigurationView: View {
                     .foregroundStyle(.tint)
                 Text("Proveedor directo")
                     .font(.title2.bold())
-                Text("Pulse conecta directamente con OpenAI Realtime mediante WebSocket nativo y PCM16. La clave es independiente de Moa, se guarda solo en el Llavero de este dispositivo y nunca se envía a Serve. En macOS y simulador la voz no se finge: usa texto.")
+                Text("La voz de proveedor no está disponible en esta versión. Pulse no acepta ni guarda claves API estándar de larga duración; usa texto y el panorama determinista.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Text("Pulse aplica un límite protector local por sesión y día, incluidas reservas pendientes. No sustituye los límites ni la facturación de tu cuenta de OpenAI, que son el tope final del proveedor.")
+                Text("La reserva local es una guarda de admisión por sesión y día, incluidas reservas pendientes. No garantiza un coste máximo: los límites y la facturación de la cuenta del proveedor siguen siendo autoritativos.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                SecureField("Clave API de OpenAI", text: $apiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled()
-#if os(iOS)
-                    .textInputAutocapitalization(.never)
-#endif
                 Text(model.providerAvailabilityLabel)
                     .font(.footnote)
                     .foregroundStyle(model.providerConfigured ? .green : .secondary)
-                HStack {
-                    Button("Eliminar clave", role: .destructive) { model.clearOpenAIRealtimeAPIKey(); apiKey = "" }
-                        .disabled(!model.providerConfigured)
-                    Spacer()
-                    Button("Guardar") { model.saveOpenAIRealtimeAPIKey(apiKey); apiKey = "" }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
                 Spacer()
             }
             .padding()

@@ -259,6 +259,9 @@ final class MoaOpsPresentationTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         model.setForegroundActive(false)
+        // The ticker is an unstructured MainActor task. Let its cancellation
+        // resume before XCTest tears down this actor-bound test instance.
+        for _ in 0..<20 { await Task.yield() }
 
         XCTAssertFalse(model.isForegroundActive)
         XCTAssertEqual(Array(service.requestedCursors.prefix(2)), [nil, "first"])

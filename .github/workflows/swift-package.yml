@@ -18,7 +18,16 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: swift --version
       - run: swift build -v --package-path Packages/MoaOps
-      - run: swift test -v --package-path Packages/MoaOps
+      # The macOS XCTest runner stalls after this UserDefaults-backed async
+      # test when it shares a process with the prior URLSession tests. It
+      # passes in an isolated runner; run it there and run every other test in
+      # a second fresh process rather than weakening or omitting validation.
+      - run: >-
+          swift test -v --package-path Packages/MoaOps
+          --filter PulseCallCoreTests/testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart
+      - run: >-
+          swift test -v --package-path Packages/MoaOps
+          --skip PulseCallCoreTests/testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart
       - run: >-
           xcodebuild
           -project MoaCompanion.xcodeproj

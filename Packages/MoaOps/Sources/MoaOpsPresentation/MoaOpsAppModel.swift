@@ -127,16 +127,26 @@ public final class MoaOpsAppModel: ObservableObject {
 
     private func startForegroundTaskIfNeeded() {
         guard foregroundTask == nil, isForegroundActive, pulse != nil, service != nil else { return }
-        foregroundTask = Task { [weak self] in
+        let tickNanoseconds = UInt64(foregroundTick * 1_000_000_000)
+        let refreshInterval = foregroundRefreshInterval
+        foregroundTask = Task { [weak self, tickNanoseconds, refreshInterval] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(self?.foregroundTick ?? 60) * 1_000_000_000)
-                guard !Task.isCancelled, let self else { return }
-                self.foregroundNow = Date()
-                guard let lastRefresh = self.lastSuccessfulRefreshAt,
-                      self.foregroundNow.timeIntervalSince(lastRefresh) >= self.foregroundRefreshInterval else { continue }
-                await self.refreshOnForeground()
+                do {
+                    try await Task.sleep(nanoseconds: tickNanoseconds)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                self?.handleForegroundTick(refreshInterval: refreshInterval)
             }
         }
+    }
+
+    private func handleForegroundTick(refreshInterval: TimeInterval) {
+        foregroundNow = Date()
+        guard let lastRefresh = lastSuccessfulRefreshAt,
+              foregroundNow.timeIntervalSince(lastRefresh) >= refreshInterval else { return }
+        Task { [weak self] in await self?.refreshOnForeground() }
     }
 
     public func refreshOnForeground() async {

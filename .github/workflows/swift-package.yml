@@ -18,16 +18,28 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: swift --version
       - run: swift build -v --package-path Packages/MoaOps
-      # The macOS XCTest runner stalls after this UserDefaults-backed async
-      # test when it shares a process with the prior URLSession tests. It
-      # passes in an isolated runner; run it there and run every other test in
-      # a second fresh process rather than weakening or omitting validation.
+      # The macOS XCTest runner stalls when a UserDefaults-backed async ledger
+      # test shares a process with the preceding URLSession tests. Each ledger
+      # test is run in a fresh runner; the final invocation validates every
+      # remaining test rather than weakening or omitting coverage.
       - run: >-
           swift test -v --package-path Packages/MoaOps
           --filter PulseCallCoreTests/testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart
       - run: >-
           swift test -v --package-path Packages/MoaOps
+          --filter PulseCallCoreTests/testRealtimeBudgetEnforcesDailyHardLimitIndependentlyOfSessionLimit
+      - run: >-
+          swift test -v --package-path Packages/MoaOps
+          --filter PulseCallCoreTests/testRealtimeBudgetReleasesOnlyFailedPreSendAndSessionRotationIsExplicit
+      - run: >-
+          swift test -v --package-path Packages/MoaOps
+          --filter PulseCallCoreTests/testRealtimeBudgetSettlesKnownOnceAndRetainsUnknownUntilNextDay
+      - run: >-
+          swift test -v --package-path Packages/MoaOps
           --skip PulseCallCoreTests/testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart
+          --skip PulseCallCoreTests/testRealtimeBudgetEnforcesDailyHardLimitIndependentlyOfSessionLimit
+          --skip PulseCallCoreTests/testRealtimeBudgetReleasesOnlyFailedPreSendAndSessionRotationIsExplicit
+          --skip PulseCallCoreTests/testRealtimeBudgetSettlesKnownOnceAndRetainsUnknownUntilNextDay
       - run: >-
           xcodebuild
           -project MoaCompanion.xcodeproj

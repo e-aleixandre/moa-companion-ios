@@ -30,10 +30,7 @@ public final class UserDefaultsPulseRealtimeBudgetStore: @unchecked Sendable {
     }
 }
 
-/// This type deliberately has no actor isolation. Its only mutable state is
-/// encoded in the store, whose process-wide transaction lock serializes every
-/// read-modify-write operation across ledger instances.
-public final class PulseRealtimeBudgetLedger: @unchecked Sendable {
+public actor PulseRealtimeBudgetLedger {
     public struct Reservation: Codable, Equatable, Sendable {
         public let turnID: UUID
         public let amountUSD: Decimal

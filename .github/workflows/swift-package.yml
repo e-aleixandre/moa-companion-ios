@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: swift-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: macos-14
@@ -18,13 +22,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: swift --version
       - run: swift build -v --package-path Packages/MoaOps
-      # Xcode 15's macOS XCTest runner stalls when PulseCallCoreTests shares a
-      # process with its URLSession-backed tests. Run every test in a fresh
-      # runner, so the suite remains complete without a shared XCTest process.
-      - run: |
-          swift test list --package-path Packages/MoaOps | while IFS= read -r test; do
-            swift test -v --package-path Packages/MoaOps --filter "$test"
-          done
+      - run: swift test -v --package-path Packages/MoaOps
       - run: >-
           xcodebuild
           -project MoaCompanion.xcodeproj

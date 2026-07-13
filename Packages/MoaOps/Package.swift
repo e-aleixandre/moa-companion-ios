@@ -12,6 +12,8 @@ let package = Package(
         .target(name: "MoaOpsCore"),
         .target(name: "MoaOpsPresentation", dependencies: ["MoaOpsCore"]),
         .testTarget(name: "MoaOpsCoreTests", dependencies: ["MoaOpsCore"]),
+        .testTarget(name: "MoaOpsPulseTransportTests", dependencies: ["MoaOpsCore"]),
+        .testTarget(name: "MoaOpsPulseBudgetTests", dependencies: ["MoaOpsCore"]),
         .testTarget(name: "MoaOpsPresentationTests", dependencies: ["MoaOpsPresentation", "MoaOpsCore"]),
     ]
 )

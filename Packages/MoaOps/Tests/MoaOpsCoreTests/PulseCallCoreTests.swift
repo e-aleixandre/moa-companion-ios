@@ -168,20 +168,20 @@ final class PulseCallCoreTests: XCTestCase {
 
     func testRealtimeCredentialBindsExactConfigurationAndCanonicalOrigin() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        func credential(endpoint: String, model: String = "gpt-realtime") throws -> PulseRealtimeClientCredential {
+        func credential(endpoint: String, model: String = OpenAIRealtimeProviderConfiguration.defaultModel) throws -> PulseRealtimeClientCredential {
             try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data("{\"client_secret\":\"ek_x\",\"expires_at\":1800000000,\"transport\":\"websocket\",\"endpoint\":\"\(endpoint)\",\"model\":\"\(model)\"}".utf8))
         }
-        XCTAssertNoThrow(try credential(endpoint: "wss://api.openai.com:443/v1/realtime?model=gpt-realtime").validated(now: now, configuration: .init(model: "gpt-realtime")))
+        XCTAssertNoThrow(try credential(endpoint: "wss://api.openai.com:443/v1/realtime?model=gpt-realtime-2.1-mini").validated(now: now, configuration: .init()))
         for endpoint in [
-            "ws://api.openai.com/v1/realtime?model=gpt-realtime",
-            "wss://api.openai.com:444/v1/realtime?model=gpt-realtime",
-            "wss://api.openai.com/v1/realtime?model=gpt-realtime&x=1",
-            "wss://api.openai.com/v1/realtime?model=gpt-realtime#fragment",
-            "wss://api.openai.com.evil/v1/realtime?model=gpt-realtime",
+            "ws://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini",
+            "wss://api.openai.com:444/v1/realtime?model=gpt-realtime-2.1-mini",
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini&x=1",
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini#fragment",
+            "wss://api.openai.com.evil/v1/realtime?model=gpt-realtime-2.1-mini",
         ] { XCTAssertThrowsError(try credential(endpoint: endpoint).validated(now: now)) }
-        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime", model: "unapproved").validated(now: now))
-        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime").validated(now: now, configuration: .init(model: "gpt-realtime-mini")))
-        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime").validated(now: now.addingTimeInterval(100_000_000)))
+        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=unapproved", model: "unapproved").validated(now: now))
+        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime", model: "gpt-realtime").validated(now: now, configuration: .init()))
+        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini").validated(now: now.addingTimeInterval(100_000_000)))
     }
 
     func testLegacyStandardKeyDeletionIsWriteOnlyAndBestEffort() {
@@ -280,12 +280,12 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeBrokerCredentialFixtureLocksCanonicalEndpointAndModel() async throws {
-        let fixture = Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-mini","model":"gpt-realtime-mini"}"#.utf8)
+        let fixture = Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8)
         let credential = try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: fixture)
 
         XCTAssertNoThrow(try credential.validated(configuration: .init()))
         let request = try await OpenAIRealtimeClient().makeRequest(credential: credential, configuration: .init())
-        XCTAssertEqual(request.url?.absoluteString, "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini")
+        XCTAssertEqual(request.url?.absoluteString, "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini")
         XCTAssertEqual(credential.model, OpenAIRealtimeProviderConfiguration.defaultModel)
     }
 
@@ -347,11 +347,11 @@ final class PulseCallCoreTests: XCTestCase {
     func testRealtimeUsagePreservesUnknownAndAppliesBudget() throws {
         let pricing = PulseRealtimePricing(textInput: 5, cachedTextInput: 2.5, textOutput: 20, audioInput: 40, audioOutput: 80)
         let event = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":20,"input_token_details":{"cached_tokens":10,"audio_tokens":30},"output_token_details":{"audio_tokens":40}}}}"#.utf8)) as? [String: Any])
-        let entry = try XCTUnwrap(OpenAIRealtimeUsage.entry(from: event, model: "gpt-realtime-mini", startedAt: Date(), pricing: pricing))
+        let entry = try XCTUnwrap(OpenAIRealtimeUsage.entry(from: event, model: "gpt-realtime-2.1-mini", startedAt: Date(), pricing: pricing))
         XCTAssertEqual(entry.audioInputTokens, 30)
         XCTAssertEqual(entry.audioOutputTokens, 40)
         XCTAssertNotNil(entry.estimatedCostUSD)
-        XCTAssertNil(OpenAIRealtimeUsage.entry(from: ["type": "response.done"], model: "gpt-realtime-mini", startedAt: Date(), pricing: pricing))
+        XCTAssertNil(OpenAIRealtimeUsage.entry(from: ["type": "response.done"], model: "gpt-realtime-2.1-mini", startedAt: Date(), pricing: pricing))
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 2)
         XCTAssertTrue(budget.permitsNewCall(sessionTotal: 0.99, dayTotal: 1.99))
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 1, dayTotal: 0))
@@ -471,7 +471,7 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     private func realtimeCredential() -> PulseRealtimeClientCredential {
-        try! JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-mini","model":"gpt-realtime-mini"}"#.utf8))
+        try! JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
     }
 
     private func pendingReview() throws -> PulsePendingReview {

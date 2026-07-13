@@ -163,7 +163,7 @@ public final class MoaOpsAppModel: ObservableObject {
         lastSuccessfulRefreshAt = nil
         historyUnavailable = false
         cancelInstruction()
-        Task { await currentService?.invalidate() }
+        Task.detached { await currentService?.invalidate() }
     }
 
     /// Opens the composer only when the current server Pulse item supplied an

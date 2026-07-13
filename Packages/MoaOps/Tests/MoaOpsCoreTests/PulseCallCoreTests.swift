@@ -140,7 +140,7 @@ final class PulseCallCoreTests: XCTestCase {
         let recorder = PulseRequestRecorder()
         PulseURLProtocol.handler = { request in
             recorder.record(request)
-            return (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: ["Cache-Control": "no-store"])!, Data(#"{"client_secret":"ek_one_socket","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+            return (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: ["Cache-Control": "no-store"])!, Data(#"{"client_secret":"ek_one_socket","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
         }
         defer { PulseURLProtocol.handler = nil }
         let session = pulseSession(); defer { session.invalidateAndCancel() }
@@ -160,8 +160,8 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeCredentialRejectsExpiredAndUntrustedEndpoints() throws {
-        let expired = Data(#"{"client_secret":"ek_x","expires_at":1,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8)
-        let hostile = Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://evil.example/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8)
+        let expired = Data(#"{"client_secret":"ek_x","expires_at":1,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8)
+        let hostile = Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://evil.example/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: expired).validated())
         XCTAssertThrowsError(try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: hostile).validated())
     }
@@ -209,7 +209,7 @@ final class PulseCallCoreTests: XCTestCase {
         do { _ = try await client.mintRealtimeClientSecret(); XCTFail("malformed credential must fail") }
         catch { }
         PulseURLProtocol.handler = { request in
-            (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!, Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+            (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!, Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
         }
         do { _ = try await client.mintRealtimeClientSecret(); XCTFail("credential response without no-store must fail") }
         catch { }

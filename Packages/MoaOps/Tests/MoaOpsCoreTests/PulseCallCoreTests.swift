@@ -86,6 +86,7 @@ final class PulseCallCoreTests: XCTestCase {
         }
         defer { PulseURLProtocol.handler = nil }
         let session = pulseSession()
+        defer { session.invalidateAndCancel() }
         let configuration = try PulseServerConfiguration(urlText: "https://moa.example")
         let pairing = PulsePairingClient(session: session)
         let registration = try await pairing.claim(configuration: configuration, payload: try .init(parsing: "moa-pair-v1:pair1:claim-secret"), deviceLabel: "Pulse")
@@ -125,7 +126,9 @@ final class PulseCallCoreTests: XCTestCase {
         }
         defer { PulseURLProtocol.handler = nil }
         let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
-        let client = try MoaPulseDeviceClient(registration: registration, session: pulseSession())
+        let session = pulseSession()
+        defer { session.invalidateAndCancel() }
+        let client = try MoaPulseDeviceClient(registration: registration, session: session)
         _ = try await client.pulse()
         let request = try XCTUnwrap(recorder.requests.last)
         XCTAssertEqual(request.url?.path, "/api/ops/pulse")

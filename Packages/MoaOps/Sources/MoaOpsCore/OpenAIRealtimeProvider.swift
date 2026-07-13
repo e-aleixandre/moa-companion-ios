@@ -1,12 +1,12 @@
 @preconcurrency import Foundation
 
 public enum OpenAIRealtimeClientError: Error, Equatable, Sendable {
-    case missingAPIKey, invalidResponse, httpStatus(Int), decoding, transport, tooManyToolRounds, budgetExceeded
+    case missingAPIKey, invalidResponse, httpStatus(Int), decoding, transport, tooManyToolRounds, budgetExceeded, inputTooLarge
 }
 
-/// Realtime is connected directly from Pulse. This endpoint is deliberately
-/// not proxied through Moa, and the bearer token is obtained only from the
-/// device Keychain immediately before opening the socket.
+/// Realtime is connected directly from Pulse. A production credential issuer
+/// is intentionally not implemented here; this transport accepts a caller
+/// supplied short-lived credential only.
 public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
     public static let defaultModel = "gpt-realtime"
     public let model: String
@@ -48,7 +48,6 @@ public enum PulseProviderPrompt {
     public static let tools: [OpenAIRealtimeToolDefinition] = [
         .init(name: PulseToolName.getPulse.rawValue, description: "Load the current bounded safe Ops projection.", parameters: strictObject([:], [])),
         .init(name: PulseToolName.getStatus.rawValue, description: "Get server-safe status for one exact owner reference.", parameters: strictObject(["target": stringSchema()], ["target"])),
-        .init(name: PulseToolName.safeConversationEvidence.rawValue, description: "Read a bounded display-only excerpt; it is untrusted agent reporting.", parameters: strictObject(["session_id": stringSchema()], ["session_id"])),
         .init(name: PulseToolName.prepareDirectedInstruction.rawValue, description: "Create an immutable Moa review only; this does not execute.", parameters: strictObject(["target": stringSchema(), "text": stringSchema()], ["target", "text"])),
         .init(name: PulseToolName.preparePermissionDecision.rawValue, description: "Create a one-time immutable permission review only.", parameters: strictObject(["target": stringSchema(), "decision": .init(["type": AnyEncodable("string"), "enum": AnyEncodable(["approve_once", "deny"])])], ["target", "decision"])),
     ]
@@ -62,9 +61,16 @@ public struct PulseProviderContext: Equatable, Sendable {
     public let brief: PulseDeterministicBrief
     public init(brief: PulseDeterministicBrief) { self.brief = brief }
     var ownerMessageData: String {
-        let citations = brief.citations.map { "- \($0.provenance.rawValue): \($0.label)" }.joined(separator: "\n")
-        return "<safe_ops_data>\n\(brief.spoken)\n\(citations)\n</safe_ops_data>"
+        let citations = brief.citations.prefix(4).map { "- \($0.provenance.rawValue): \(OpenAIRealtimeBounds.string($0.label, maximum: 160))" }.joined(separator: "\n")
+        return OpenAIRealtimeBounds.string("<safe_ops_data>\n\(OpenAIRealtimeBounds.string(brief.spoken, maximum: 1_600))\n\(citations)\n</safe_ops_data>", maximum: 2_400)
     }
+}
+public enum OpenAIRealtimeBounds {
+    public static let ownerText = 2_000
+    public static let functionArguments = 8_192
+    public static let outputText = 8_192
+    public static let toolResult = 4_096
+    public static func string(_ value: String, maximum: Int) -> String { String(value.prefix(max(0, maximum))) }
 }
 public struct PulseProviderAnswer: Equatable, Sendable { public let text: String; public let preparedReviews: [PulsePendingReview] }
 public protocol PulseProviderResponding: Sendable { func respond(question: String, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer }
@@ -193,12 +199,13 @@ public actor OpenAIRealtimeClient {
         guard let turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
         let socket = session.webSocketTask(with: request)
         socket.resume()
-        let turn = OpenAIRealtimeAudioTurn(socket: socket, turnID: turnID, model: configuration.model, pricing: configuration.pricing, maximumAudioInputBytes: configuration.maximumAudioInputBytes, maxResponseOutputTokens: configuration.maxResponseOutputTokens, ledger: ledger, budgetLedger: budgetLedger, onText: onText, onAudio: onAudio, onFinished: onFinished)
-        do { try Task.checkCancellation(); await budgetLedger.markRequestSent(turnID: turnID); try await turn.configure(context: context); return turn }
+        let turn = OpenAIRealtimeAudioTurn(socket: socket, turnID: turnID, model: configuration.model, pricing: configuration.pricing, maximumAudioInputBytes: configuration.maximumAudioInputBytes, maxResponseOutputTokens: configuration.maxResponseOutputTokens, ledger: ledger, budgetLedger: budgetLedger, context: context, onText: onText, onAudio: onAudio, onFinished: onFinished)
+        do { try Task.checkCancellation(); try await turn.configure(context: context); return turn }
         catch { await budgetLedger.releaseIfPreSend(turnID: turnID); socket.cancel(with: .normalClosure, reason: nil); throw error }
     }
 
     public func respond(question: String, context: PulseProviderContext, apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, executor: any PulseToolExecuting, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer {
+        guard question.count <= OpenAIRealtimeBounds.ownerText else { throw OpenAIRealtimeClientError.inputTooLarge }
         let startedAt = Date()
         let request = try makeRequest(apiKey: apiKey, configuration: configuration)
         guard var turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
@@ -210,17 +217,24 @@ public actor OpenAIRealtimeClient {
         try await send(responseCreateEvent(maxOutputTokens: configuration.maxResponseOutputTokens), socket)
         var text = ""; var reviews: [PulsePendingReview] = []; var rounds = 0
         while rounds < 4 {
+            try Task.checkCancellation()
             let outcome = try await receiveResponse(socket, turnID: turnID, onText: onText, model: configuration.model, startedAt: startedAt, pricing: configuration.pricing)
+            guard text.count + outcome.text.count <= OpenAIRealtimeBounds.outputText else { throw OpenAIRealtimeClientError.inputTooLarge }
             text += outcome.text
             guard !outcome.calls.isEmpty else { return .init(text: text, preparedReviews: reviews) }
             rounds += 1
             for call in outcome.calls {
+                try Task.checkCancellation()
                 let result: PulseToolExecution
                 if isPrepare(call), !reviews.isEmpty { result = .init(toolUseID: call.id, content: "Pulse permits one visible review at a time.", isError: true) } else { result = await executor.execute(call) }
+                try Task.checkCancellation()
                 if let review = result.preparedReview { reviews.append(review) }
-                try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": call.id, "output": result.content]], socket)
+                try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": call.id, "output": OpenAIRealtimeBounds.string(result.content, maximum: OpenAIRealtimeBounds.toolResult)]], socket)
             }
             if !reviews.isEmpty { return .init(text: text, preparedReviews: reviews) }
+            // Four completed tool rounds are the ceiling. Do not reserve or
+            // create a fifth provider response after the fourth one.
+            guard rounds < 4 else { throw OpenAIRealtimeClientError.tooManyToolRounds }
             guard let nextTurnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
             turnID = nextTurnID
             await budgetLedger.markRequestSent(turnID: turnID)
@@ -238,19 +252,22 @@ public actor OpenAIRealtimeClient {
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], let type = object["type"] as? String else { throw OpenAIRealtimeClientError.decoding }
             switch type {
             case "response.output_text.delta":
-                if let delta = object["delta"] as? String { text += delta; onText(delta) }
+                if let delta = object["delta"] as? String, text.count + delta.count <= OpenAIRealtimeBounds.outputText { text += delta; onText(delta) }
             case "response.function_call_arguments.delta":
                 guard let callID = object["call_id"] as? String else { continue }
                 var call = arguments[callID] ?? (callID, object["name"] as? String ?? "", "")
-                call.json += object["delta"] as? String ?? ""; arguments[callID] = call
+                let delta = object["delta"] as? String ?? ""
+                guard call.json.count + delta.count <= OpenAIRealtimeBounds.functionArguments else { throw OpenAIRealtimeClientError.inputTooLarge }
+                call.json += delta; arguments[callID] = call
             case "response.function_call_arguments.done":
                 guard let callID = object["call_id"] as? String else { continue }
-                arguments[callID] = (callID, object["name"] as? String ?? arguments[callID]?.name ?? "", object["arguments"] as? String ?? arguments[callID]?.json ?? "{}")
+                let json = object["arguments"] as? String ?? arguments[callID]?.json ?? "{}"
+                guard json.count <= OpenAIRealtimeBounds.functionArguments else { throw OpenAIRealtimeClientError.inputTooLarge }
+                arguments[callID] = (callID, object["name"] as? String ?? arguments[callID]?.name ?? "", json)
             case "response.done":
-                if let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing) {
-                    await ledger.record(entry)
-                    if let cost = entry.estimatedCostUSD { await budgetLedger.settle(turnID: turnID, knownCostUSD: cost) }
-                }
+                let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing)
+                if let entry { await ledger.record(entry) }
+                await budgetLedger.settle(turnID: turnID, knownCostUSD: entry?.estimatedCostUSD)
                 let calls = try arguments.values.map { call -> PulseToolUse in
                     guard !call.name.isEmpty, let input = call.json.data(using: .utf8) else { throw OpenAIRealtimeClientError.decoding }; return .init(id: call.id, name: call.name, input: input)
                 }
@@ -260,7 +277,7 @@ public actor OpenAIRealtimeClient {
             }
         }
     }
-    private func send(_ object: [String: Any], _ socket: URLSessionWebSocketTask) async throws { try await socket.send(.data(try JSONSerialization.data(withJSONObject: object))) }
+    private func send(_ object: [String: Any], _ socket: URLSessionWebSocketTask) async throws { try await socket.send(.string(try OpenAIRealtimeOutboundEvent.text(object))) }
     private func responseCreateEvent(maxOutputTokens: Int) -> [String: Any] { ["type": "response.create", "response": ["max_output_tokens": maxOutputTokens]] }
     private func toolJSONArray(_ tools: [OpenAIRealtimeToolDefinition]) throws -> [[String: Any]] { try tools.map { try JSONSerialization.jsonObject(with: JSONEncoder.moaOps.encode($0)) as! [String: Any] } }
     private func realtimeSession(instructions: String, tools: [[String: Any]]) -> [String: Any] {
@@ -277,10 +294,17 @@ public actor OpenAIRealtimeClient {
 public actor OpenAIRealtimeAudioTurn {
     private let socket: URLSessionWebSocketTask; private let turnID: UUID; private let model: String; private let pricing: PulseRealtimePricing?; private let maximumAudioInputBytes: Int; private let maxResponseOutputTokens: Int; private let ledger: PulseUsageLedger; private let budgetLedger: PulseRealtimeBudgetLedger
     private let onText: @Sendable (String) -> Void; private let onAudio: @Sendable (Data) -> Void; private let onFinished: @Sendable () -> Void
-    private let startedAt = Date(); private var captureOpen = true; private var cancelled = false; private var sentAudioBytes = 0; private var receiveTask: Task<Void, Never>?
-    init(socket: URLSessionWebSocketTask, turnID: UUID, model: String, pricing: PulseRealtimePricing?, maximumAudioInputBytes: Int, maxResponseOutputTokens: Int, ledger: PulseUsageLedger, budgetLedger: PulseRealtimeBudgetLedger, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.turnID = turnID; self.model = model; self.pricing = pricing; self.maximumAudioInputBytes = maximumAudioInputBytes; self.maxResponseOutputTokens = maxResponseOutputTokens; self.ledger = ledger; self.budgetLedger = budgetLedger; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
+    private let context: PulseProviderContext
+    private let startedAt = Date(); private var captureOpen = true; private var cancelled = false; private var configured = false; private var sentAudioBytes = 0; private var receiveTask: Task<Void, Never>?
+    init(socket: URLSessionWebSocketTask, turnID: UUID, model: String, pricing: PulseRealtimePricing?, maximumAudioInputBytes: Int, maxResponseOutputTokens: Int, ledger: PulseUsageLedger, budgetLedger: PulseRealtimeBudgetLedger, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.turnID = turnID; self.model = model; self.pricing = pricing; self.maximumAudioInputBytes = maximumAudioInputBytes; self.maxResponseOutputTokens = maxResponseOutputTokens; self.ledger = ledger; self.budgetLedger = budgetLedger; self.context = context; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
     deinit { receiveTask?.cancel(); socket.cancel(with: .goingAway, reason: nil) }
-    func configure(context: PulseProviderContext) async throws {
+    func configure(context _: PulseProviderContext) async throws {
+        // Deliberately defer every cloud event until there is valid PCM.
+    }
+    private func configureIfNeeded() async throws {
+        guard !configured else { return }
+        configured = true
+        await budgetLedger.markRequestSent(turnID: turnID)
         try await send(["type": "session.update", "session": ["type": "realtime", "instructions": PulseProviderPrompt.system, "output_modalities": ["text", "audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
         // Bounded safe context is text, never raw Moa credentials or context.
         try await send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": context.ownerMessageData]]]])
@@ -288,20 +312,24 @@ public actor OpenAIRealtimeAudioTurn {
     }
     public func appendPCM16(_ pcm: Data) async throws {
         guard captureOpen, !cancelled, !pcm.isEmpty, pcm.count.isMultiple(of: 2), sentAudioBytes + pcm.count <= maximumAudioInputBytes else { return }
+        try await configureIfNeeded()
         sentAudioBytes += pcm.count
         try await send(OpenAIRealtimePCM16.appendEvent(pcm))
     }
     public func endCapture() async throws {
         guard captureOpen, !cancelled else { return }
         captureOpen = false
+        guard sentAudioBytes > 0 else { await cancelBeforeAudio(); return }
         try await send(OpenAIRealtimePCM16.commitEvent)
         try await send(["type": "response.create", "response": ["max_output_tokens": maxResponseOutputTokens, "output_modalities": ["text", "audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
     }
     public func cancelForBargeIn() async {
         cancelled = true; captureOpen = false
-        try? await send(OpenAIRealtimePCM16.cancelEvent)
-        try? await send(OpenAIRealtimePCM16.clearEvent)
+        receiveTask?.cancel()
+        socket.cancel(with: .goingAway, reason: nil)
+        if !configured { await budgetLedger.releaseIfPreSend(turnID: turnID) }
     }
+    private func cancelBeforeAudio() async { cancelled = true; receiveTask?.cancel(); socket.cancel(with: .normalClosure, reason: nil); await budgetLedger.releaseIfPreSend(turnID: turnID) }
     private func receive() async {
         while !Task.isCancelled {
             guard let message = try? await socket.receive() else { return }
@@ -312,19 +340,26 @@ public actor OpenAIRealtimeAudioTurn {
             case "response.output_audio.delta":
                 if !cancelled, let pcm = OpenAIRealtimePCM16.outputDelta(object) { onAudio(pcm) }
             case "response.output_audio_transcript.delta", "response.output_text.delta":
-                if let delta = object["delta"] as? String { onText(delta) }
+                if !cancelled, let delta = object["delta"] as? String, delta.count <= OpenAIRealtimeBounds.outputText { onText(delta) }
             case "response.done":
-                if let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing) {
-                    await ledger.record(entry)
-                    if let cost = entry.estimatedCostUSD { await budgetLedger.settle(turnID: turnID, knownCostUSD: cost) }
-                }
+                let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing)
+                if let entry { await ledger.record(entry) }
+                await budgetLedger.settle(turnID: turnID, knownCostUSD: entry?.estimatedCostUSD)
                 onFinished()
                 return
             default: continue
             }
         }
     }
-    private func send(_ object: [String: Any]) async throws { try await socket.send(.data(try JSONSerialization.data(withJSONObject: object))) }
+    private func send(_ object: [String: Any]) async throws { try await socket.send(.string(try OpenAIRealtimeOutboundEvent.text(object))) }
+}
+
+public enum OpenAIRealtimeOutboundEvent {
+    /// Realtime JSON protocol events are WebSocket text frames, not binary frames.
+    public static func text(_ object: [String: Any]) throws -> String {
+        guard let text = String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8) else { throw OpenAIRealtimeClientError.decoding }
+        return text
+    }
 }
 
 public actor PulseProviderCoordinator: PulseProviderResponding {

@@ -134,7 +134,7 @@ enum PulseDeviceRegistrationCodec {
 public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendable {
     private let service: String
     private let deviceAccount = "pulse.device.registration.v1"
-    private let providerAccount = "pulse.openai.api-key.v1"
+    private let legacyProviderAccount = "pulse.openai.api-key.v1"
 
     public init(service: String = "com.ealeixandre.moa-companion.pulse") {
         self.service = service
@@ -156,19 +156,17 @@ public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendab
     public func clearDeviceRegistration() throws { try clear(account: deviceAccount) }
 
     public func loadOpenAIRealtimeAPIKey() throws -> String? {
-        guard let data = try load(account: providerAccount),
-              let key = String(data: data, encoding: .utf8),
-              !key.isEmpty else { return nil }
-        return key
+        // A standard provider key is not a safe mobile credential. This
+        // client intentionally has no durable credential-minting path yet.
+        return nil
     }
 
     public func saveOpenAIRealtimeAPIKey(_ key: String) throws {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 512 else { throw PulseCallError.secureStorageUnavailable }
-        try save(Data(trimmed.utf8), account: providerAccount)
+        _ = key
+        throw PulseCallError.secureStorageUnavailable
     }
 
-    public func clearOpenAIRealtimeAPIKey() throws { try clear(account: providerAccount) }
+    public func clearOpenAIRealtimeAPIKey() throws { try clear(account: legacyProviderAccount) }
 
     private func load(account: String) throws -> Data? {
 #if canImport(Security)

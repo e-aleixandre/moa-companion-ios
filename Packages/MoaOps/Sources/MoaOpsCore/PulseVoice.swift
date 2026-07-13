@@ -206,15 +206,18 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public func beginReviewConfirmation(capture: PulseVoiceCaptureToken) async {
 #if canImport(Speech)
         stopSpeakingForCapture(); captureGate.begin(capture)
-        guard foreground, !recording, await microphoneAuthorization(), await speechAuthorization(), recognizer?.isAvailable == true else { captureGate.invalidate(capture); onAvailability?(capture, .unavailable); return }
+        guard foreground, !recording, await microphoneAuthorization(), await speechAuthorization(),
+              let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
+            captureGate.invalidate(capture); onAvailability?(capture, .unavailable); return
+        }
         do {
             try configureAudioSession()
-            let request = SFSpeechAudioBufferRecognitionRequest(); request.shouldReportPartialResults = true
+            let request = SFSpeechAudioBufferRecognitionRequest(); request.shouldReportPartialResults = true; request.requiresOnDeviceRecognition = true
             recognitionRequest = request
             let input = audioEngine.inputNode; input.removeTap(onBus: 0)
             input.installTap(onBus: 0, bufferSize: 1_024, format: input.outputFormat(forBus: 0)) { [weak request] buffer, _ in request?.append(buffer) }
             audioEngine.prepare(); try audioEngine.start(); recording = true
-            recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
+            recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
                 Task { @MainActor [weak self] in
                     guard let self, self.captureGate.accepts(capture) else { return }
                     if let result { self.onTranscript?(capture, result.bestTranscription.formattedString, result.isFinal); if result.isFinal { self.finishRecording(cancel: false, invalidating: capture) } }

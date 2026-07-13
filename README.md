@@ -2,10 +2,12 @@
 
 ## Pulse direct Realtime boundary
 
-Pulse stores an owner-supplied OpenAI API key only in the device Keychain
-(`pulse.openai.api-key.v1`). It opens the documented `wss://api.openai.com/v1/realtime`
-connection directly from the companion with `Authorization: Bearer …`; Moa never receives,
-stores, relays, or logs that key. The Realtime adapter accepts only fixed typed Moa tools and
+Pulse never stores an OpenAI standard API key. For each direct Realtime socket, the paired
+Moa device requests a short-lived, one-socket ephemeral client credential; it is kept only in
+memory and sent directly to the documented `wss://api.openai.com/v1/realtime` endpoint as
+`Authorization: Bearer ek_…`. Moa does not relay or persist that client credential, and Pulse
+never sends its Moa device credential to OpenAI. The Realtime adapter accepts only fixed typed
+Moa tools and
 the bounded safe Ops brief, never raw conversation context or a generic HTTP tool. It uses the
 documented PCM16 Realtime session format on iOS; macOS and Simulator retain the explicit text
 fallback rather than claiming microphone support. Pulse remains PTT-only, keeps one turn/review

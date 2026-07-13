@@ -80,6 +80,29 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertNotEqual(model.pttState, .listening)
     }
 
+    func testFailedEphemeralMintCleansCaptureAndAllowsTheNextPress() async throws {
+        let store = try pairedStore()
+        let service = CallTestService()
+        service.pulseResults = [.success(try fixturePulse())]
+        service.mintResults = [.failure(.transport), .failure(.transport)]
+        let voice = CallTestVoice()
+        let model = PulseCallAppModel(store: store, voice: voice, serviceFactory: { _ in service })
+        await model.refresh()
+
+        model.beginPushToTalk()
+        await settle()
+        XCTAssertEqual(model.pttState, .idle)
+        XCTAssertFalse(model.isTurnBusy)
+        XCTAssertNil(voice.activeCapture)
+        XCTAssertTrue(model.userMessage?.contains("estado de envío no pudo confirmarse") == true)
+
+        model.beginPushToTalk()
+        await settle()
+        XCTAssertEqual(voice.captures.count, 2, "A terminal mint failure must not wedge the next PTT press")
+        XCTAssertEqual(model.pttState, .idle)
+        XCTAssertFalse(model.isTurnBusy)
+    }
+
     func testReviewPTTStopsNarrationThenConfirmsOrCancelsWithoutProviderTurn() async throws {
         let store = try pairedStore()
         let service = CallTestService()
@@ -357,6 +380,7 @@ private final class CallTestService: PulseCallService, PulseRealtimeCredentialIs
     var pulseResults: [Result<OpsPulse, PulseCallError>] = []
     var streamEvents: [PulseOpsStreamEvent] = []
     var prepareResults: [Result<PulseOperationResponse, PulseCallError>] = []
+    var mintResults: [Result<PulseRealtimeClientCredential, PulseCallError>] = []
     private(set) var confirmCalls = 0
     private(set) var prepareCalls = 0
     private(set) var preparedOperationIDs: [String] = []
@@ -366,6 +390,7 @@ private final class CallTestService: PulseCallService, PulseRealtimeCredentialIs
         return try pulseResults.removeFirst().get()
     }
     func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        if !mintResults.isEmpty { return try mintResults.removeFirst().get() }
         try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
     }
     func loadSitrep() async throws -> OpsBriefing {

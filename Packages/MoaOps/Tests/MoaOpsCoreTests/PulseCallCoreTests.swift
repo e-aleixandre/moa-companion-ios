@@ -255,9 +255,10 @@ final class PulseCallCoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
         let store = UserDefaultsPulseRealtimeBudgetStore(defaults: defaults, key: "ledger")
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 1)
-        let ledger = PulseRealtimeBudgetLedger(store: store)
-        async let first = ledger.reserve(amountUSD: 0.6, budget: budget)
-        async let second = ledger.reserve(amountUSD: 0.6, budget: budget)
+        let firstLedger = PulseRealtimeBudgetLedger(store: store)
+        let secondLedger = PulseRealtimeBudgetLedger(store: store)
+        async let first = firstLedger.reserve(amountUSD: 0.6, budget: budget)
+        async let second = secondLedger.reserve(amountUSD: 0.6, budget: budget)
         let (firstID, secondID) = await (first, second)
         let reservations = [firstID, secondID].compactMap { $0 }
         XCTAssertEqual(reservations.count, 1, "concurrent turns must not oversubscribe a hard cap")

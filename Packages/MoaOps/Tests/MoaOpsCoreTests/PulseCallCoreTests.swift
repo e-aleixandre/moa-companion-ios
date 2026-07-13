@@ -359,26 +359,21 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() async {
-        print("durable ledger: create suite")
         let suite = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
         let store = UserDefaultsPulseRealtimeBudgetStore(defaults: defaults, key: "ledger")
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 1)
         let firstLedger = PulseRealtimeBudgetLedger(store: store)
         let secondLedger = PulseRealtimeBudgetLedger(store: store)
-        print("durable ledger: reserve concurrently")
         async let first = firstLedger.reserve(amountUSD: 0.6, budget: budget)
         async let second = secondLedger.reserve(amountUSD: 0.6, budget: budget)
         let (firstID, secondID) = await (first, second)
-        print("durable ledger: concurrent reservations complete")
         let reservations = [firstID, secondID].compactMap { $0 }
         XCTAssertEqual(reservations.count, 1, "concurrent turns must not oversubscribe a hard cap")
         let recovered = PulseRealtimeBudgetLedger(store: store)
         let recoveredActive = await recovered.activeReservations()
-        print("durable ledger: recovery complete")
         XCTAssertEqual(recoveredActive.count, 1, "restart keeps the persisted active reservation")
         let rejected = await recovered.reserve(amountUSD: 0.5, budget: budget)
-        print("durable ledger: rejection complete")
         XCTAssertNil(rejected, "recovered reservation still constrains the cap")
     }
 

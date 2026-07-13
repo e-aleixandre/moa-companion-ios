@@ -391,7 +391,7 @@ private final class CallTestService: PulseCallService, PulseRealtimeCredentialIs
     }
     func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
         if !mintResults.isEmpty { return try mintResults.removeFirst().get() }
-        try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+        return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
     }
     func loadSitrep() async throws -> OpsBriefing {
         try JSONDecoder.moaOps.decode(OpsBriefing.self, from: Data(#"{"sessions":null,"blockers":[],"spoken":"Panorama seguro."}"#.utf8))

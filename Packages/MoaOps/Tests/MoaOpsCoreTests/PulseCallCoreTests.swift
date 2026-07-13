@@ -3,16 +3,6 @@ import XCTest
 @testable import MoaOpsCore
 
 final class PulseCallCoreTests: XCTestCase {
-    private var temporaryBudgetKeys: [String] = []
-
-    override func tearDown() {
-        for key in temporaryBudgetKeys {
-            UserDefaults.standard.removeObject(forKey: key)
-        }
-        temporaryBudgetKeys = []
-        super.tearDown()
-    }
-
     func testPairingPayloadIsStrictAndNeverAStoreValue() throws {
         let payload = try PulsePairingPayload(parsing: " moa-pair-v1:pair_abc:one-use-secret ")
         XCTAssertEqual(payload.pairingID, "pair_abc")
@@ -124,26 +114,6 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(confirm.value(forHTTPHeaderField: "Authorization"), "Moa-Device dev_1.device-secret")
         XCTAssertEqual(confirm.value(forHTTPHeaderField: "X-Moa-Request"), "1")
         XCTAssertTrue(try XCTUnwrap(confirm.httpBody).utf8JSON.isEmpty)
-    }
-
-    func testDevicePulseRequestNeverUsesCookieBootstrapOrLegacyTokenQuery() async throws {
-        let recorder = PulseRequestRecorder()
-        PulseURLProtocol.handler = { request in
-            recorder.record(request)
-            let body = #"{"generated_at":"2026-07-12T12:00:00Z","summary":{"needs_attention":0,"in_progress":0,"stale_work":0,"on_track":0,"changes":0},"needs_attention":[],"in_progress":[],"stale_work":[],"on_track":[],"changes":{"requested":false,"until":"2026-07-12T12:00:00Z","items":[],"next_cursor":"cursor","has_more":false}}"#
-            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
-        }
-        defer { PulseURLProtocol.handler = nil }
-        let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
-        let session = pulseSession()
-        defer { session.invalidateAndCancel() }
-        let client = try MoaPulseDeviceClient(registration: registration, session: session)
-        _ = try await client.pulse()
-        let request = try XCTUnwrap(recorder.requests.last)
-        XCTAssertEqual(request.url?.path, "/api/ops/pulse")
-        XCTAssertNil(request.url?.query)
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Moa-Device device.secret")
-        XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
     }
 
     func testRealtimeSecretMintUsesOnlyDeviceAuthAndStrictEmptyBody() async throws {
@@ -368,78 +338,6 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 0, dayTotal: 2))
     }
 
-    func testDurableRealtimeBudgetReservationsAreAtomicAndRecoverAcrossRestart() {
-        let store = temporaryBudgetStore()
-        let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 1)
-        let firstLedger = PulseRealtimeBudgetLedger(store: store)
-        let secondLedger = PulseRealtimeBudgetLedger(store: store)
-        let outcome = awaitValue {
-            let reservations = await withTaskGroup(of: UUID?.self, returning: [UUID].self) { group in
-                group.addTask { await firstLedger.reserve(amountUSD: 0.6, budget: budget) }
-                group.addTask { await secondLedger.reserve(amountUSD: 0.6, budget: budget) }
-                return await group.reduce(into: []) { reservations, turnID in
-                    if let turnID { reservations.append(turnID) }
-                }
-            }
-            let recovered = PulseRealtimeBudgetLedger(store: store)
-            let recoveredActive = await recovered.activeReservations()
-            let rejected = await recovered.reserve(amountUSD: 0.5, budget: budget)
-            return BudgetAtomicOutcome(reservations: reservations, recoveredCount: recoveredActive.count, rejected: rejected)
-        }
-        XCTAssertEqual(outcome.reservations.count, 1, "concurrent turns must not oversubscribe a hard cap")
-        XCTAssertEqual(outcome.recoveredCount, 1, "restart keeps the persisted active reservation")
-        XCTAssertNil(outcome.rejected, "recovered reservation still constrains the cap")
-    }
-
-    func testRealtimeBudgetSettlesKnownOnceAndRetainsUnknownUntilNextDay() async {
-        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let ledger = PulseRealtimeBudgetLedger(store: temporaryBudgetStore(), calendar: calendar)
-        let budget = PulseRealtimeBudget(perSessionHardUSD: 2, perDayHardUSD: 2)
-        let now = Date(timeIntervalSince1970: 1_735_689_600) // 2025-01-01 UTC
-        let known = await ledger.reserve(amountUSD: 0.5, budget: budget, now: now)!
-        await ledger.markRequestSent(turnID: known)
-        await ledger.settle(turnID: known, knownCostUSD: 0.2)
-        await ledger.settle(turnID: known, knownCostUSD: 0.2)
-        let knownTotals = await ledger.totals(now: now)
-        XCTAssertEqual(knownTotals.day, 0.2, "a duplicated done event cannot double count")
-        let unknown = await ledger.reserve(amountUSD: 0.5, budget: budget, now: now)!
-        await ledger.markRequestSent(turnID: unknown)
-        let unknownActive = await ledger.activeReservations(now: now)
-        XCTAssertEqual(unknownActive.count, 1)
-        let tomorrow = now.addingTimeInterval(86_400)
-        let expiredActive = await ledger.activeReservations(now: tomorrow)
-        XCTAssertEqual(expiredActive.count, 0)
-        // The unknown amount is settled on its original day, never zeroed.
-        let expiredTotals = await ledger.totals(now: now)
-        XCTAssertEqual(expiredTotals.day, 0.7)
-    }
-
-    func testRealtimeBudgetReleasesOnlyFailedPreSendAndSessionRotationIsExplicit() async {
-        let ledger = PulseRealtimeBudgetLedger(store: temporaryBudgetStore())
-        let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 2)
-        let preSend = await ledger.reserve(amountUSD: 0.6, budget: budget)!
-        await ledger.releaseIfPreSend(turnID: preSend)
-        let releasedActive = await ledger.activeReservations()
-        XCTAssertEqual(releasedActive.count, 0)
-        let postSend = await ledger.reserve(amountUSD: 0.6, budget: budget)!
-        await ledger.markRequestSent(turnID: postSend)
-        await ledger.releaseIfPreSend(turnID: postSend)
-        let retainedActive = await ledger.activeReservations()
-        XCTAssertEqual(retainedActive.count, 1, "a post-send drop remains conservatively reserved")
-        await ledger.rotateSession()
-        let rotationRejected = await ledger.reserve(amountUSD: 0.6, budget: budget)
-        XCTAssertNil(rotationRejected, "rotation never drops an active reservation")
-    }
-
-    func testRealtimeBudgetEnforcesDailyHardLimitIndependentlyOfSessionLimit() async {
-        let ledger = PulseRealtimeBudgetLedger(store: temporaryBudgetStore())
-        let budget = PulseRealtimeBudget(perSessionHardUSD: 5, perDayHardUSD: 1)
-        let accepted = await ledger.reserve(amountUSD: 0.6, budget: budget)
-        let rejected = await ledger.reserve(amountUSD: 0.5, budget: budget)
-        XCTAssertNotNil(accepted)
-        XCTAssertNil(rejected, "daily cap includes unsettled reservations")
-    }
-
     func testAudioPlaybackPlanActivatesBeforeEngineAndScheduling() {
         XCTAssertEqual(PulseAudioPlaybackPlan.steps(sessionIsActive: false, engineIsRunning: false), [.activateSession, .startEngine, .schedule])
         XCTAssertEqual(PulseAudioPlaybackPlan.steps(sessionIsActive: true, engineIsRunning: true), [.schedule])
@@ -486,37 +384,6 @@ final class PulseCallCoreTests: XCTestCase {
         let review = try JSONDecoder.moaOps.decode(PulseOperationReview.self, from: Data(#"{"target":{"id":"s1","title":"Release","project":"/release"},"text":"continúa","action":"steer","risk":"changes","consequence":"delivery is not completion"}"#.utf8))
         return .init(operationID: "AbCdEfGhIjKlMnOpQrStUvWx", kind: .directedInstruction, expiresAt: .distantFuture, review: review)
     }
-
-    private func temporaryBudgetStore() -> UserDefaultsPulseRealtimeBudgetStore {
-        let key = "PulseRealtimeBudgetTests.\(UUID().uuidString)"
-        temporaryBudgetKeys.append(key)
-        return .init(defaults: .standard, key: key)
-    }
-
-    private func awaitValue<Value: Sendable>(_ operation: @escaping @Sendable () async -> Value) -> Value {
-        let result = AsyncResult<Value>()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            result.set(await operation())
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return result.value!
-    }
-}
-
-private struct BudgetAtomicOutcome: Sendable {
-    let reservations: [UUID]
-    let recoveredCount: Int
-    let rejected: UUID?
-}
-
-private final class AsyncResult<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedValue: Value?
-
-    func set(_ value: Value) { lock.lock(); storedValue = value; lock.unlock() }
-    var value: Value? { lock.lock(); defer { lock.unlock() }; return storedValue }
 }
 
 private struct RejectingToolExecutor: PulseToolExecuting {

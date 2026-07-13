@@ -19,15 +19,12 @@ jobs:
       - run: swift --version
       - run: swift build -v --package-path Packages/MoaOps
       # Xcode 15's macOS XCTest runner stalls when PulseCallCoreTests shares a
-      # process with its URLSession-backed tests. Run every member in a fresh
-      # runner, then run the remaining suite; no test is omitted.
+      # process with its URLSession-backed tests. Run every test in a fresh
+      # runner, so the suite remains complete without a shared XCTest process.
       - run: |
           swift test list --package-path Packages/MoaOps | while IFS= read -r test; do
-            case "$test" in
-              *PulseCallCoreTests*) swift test -v --package-path Packages/MoaOps --filter "$test" ;;
-            esac
+            swift test -v --package-path Packages/MoaOps --filter "$test"
           done
-      - run: swift test -v --package-path Packages/MoaOps --skip PulseCallCoreTests
       - run: >-
           xcodebuild
           -project MoaCompanion.xcodeproj

@@ -126,6 +126,7 @@ public final class PulseCallAppModel: ObservableObject {
     /// owned through an immutable review until cancel, failure, or receipt.
     private var turnReservation: TurnReservation?
     private var providerTask: Task<Void, Never>?
+    private var audioMintTask: Task<Void, Never>?
     private var realtimeAudioTurn: OpenAIRealtimeAudioTurn?
     private var isBargingIn = false
     private var endedAudioCapture: PulseVoiceCaptureToken?
@@ -138,7 +139,7 @@ public final class PulseCallAppModel: ObservableObject {
         providerFactory: @escaping ProviderFactory = { service, store, writeGate, providerClient in
             PulseProviderCoordinator(
                 client: providerClient,
-                store: store,
+                issuer: (service as? any PulseRealtimeCredentialIssuing) ?? PulseUnavailableRealtimeCredentialIssuer(),
                 executor: PulseMoaToolExecutor(service: service, writeGate: writeGate)
             )
         },
@@ -154,7 +155,6 @@ public final class PulseCallAppModel: ObservableObject {
         self.streamOfflineInterval = max(0, streamOfflineInterval)
         self.serviceFactory = serviceFactory
         configureVoiceCallbacks()
-        providerConfigured = (try? store.loadOpenAIRealtimeAPIKey()) != nil
         restoreRegistration()
     }
 
@@ -201,8 +201,8 @@ public final class PulseCallAppModel: ObservableObject {
 
     public var providerAvailabilityLabel: String {
         providerConfigured
-            ? "Credencial efímera del proveedor disponible"
-            : "Proveedor no disponible sin credencial efímera · Pulse usa un panorama determinista"
+            ? "El dispositivo emparejado puede solicitar acceso efímero al proveedor al iniciar un turno"
+            : "El acceso efímero al proveedor no está disponible. Comprueba Moa o vuelve a emparejar este iPhone."
     }
 
     public func setPrivacyMode(_ mode: PulsePrivacyMode) {
@@ -234,6 +234,7 @@ public final class PulseCallAppModel: ObservableObject {
             try store.saveDeviceRegistration(registration)
             service = try serviceFactory(registration)
             hasPairedDevice = true
+            providerConfigured = service is any PulseRealtimeCredentialIssuing
             serverName = configuration.baseURL.host ?? "Moa"
             userMessage = nil
             state = .consulting
@@ -256,6 +257,7 @@ public final class PulseCallAppModel: ObservableObject {
         clearStreamFailure()
         try? store.clearDeviceRegistration()
         hasPairedDevice = false
+        providerConfigured = false
         serverName = ""
         snapshot = nil
         opsSnapshot = nil
@@ -455,24 +457,6 @@ public final class PulseCallAppModel: ObservableObject {
         }
     }
 
-    public func saveOpenAIRealtimeAPIKey(_ value: String) {
-        cancelActiveProviderTurn()
-        do {
-            try store.saveOpenAIRealtimeAPIKey(value)
-            providerConfigured = true
-            userMessage = nil
-        } catch {
-            providerConfigured = false
-            userMessage = "No se pudo guardar la clave del proveedor en el Llavero."
-        }
-    }
-
-    public func clearOpenAIRealtimeAPIKey() {
-        cancelActiveProviderTurn()
-        try? store.clearOpenAIRealtimeAPIKey()
-        providerConfigured = false
-    }
-
     public func setForegroundActive(_ active: Bool) {
         guard isForeground != active else { return }
         isForeground = active
@@ -501,6 +485,7 @@ public final class PulseCallAppModel: ObservableObject {
             guard let registration = try store.loadDeviceRegistration() else { return }
             service = try serviceFactory(registration)
             hasPairedDevice = true
+            providerConfigured = service is any PulseRealtimeCredentialIssuing
             serverName = registration.baseURL.host ?? "Moa"
             state = .stale
         } catch {
@@ -705,16 +690,19 @@ public final class PulseCallAppModel: ObservableObject {
 
     private func startRealtimeAudioTurn(_ capture: PulseVoiceCaptureToken) {
         guard realtimeAudioTurn == nil, providerConfigured, privacyMode.permitsCloudAudio,
-              let brief, activeVoiceCapture?.token == capture, turnReservation == nil else { return }
+              let brief, let issuer = service as? any PulseRealtimeCredentialIssuing,
+              activeVoiceCapture?.token == capture, turnReservation == nil else { return }
         let reservation = TurnReservation(id: UUID(), phase: .provider)
         turnReservation = reservation
         state = .thinking
         let model = self
-        Task { [weak model, store, providerClient] in
+        audioMintTask = Task { [weak model, providerClient] in
             guard let model else { return }
             do {
-                guard let key = try store.loadOpenAIRealtimeAPIKey(), !key.isEmpty else { throw OpenAIRealtimeClientError.missingAPIKey }
-                let turn = try await providerClient.beginAudioTurn(apiKey: key, configuration: await MainActor.run { model.realtimeConfiguration() }, context: .init(brief: brief), onText: { [weak model] delta in
+                try Task.checkCancellation()
+                let credential = try await issuer.mintRealtimeClientSecret()
+                try Task.checkCancellation()
+                let turn = try await providerClient.beginAudioTurn(credential: credential, configuration: await MainActor.run { model.realtimeConfiguration() }, context: .init(brief: brief), onText: { [weak model] delta in
                     Task { @MainActor [weak model] in model?.appendProviderDelta(delta, for: reservation.id) }
                 }, onAudio: { [weak model] pcm in
                     Task { @MainActor [weak model] in model?.voice.playPCM16(pcm) }
@@ -725,7 +713,7 @@ public final class PulseCallAppModel: ObservableObject {
                     }
                 })
                 guard await MainActor.run(body: { model.activeVoiceCapture?.token == capture }) else { await turn.cancelForBargeIn(); return }
-                await MainActor.run { model.realtimeAudioTurn = turn }
+                await MainActor.run { model.realtimeAudioTurn = turn; model.audioMintTask = nil }
                 let flush = await MainActor.run { model.preconnectPCM.takeForFlush() }
                 for chunk in flush.chunks { try await turn.appendPCM16(chunk) }
                 let wasReleased = await MainActor.run { model.endedAudioCapture == capture }
@@ -744,7 +732,9 @@ public final class PulseCallAppModel: ObservableObject {
                 await MainActor.run {
                     guard model.reservationIsProvider(reservation.id) else { return }
                     model.preconnectPCM.cancel(); model.releaseTurnReservation(reservation.id)
+                    model.audioMintTask = nil
                     model.state = model.settledCallState(); model.deterministicFallback()
+                    model.userMessage = "No se pudo obtener acceso efímero al proveedor. No se envió audio; comprueba Moa o vuelve a emparejar este iPhone."
                 }
             }
         }
@@ -768,8 +758,11 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func invalidateActiveVoiceCapture() {
+        audioMintTask?.cancel()
+        audioMintTask = nil
         preconnectPCM.cancel()
         if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
+        if let reservation = turnReservation, reservation.phase == .provider { releaseTurnReservation(reservation.id) }
         clearActiveVoiceCapture(invalidateNative: true)
     }
 

@@ -180,7 +180,7 @@ public struct PulseCallSceneView: View {
             Spacer()
             Menu {
                 Button("Actualizar", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
-                Button("OpenAI Realtime", systemImage: "key") { showingProvider = true }
+                Button("Acceso de proveedor", systemImage: "waveform.badge.magnifyingglass") { showingProvider = true }
                 Menu("Modo \(model.privacyMode.spanishLabel)") {
                     ForEach(PulsePrivacyMode.allCases, id: \.self) { mode in
                         Button(mode.spanishLabel) { model.setPrivacyMode(mode) }
@@ -408,12 +408,12 @@ public struct PulseProviderConfigurationView: View {
     public var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                Image(systemName: "key.horizontal.fill")
+                Image(systemName: "waveform.badge.magnifyingglass")
                     .font(.title)
                     .foregroundStyle(.tint)
-                Text("Proveedor directo")
+                Text("Acceso de proveedor")
                     .font(.title2.bold())
-                Text("La voz de proveedor no está disponible en esta versión. Pulse no acepta ni guarda claves API estándar de larga duración; usa texto y el panorama determinista.")
+                Text("El dispositivo emparejado solicita una credencial efímera justo antes de una conexión directa con el proveedor. No hay clave API que configurar o guardar en este iPhone.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text("La reserva local es una guarda de admisión por sesión y día, incluidas reservas pendientes. No garantiza un coste máximo: los límites y la facturación de la cuenta del proveedor siguen siendo autoritativos.")

@@ -1,7 +1,40 @@
 @preconcurrency import Foundation
 
 public enum OpenAIRealtimeClientError: Error, Equatable, Sendable {
-    case missingAPIKey, invalidResponse, httpStatus(Int), decoding, transport, tooManyToolRounds, budgetExceeded, inputTooLarge
+    case missingCredential, invalidCredential, expiredCredential, invalidResponse, httpStatus(Int), decoding, transport, tooManyToolRounds, budgetExceeded, inputTooLarge
+}
+
+/// One in-memory direct-WebSocket capability.  It deliberately is neither
+/// Codable nor persistable by this package's secure store.
+public struct PulseRealtimeClientCredential: Decodable, Equatable, Sendable {
+    public let clientSecret: String
+    public let expiresAt: Date
+    public let transport: String
+    public let endpoint: URL
+    public let model: String
+    enum CodingKeys: String, CodingKey { case clientSecret = "client_secret", expiresAt = "expires_at", transport, endpoint, model }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        clientSecret = try values.decode(String.self, forKey: .clientSecret)
+        expiresAt = Date(timeIntervalSince1970: try values.decode(TimeInterval.self, forKey: .expiresAt))
+        transport = try values.decode(String.self, forKey: .transport)
+        endpoint = try values.decode(URL.self, forKey: .endpoint)
+        model = try values.decode(String.self, forKey: .model)
+    }
+
+    public func validated(now: Date = Date(), expirySkew: TimeInterval = 30) throws -> Self {
+        guard clientSecret.hasPrefix("ek_"), clientSecret.count > 3,
+              transport == "websocket", expiresAt.timeIntervalSince(now) > max(0, expirySkew),
+              endpoint.scheme?.lowercased() == "wss", endpoint.host?.lowercased() == "api.openai.com",
+              endpoint.user == nil, endpoint.password == nil, endpoint.fragment == nil,
+              endpoint.path == "/v1/realtime", !model.isEmpty,
+              let items = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)?.queryItems,
+              items.count == 1, items.first?.name == "model", items.first?.value == model else {
+            if expiresAt.timeIntervalSince(now) <= max(0, expirySkew) { throw OpenAIRealtimeClientError.expiredCredential }
+            throw OpenAIRealtimeClientError.invalidCredential
+        }
+        return self
+    }
 }
 
 /// Realtime is connected directly from Pulse. A production credential issuer
@@ -182,32 +215,31 @@ public actor OpenAIRealtimeClient {
     private let budgetLedger: PulseRealtimeBudgetLedger
     public init(session: URLSession = PulseTransportFactory.ephemeralSession(), endpoint: URL = OpenAIRealtimeClient.endpoint, ledger: PulseUsageLedger = .init(), budgetLedger: PulseRealtimeBudgetLedger = .init()) { self.session = session; self.endpoint = endpoint; self.ledger = ledger; self.budgetLedger = budgetLedger }
 
-    public func makeRequest(apiKey: String, configuration: OpenAIRealtimeProviderConfiguration) throws -> URLRequest {
-        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { throw OpenAIRealtimeClientError.missingAPIKey }
-        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "model", value: configuration.model)]
-        var request = URLRequest(url: components.url!)
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    public func makeRequest(credential: PulseRealtimeClientCredential) throws -> URLRequest {
+        let credential = try credential.validated()
+        var request = URLRequest(url: credential.endpoint)
+        // This exact Bearer credential is for OpenAI only.  Moa-Device is
+        // never present in this request or in this client.
+        request.setValue("Bearer \(credential.clientSecret)", forHTTPHeaderField: "Authorization")
         return request
     }
 
     /// Opens one explicit PTT turn. Nothing is captured or sent by this
     /// method; callers must append PCM only while their capture token is live.
-    public func beginAudioTurn(apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) async throws -> OpenAIRealtimeAudioTurn {
-        let request = try makeRequest(apiKey: apiKey, configuration: configuration)
+    public func beginAudioTurn(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) async throws -> OpenAIRealtimeAudioTurn {
+        let request = try makeRequest(credential: credential)
         guard let turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
         let socket = session.webSocketTask(with: request)
         socket.resume()
-        let turn = OpenAIRealtimeAudioTurn(socket: socket, turnID: turnID, model: configuration.model, pricing: configuration.pricing, maximumAudioInputBytes: configuration.maximumAudioInputBytes, maxResponseOutputTokens: configuration.maxResponseOutputTokens, ledger: ledger, budgetLedger: budgetLedger, context: context, onText: onText, onAudio: onAudio, onFinished: onFinished)
+        let turn = OpenAIRealtimeAudioTurn(socket: socket, turnID: turnID, model: credential.model, pricing: configuration.pricing, maximumAudioInputBytes: configuration.maximumAudioInputBytes, maxResponseOutputTokens: configuration.maxResponseOutputTokens, ledger: ledger, budgetLedger: budgetLedger, context: context, onText: onText, onAudio: onAudio, onFinished: onFinished)
         do { try Task.checkCancellation(); try await turn.configure(context: context); return turn }
         catch { await budgetLedger.releaseIfPreSend(turnID: turnID); socket.cancel(with: .normalClosure, reason: nil); throw error }
     }
 
-    public func respond(question: String, context: PulseProviderContext, apiKey: String, configuration: OpenAIRealtimeProviderConfiguration, executor: any PulseToolExecuting, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer {
+    public func respond(question: String, context: PulseProviderContext, credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: any PulseToolExecuting, onText: @escaping @Sendable (String) -> Void) async throws -> PulseProviderAnswer {
         guard question.count <= OpenAIRealtimeBounds.ownerText else { throw OpenAIRealtimeClientError.inputTooLarge }
         let startedAt = Date()
-        let request = try makeRequest(apiKey: apiKey, configuration: configuration)
+        let request = try makeRequest(credential: credential)
         guard var turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
         let socket = session.webSocketTask(with: request)
         socket.resume(); defer { socket.cancel(with: .normalClosure, reason: nil) }
@@ -218,7 +250,7 @@ public actor OpenAIRealtimeClient {
         var text = ""; var reviews: [PulsePendingReview] = []; var rounds = 0
         while rounds < 4 {
             try Task.checkCancellation()
-            let outcome = try await receiveResponse(socket, turnID: turnID, onText: onText, model: configuration.model, startedAt: startedAt, pricing: configuration.pricing)
+            let outcome = try await receiveResponse(socket, turnID: turnID, onText: onText, model: credential.model, startedAt: startedAt, pricing: configuration.pricing)
             guard text.count + outcome.text.count <= OpenAIRealtimeBounds.outputText else { throw OpenAIRealtimeClientError.inputTooLarge }
             text += outcome.text
             guard !outcome.calls.isEmpty else { return .init(text: text, preparedReviews: reviews) }
@@ -331,6 +363,7 @@ public actor OpenAIRealtimeAudioTurn {
     }
     private func cancelBeforeAudio() async { cancelled = true; receiveTask?.cancel(); socket.cancel(with: .normalClosure, reason: nil); await budgetLedger.releaseIfPreSend(turnID: turnID) }
     private func receive() async {
+        defer { onFinished() }
         while !Task.isCancelled {
             guard let message = try? await socket.receive() else { return }
             let data: Data
@@ -345,7 +378,6 @@ public actor OpenAIRealtimeAudioTurn {
                 let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing)
                 if let entry { await ledger.record(entry) }
                 await budgetLedger.settle(turnID: turnID, knownCostUSD: entry?.estimatedCostUSD)
-                onFinished()
                 return
             default: continue
             }
@@ -363,10 +395,17 @@ public enum OpenAIRealtimeOutboundEvent {
 }
 
 public actor PulseProviderCoordinator: PulseProviderResponding {
-    private let client: OpenAIRealtimeClient; private let store: any PulseSecureStore; private let executor: any PulseToolExecuting; private let configuration: OpenAIRealtimeProviderConfiguration
-    public init(client: OpenAIRealtimeClient = .init(), store: any PulseSecureStore, executor: any PulseToolExecuting, configuration: OpenAIRealtimeProviderConfiguration = .init()) { self.client = client; self.store = store; self.executor = executor; self.configuration = configuration }
+    private let client: OpenAIRealtimeClient; private let issuer: any PulseRealtimeCredentialIssuing; private let executor: any PulseToolExecuting; private let configuration: OpenAIRealtimeProviderConfiguration
+    public init(client: OpenAIRealtimeClient = .init(), issuer: any PulseRealtimeCredentialIssuing, executor: any PulseToolExecuting, configuration: OpenAIRealtimeProviderConfiguration = .init()) { self.client = client; self.issuer = issuer; self.executor = executor; self.configuration = configuration }
     public func respond(question: String, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void = { _ in }) async throws -> PulseProviderAnswer {
-        guard let key = try store.loadOpenAIRealtimeAPIKey(), !key.isEmpty else { throw OpenAIRealtimeClientError.missingAPIKey }
-        return try await client.respond(question: question, context: context, apiKey: key, configuration: configuration, executor: executor, onText: onText)
+        try Task.checkCancellation()
+        let credential = try await issuer.mintRealtimeClientSecret()
+        try Task.checkCancellation()
+        return try await client.respond(question: question, context: context, credential: credential, configuration: configuration, executor: executor, onText: onText)
     }
+}
+
+public actor PulseUnavailableRealtimeCredentialIssuer: PulseRealtimeCredentialIssuing {
+    public init() {}
+    public func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential { throw OpenAIRealtimeClientError.missingCredential }
 }

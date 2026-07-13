@@ -24,6 +24,13 @@ public protocol PulseCallService: Sendable {
     func invalidate() async
 }
 
+/// Only a paired device service can issue a one-socket provider credential.
+/// Keeping this separate from `PulseCallService` preserves read-only test
+/// doubles and prevents a credential from becoming generic service state.
+public protocol PulseRealtimeCredentialIssuing: Sendable {
+    func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential
+}
+
 public extension PulseCallService {
     /// Compatibility adapter for protocol test doubles. Production device
     /// transport supplies lifecycle events directly below.
@@ -177,7 +184,7 @@ public actor MoaPulseDeviceWebSocketClient {
     private func removeEventContinuation(_ id: UUID) { eventContinuations.removeValue(forKey: id) }
 }
 
-public actor MoaPulseDeviceService: PulseCallService {
+public actor MoaPulseDeviceService: PulseCallService, PulseRealtimeCredentialIssuing {
     private let transport: URLSession
     private let client: MoaPulseDeviceClient
     private let socket: MoaPulseDeviceWebSocketClient
@@ -203,6 +210,9 @@ public actor MoaPulseDeviceService: PulseCallService {
     }
     public func loadOperation(_ operationID: String) async throws -> PulseOperationResponse {
         try await client.operation(operationID: operationID)
+    }
+    public func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        try await client.mintRealtimeClientSecret()
     }
     public func startOpsUpdates() async { await socket.start() }
     public func stopOpsUpdates() async { await socket.stop() }

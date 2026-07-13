@@ -8,7 +8,11 @@
 /// on which it started. Thus a crash cannot turn an unknown provider charge
 /// into free budget. `rotateSession` is explicit; it never discards active
 /// reservations, which continue to constrain the new session.
-public final class UserDefaultsPulseRealtimeBudgetStore: @unchecked Sendable {
+public protocol PulseRealtimeBudgetStore: Sendable {
+    func withLockedData<T>(_ body: (Data?) -> (Data, T)) -> T
+}
+
+public final class UserDefaultsPulseRealtimeBudgetStore: PulseRealtimeBudgetStore, @unchecked Sendable {
     // A process-wide lock makes a read-modify-write transaction serial across
     // every ledger/store instance. UserDefaults' individual get/set calls do
     // not provide that guarantee themselves.
@@ -21,7 +25,7 @@ public final class UserDefaultsPulseRealtimeBudgetStore: @unchecked Sendable {
         self.key = key
     }
 
-    fileprivate func withLockedData<T>(_ body: (Data?) -> (Data, T)) -> T {
+    public func withLockedData<T>(_ body: (Data?) -> (Data, T)) -> T {
         Self.transactionLock.lock()
         defer { Self.transactionLock.unlock() }
         let (updated, result) = body(defaults.data(forKey: key))
@@ -51,10 +55,10 @@ public actor PulseRealtimeBudgetLedger {
         }
     }
 
-    private let store: UserDefaultsPulseRealtimeBudgetStore
+    private let store: any PulseRealtimeBudgetStore
     private let calendar: Calendar
 
-    public init(store: UserDefaultsPulseRealtimeBudgetStore = .init(), calendar: Calendar = .current) {
+    public init(store: any PulseRealtimeBudgetStore = UserDefaultsPulseRealtimeBudgetStore(), calendar: Calendar = .current) {
         self.store = store
         self.calendar = calendar
     }

@@ -125,7 +125,6 @@ final class PulseCallPresentationTests: XCTestCase {
 
     func testReviewPTTInterruptionKeepsReviewAndNeverOpensProvider() async throws {
         let store = try pairedStore()
-        try store.saveOpenAIRealtimeAPIKey("device-only-test-key")
         let service = CallTestService()
         service.pulseResults = [.success(try fixturePulse())]
         let voice = CallTestVoice()
@@ -159,7 +158,6 @@ final class PulseCallPresentationTests: XCTestCase {
 
     func testOneGlobalTurnReservationRejectsConcurrentVoiceAndTextWithoutOrphanReview() async throws {
         let store = try pairedStore()
-        try store.saveOpenAIRealtimeAPIKey("device-only-test-key")
         let service = CallTestService()
         service.pulseResults = [.success(try fixturePulse())]
         let prepared = try fixturePreparedResponse(operationID: "CbCdEfGhIjKlMnOpQrStUvWx")
@@ -307,9 +305,6 @@ private final class CallTestStore: PulseSecureStore, @unchecked Sendable {
     func loadDeviceRegistration() throws -> PulseDeviceRegistration? { registration }
     func saveDeviceRegistration(_ registration: PulseDeviceRegistration) throws { self.registration = registration }
     func clearDeviceRegistration() throws { registration = nil }
-    func loadOpenAIRealtimeAPIKey() throws -> String? { key }
-    func saveOpenAIRealtimeAPIKey(_ key: String) throws { self.key = key }
-    func clearOpenAIRealtimeAPIKey() throws { key = nil }
 }
 
 @MainActor
@@ -358,7 +353,7 @@ private final class CallTestVoice: PulseVoiceControlling {
     }
 }
 
-private final class CallTestService: PulseCallService, @unchecked Sendable {
+private final class CallTestService: PulseCallService, PulseRealtimeCredentialIssuing, @unchecked Sendable {
     var pulseResults: [Result<OpsPulse, PulseCallError>] = []
     var streamEvents: [PulseOpsStreamEvent] = []
     var prepareResults: [Result<PulseOperationResponse, PulseCallError>] = []
@@ -369,6 +364,9 @@ private final class CallTestService: PulseCallService, @unchecked Sendable {
     func loadPulse() async throws -> OpsPulse {
         guard !pulseResults.isEmpty else { throw PulseCallError.transport }
         return try pulseResults.removeFirst().get()
+    }
+    func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
     }
     func loadSitrep() async throws -> OpsBriefing {
         try JSONDecoder.moaOps.decode(OpsBriefing.self, from: Data(#"{"sessions":null,"blockers":[],"spoken":"Panorama seguro."}"#.utf8))

@@ -230,6 +230,25 @@ public actor MoaPulseDeviceClient {
         return try await get(path: "api/pulse/operations/\(operationID)", as: PulseOperationResponse.self)
     }
 
+    /// This credential is intentionally returned only to the immediate caller.
+    /// It is not a Moa credential and must never be used on another Moa route.
+    public func mintRealtimeClientSecret(now: Date = Date(), expirySkew: TimeInterval = 30) async throws -> PulseRealtimeClientCredential {
+        var request = authenticatedRequest(url: endpoint("api/pulse/realtime/client-secret"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = Data("{}".utf8)
+        let (data, response) = try await perform(request, session: session)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 201 else {
+            if let http = response as? HTTPURLResponse { try validate(http) }
+            throw PulseCallError.invalidResponse
+        }
+        guard http.value(forHTTPHeaderField: "Cache-Control")?.lowercased().contains("no-store") == true else { throw PulseCallError.invalidResponse }
+        do { return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: data).validated(now: now, expirySkew: expirySkew) }
+        catch let error as PulseCallError { throw error }
+        catch { throw PulseCallError.decoding }
+    }
+
     private func ops<T: Decodable>(view: String, target: String?, as type: T.Type) async throws -> T {
         var components = URLComponents(url: endpoint("api/ops"), resolvingAgainstBaseURL: false)
         var items = [URLQueryItem(name: "view", value: view)]

@@ -12,7 +12,6 @@ final class PulseCallCoreTests: XCTestCase {
 
         let store = MemorySecureStore()
         XCTAssertNil(try store.loadDeviceRegistration())
-        XCTAssertNil(try store.loadOpenAIRealtimeAPIKey())
         // The secure-store API has no payload save method. Only a claimed
         // registration may be persisted after this one-use string is gone.
         XCTAssertFalse(String(describing: store).contains(payload.secret))
@@ -137,6 +136,51 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
     }
 
+    func testRealtimeSecretMintUsesOnlyDeviceAuthAndStrictEmptyBody() async throws {
+        let recorder = PulseRequestRecorder()
+        PulseURLProtocol.handler = { request in
+            recorder.record(request)
+            return (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: ["Cache-Control": "no-store"])!, Data(#"{"client_secret":"ek_one_socket","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+        }
+        defer { PulseURLProtocol.handler = nil }
+        let session = pulseSession(); defer { session.invalidateAndCancel() }
+        let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
+        let credential = try await MoaPulseDeviceClient(registration: registration, session: session).mintRealtimeClientSecret()
+        let request = try XCTUnwrap(recorder.requests.last)
+        XCTAssertEqual(request.url?.path, "/api/pulse/realtime/client-secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Moa-Device device.secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Moa-Request"), "1")
+        XCTAssertEqual(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8), "{}")
+        XCTAssertEqual(credential.clientSecret, "ek_one_socket")
+        XCTAssertFalse(String(describing: MemorySecureStore()).contains("ek_one_socket"))
+    }
+
+    func testRealtimeCredentialRejectsExpiredAndUntrustedEndpoints() throws {
+        let expired = Data(#"{"client_secret":"ek_x","expires_at":1,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8)
+        let hostile = Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://evil.example/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: expired).validated())
+        XCTAssertThrowsError(try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: hostile).validated())
+    }
+
+    func testRealtimeMintRejectsMalformedAndAuthorizationFailures() async throws {
+        let session = pulseSession(); defer { session.invalidateAndCancel() }
+        let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
+        let client = try MoaPulseDeviceClient(registration: registration, session: session)
+        for status in [401, 403, 429] {
+            PulseURLProtocol.handler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Cache-Control": "no-store", "Retry-After": "3"])!, Data())
+            }
+            do { _ = try await client.mintRealtimeClientSecret(); XCTFail("\(status) must fail") }
+            catch let error as PulseCallError { XCTAssertEqual(error, .httpStatus(code: status, retryAfter: 3)) }
+        }
+        PulseURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: ["Cache-Control": "no-store"])!, Data("{}".utf8))
+        }
+        defer { PulseURLProtocol.handler = nil }
+        do { _ = try await client.mintRealtimeClientSecret(); XCTFail("malformed credential must fail") }
+        catch { }
+    }
+
     func testBriefFallbackHasProvenanceAndNeverClaimsTranscriptTruth() throws {
         let pulse = try fixturePulse()
         let brief = PulseBriefBuilder.make(pulse: pulse)
@@ -190,10 +234,10 @@ final class PulseCallCoreTests: XCTestCase {
 
     func testOpenAIRealtimeRequestIsDirectAndNeverContainsMoaCredential() async throws {
         let client = OpenAIRealtimeClient(endpoint: URL(string: "wss://api.openai.com/v1/realtime")!)
-        let request = try await client.makeRequest(apiKey: "sk-openai-secret", configuration: .init())
+        let request = try await client.makeRequest(credential: realtimeCredential())
         XCTAssertEqual(request.url?.scheme, "wss")
         XCTAssertEqual(request.url?.host, "api.openai.com")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-openai-secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer ek_test-secret")
         XCTAssertNil(request.value(forHTTPHeaderField: "OpenAI-Beta"))
         XCTAssertFalse(request.url?.absoluteString.contains("Moa-Device") == true)
         XCTAssertFalse(request.url?.absoluteString.contains("moa.example") == true)
@@ -220,7 +264,7 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(OpenAIRealtimeBounds.string(String(repeating: "x", count: 20), maximum: 8).count, 8)
         let client = OpenAIRealtimeClient(endpoint: URL(string: "wss://api.openai.com/v1/realtime")!)
         do {
-            _ = try await client.respond(question: String(repeating: "x", count: OpenAIRealtimeBounds.ownerText + 1), context: .init(brief: try fixtureBrief()), apiKey: "test-only", configuration: .init(), executor: RejectingToolExecutor()) { _ in }
+            _ = try await client.respond(question: String(repeating: "x", count: OpenAIRealtimeBounds.ownerText + 1), context: .init(brief: try fixtureBrief()), credential: realtimeCredential(), configuration: .init(), executor: RejectingToolExecutor()) { _ in }
             XCTFail("oversized owner text must be rejected before opening a provider request")
         } catch let error as OpenAIRealtimeClientError {
             XCTAssertEqual(error, .inputTooLarge)
@@ -380,6 +424,10 @@ final class PulseCallCoreTests: XCTestCase {
         PulseBriefBuilder.make(pulse: try fixturePulse())
     }
 
+    private func realtimeCredential() -> PulseRealtimeClientCredential {
+        try! JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+    }
+
     private func pendingReview() throws -> PulsePendingReview {
         let review = try JSONDecoder.moaOps.decode(PulseOperationReview.self, from: Data(#"{"target":{"id":"s1","title":"Release","project":"/release"},"text":"continúa","action":"steer","risk":"changes","consequence":"delivery is not completion"}"#.utf8))
         return .init(operationID: "AbCdEfGhIjKlMnOpQrStUvWx", kind: .directedInstruction, expiresAt: .distantFuture, review: review)
@@ -392,13 +440,9 @@ private struct RejectingToolExecutor: PulseToolExecuting {
 
 private final class MemorySecureStore: PulseSecureStore, @unchecked Sendable {
     private var registration: PulseDeviceRegistration?
-    private var providerKey: String?
     func loadDeviceRegistration() throws -> PulseDeviceRegistration? { registration }
     func saveDeviceRegistration(_ registration: PulseDeviceRegistration) throws { self.registration = registration }
     func clearDeviceRegistration() throws { registration = nil }
-    func loadOpenAIRealtimeAPIKey() throws -> String? { providerKey }
-    func saveOpenAIRealtimeAPIKey(_ key: String) throws { providerKey = key }
-    func clearOpenAIRealtimeAPIKey() throws { providerKey = nil }
 }
 
 private final class PulseRequestRecorder: @unchecked Sendable {

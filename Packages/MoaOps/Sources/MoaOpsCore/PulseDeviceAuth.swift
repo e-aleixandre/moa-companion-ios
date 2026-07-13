@@ -136,7 +136,7 @@ public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendab
     /// Deletes the legacy standard-key entry without ever reading it. The
     /// injected deleter is solely a test seam; failure is intentionally best
     /// effort so a stale entry cannot block paired-device startup.
-    public init(service: String = "com.ealeixandre.moa-companion.pulse") {
+    public convenience init(service: String = "com.ealeixandre.moa-companion.pulse") {
         self.init(service: service, legacyKeyDeletion: Self.deleteLegacyAPIKey)
     }
 

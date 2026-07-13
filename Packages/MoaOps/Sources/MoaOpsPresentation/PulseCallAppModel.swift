@@ -366,7 +366,12 @@ public final class PulseCallAppModel: ObservableObject {
         if capture.intent == .ownerTurn {
             endedAudioCapture = capture.token
             preconnectPCM.release()
-            Task { [weak self] in try? await self?.realtimeAudioTurn?.endCapture() }
+            if let reservation = turnReservation {
+                Task { [weak self] in
+                    do { try await self?.realtimeAudioTurn?.endCapture() }
+                    catch { await MainActor.run { self?.failAudioAttempt(capture: capture.token, reservationID: reservation.id) } }
+                }
+            }
         }
         pttState = PulsePTTReducer.reduce(pttState, event: .release)
         if pendingReview == nil, state == .listening { state = hasFreshAuthoritativeProjection ? .ready : .stale }
@@ -642,6 +647,9 @@ public final class PulseCallAppModel: ObservableObject {
             self.voiceUnavailable = availability == .unavailable
             self.pttState = PulsePTTReducer.reduce(self.pttState, event: .permission(granted: availability == .available))
             if availability == .unavailable {
+                if let reservation = self.turnReservation, reservation.phase == .provider {
+                    self.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: true)
+                }
                 self.clearActiveVoiceCapture(invalidateNative: false)
                 if self.pendingReview == nil, self.state == .listening {
                     self.state = self.settledCallState()
@@ -653,8 +661,15 @@ public final class PulseCallAppModel: ObservableObject {
         voice.onInterruption = { [weak self] capture in
             guard let self else { return }
             guard self.activeVoiceCapture?.token == capture else { return }
-            self.clearActiveVoiceCapture(invalidateNative: false)
-            self.pttState = PulsePTTReducer.reduce(self.pttState, event: .interruption)
+            if let reservation = self.turnReservation, reservation.phase == .provider {
+                self.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: true)
+                // The provider attempt is terminal; unlike a review speech
+                // interruption, its next press must be immediately usable.
+                self.pttState = .idle
+            } else {
+                self.clearActiveVoiceCapture(invalidateNative: false)
+                self.pttState = PulsePTTReducer.reduce(self.pttState, event: .interruption)
+            }
             if self.pendingReview == nil { self.state = self.settledCallState() }
             self.appendCaption("La captura de voz se interrumpió. Puedes usar texto o volver a pulsar para hablar.", provenance: .localFreshness)
         }
@@ -681,7 +696,11 @@ public final class PulseCallAppModel: ObservableObject {
         voice.onPCM16 = { [weak self] capture, pcm in
             guard let self, self.activeVoiceCapture?.token == capture else { return }
             if let turn = self.realtimeAudioTurn {
-                Task { try? await turn.appendPCM16(pcm) }
+                guard let reservation = self.turnReservation else { return }
+                Task { [weak self] in
+                    do { try await turn.appendPCM16(pcm) }
+                    catch { await MainActor.run { self?.failAudioAttempt(capture: capture, reservationID: reservation.id) } }
+                }
             } else {
                 self.preconnectPCM.append(pcm)
             }
@@ -709,10 +728,14 @@ public final class PulseCallAppModel: ObservableObject {
                 }, onFinished: { [weak model] in
                     Task { @MainActor [weak model] in
                         guard let model, model.reservationIsProvider(reservation.id) else { return }
-                        model.realtimeAudioTurn = nil; model.clearActiveVoiceCapture(invalidateNative: false); model.pttState = .idle; model.releaseTurnReservation(reservation.id); model.state = model.settledCallState()
+                        model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: false)
                     }
                 })
-                guard await MainActor.run(body: { model.activeVoiceCapture?.token == capture }) else { await turn.cancelForBargeIn(); return }
+                guard await MainActor.run(body: { model.activeVoiceCapture?.token == capture }) else {
+                    await turn.cancelForBargeIn()
+                    await MainActor.run { model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: false) }
+                    return
+                }
                 await MainActor.run { model.realtimeAudioTurn = turn; model.audioMintTask = nil }
                 let flush = await MainActor.run { model.preconnectPCM.takeForFlush() }
                 for chunk in flush.chunks { try await turn.appendPCM16(chunk) }
@@ -722,19 +745,16 @@ public final class PulseCallAppModel: ObservableObject {
                     await MainActor.run {
                         guard model.reservationIsProvider(reservation.id), model.realtimeAudioTurn === turn else { return }
                         if !flush.shouldCommit {
-                            model.realtimeAudioTurn = nil
-                            model.releaseTurnReservation(reservation.id)
-                            model.state = model.settledCallState()
+                            model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: true)
                         }
                     }
                 }
             } catch {
                 await MainActor.run {
                     guard model.reservationIsProvider(reservation.id) else { return }
-                    model.preconnectPCM.cancel(); model.releaseTurnReservation(reservation.id)
-                    model.audioMintTask = nil
-                    model.state = model.settledCallState(); model.deterministicFallback()
-                    model.userMessage = "No se pudo obtener acceso efímero al proveedor. No se envió audio; comprueba Moa o vuelve a emparejar este iPhone."
+                    model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: true)
+                    model.deterministicFallback()
+                    model.userMessage = "No se pudo completar el turno de voz. El estado de envío no pudo confirmarse; puedes volver a pulsar para hablar."
                 }
             }
         }
@@ -764,6 +784,29 @@ public final class PulseCallAppModel: ObservableObject {
         if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
         if let reservation = turnReservation, reservation.phase == .provider { releaseTurnReservation(reservation.id) }
         clearActiveVoiceCapture(invalidateNative: true)
+    }
+
+    /// Every terminal audio path funnels here. It invalidates the exact
+    /// capture generation and drops all per-turn state before another press.
+    private func finishAudioAttempt(capture: PulseVoiceCaptureToken, reservationID: UUID, cancelTurn: Bool) {
+        guard turnReservation?.id == reservationID else { return }
+        audioMintTask?.cancel()
+        audioMintTask = nil
+        preconnectPCM.cancel()
+        endedAudioCapture = nil
+        if cancelTurn, let turn = realtimeAudioTurn {
+            Task { await turn.cancelForBargeIn() }
+        }
+        realtimeAudioTurn = nil
+        if activeVoiceCapture?.token == capture { clearActiveVoiceCapture(invalidateNative: true) }
+        releaseTurnReservation(reservationID)
+        pttState = .idle
+        if pendingReview == nil { state = settledCallState() }
+    }
+
+    private func failAudioAttempt(capture: PulseVoiceCaptureToken, reservationID: UUID) {
+        finishAudioAttempt(capture: capture, reservationID: reservationID, cancelTurn: true)
+        userMessage = "No se pudo completar el turno de voz. El estado de envío no pudo confirmarse; puedes volver a pulsar para hablar."
     }
 
     private func cancelActiveProviderTurn() {

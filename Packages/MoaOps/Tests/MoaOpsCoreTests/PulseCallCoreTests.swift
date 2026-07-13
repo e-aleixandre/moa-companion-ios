@@ -150,7 +150,11 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(request.url?.path, "/api/pulse/realtime/client-secret")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Moa-Device device.secret")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-Moa-Request"), "1")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8), "{}")
+        XCTAssertNil(request.url?.query)
+        XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "OpenAI-Beta"))
         XCTAssertEqual(credential.clientSecret, "ek_one_socket")
         XCTAssertFalse(String(describing: MemorySecureStore()).contains("ek_one_socket"))
     }
@@ -160,6 +164,31 @@ final class PulseCallCoreTests: XCTestCase {
         let hostile = Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://evil.example/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: expired).validated())
         XCTAssertThrowsError(try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: hostile).validated())
+    }
+
+    func testRealtimeCredentialBindsExactConfigurationAndCanonicalOrigin() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        func credential(endpoint: String, model: String = "gpt-realtime") throws -> PulseRealtimeClientCredential {
+            try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data("{\"client_secret\":\"ek_x\",\"expires_at\":1800000000,\"transport\":\"websocket\",\"endpoint\":\"\(endpoint)\",\"model\":\"\(model)\"}".utf8))
+        }
+        XCTAssertNoThrow(try credential(endpoint: "wss://api.openai.com:443/v1/realtime?model=gpt-realtime").validated(now: now, configuration: .init(model: "gpt-realtime")))
+        for endpoint in [
+            "ws://api.openai.com/v1/realtime?model=gpt-realtime",
+            "wss://api.openai.com:444/v1/realtime?model=gpt-realtime",
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime&x=1",
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime#fragment",
+            "wss://api.openai.com.evil/v1/realtime?model=gpt-realtime",
+        ] { XCTAssertThrowsError(try credential(endpoint: endpoint).validated(now: now)) }
+        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime", model: "unapproved").validated(now: now))
+        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime").validated(now: now, configuration: .init(model: "gpt-realtime-mini")))
+        XCTAssertThrowsError(try credential(endpoint: "wss://api.openai.com/v1/realtime?model=gpt-realtime").validated(now: now.addingTimeInterval(100_000_000)))
+    }
+
+    func testLegacyStandardKeyDeletionIsWriteOnlyAndBestEffort() {
+        let recorder = LegacyDeletionRecorder()
+        _ = KeychainPulseSecureStore(service: "test.service") { service, account in recorder.record(service, account) }
+        XCTAssertEqual(recorder.values.map(\.0), ["test.service"])
+        XCTAssertEqual(recorder.values.map(\.1), ["pulse.openai.api-key.v1"])
     }
 
     func testRealtimeMintRejectsMalformedAndAuthorizationFailures() async throws {
@@ -178,6 +207,11 @@ final class PulseCallCoreTests: XCTestCase {
         }
         defer { PulseURLProtocol.handler = nil }
         do { _ = try await client.mintRealtimeClientSecret(); XCTFail("malformed credential must fail") }
+        catch { }
+        PulseURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!, Data(#"{"client_secret":"ek_x","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+        }
+        do { _ = try await client.mintRealtimeClientSecret(); XCTFail("credential response without no-store must fail") }
         catch { }
     }
 
@@ -239,6 +273,8 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(request.url?.host, "api.openai.com")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer ek_test-secret")
         XCTAssertNil(request.value(forHTTPHeaderField: "OpenAI-Beta"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertEqual(Set(request.allHTTPHeaderFields?.keys.map { $0.lowercased() } ?? []), ["authorization"])
         XCTAssertFalse(request.url?.absoluteString.contains("Moa-Device") == true)
         XCTAssertFalse(request.url?.absoluteString.contains("moa.example") == true)
     }
@@ -465,6 +501,13 @@ private final class PulseRequestRecorder: @unchecked Sendable {
         lock.lock(); values.append(copy); lock.unlock()
     }
     var requests: [URLRequest] { lock.lock(); defer { lock.unlock() }; return values }
+}
+
+private final class LegacyDeletionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pairs: [(String, String)] = []
+    func record(_ service: String, _ account: String) { lock.lock(); pairs.append((service, account)); lock.unlock() }
+    var values: [(String, String)] { lock.lock(); defer { lock.unlock() }; return pairs }
 }
 
 private final class PulseURLProtocol: URLProtocol {

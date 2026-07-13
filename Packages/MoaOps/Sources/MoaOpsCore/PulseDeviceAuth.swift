@@ -131,9 +131,14 @@ enum PulseDeviceRegistrationCodec {
 public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendable {
     private let service: String
     private let deviceAccount = "pulse.device.registration.v1"
+    static let obsoleteOpenAIAPIKeyAccount = "pulse.openai.api-key.v1"
 
-    public init(service: String = "com.ealeixandre.moa-companion.pulse") {
+    /// Deletes the legacy standard-key entry without ever reading it. The
+    /// injected deleter is solely a test seam; failure is intentionally best
+    /// effort so a stale entry cannot block paired-device startup.
+    public init(service: String = "com.ealeixandre.moa-companion.pulse", legacyKeyDeletion: @escaping @Sendable (String, String) -> Void = KeychainPulseSecureStore.deleteLegacyAPIKey) {
         self.service = service
+        legacyKeyDeletion(service, Self.obsoleteOpenAIAPIKeyAccount)
     }
 
     public func loadDeviceRegistration() throws -> PulseDeviceRegistration? {
@@ -206,6 +211,17 @@ public final class KeychainPulseSecureStore: PulseSecureStore, @unchecked Sendab
         guard status == errSecSuccess || status == errSecItemNotFound else { throw PulseCallError.secureStorageUnavailable }
 #else
         throw PulseCallError.secureStorageUnavailable
+#endif
+    }
+
+    private static func deleteLegacyAPIKey(service: String, account: String) {
+#if canImport(Security)
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+        ]
+        _ = SecItemDelete(query as CFDictionary)
 #endif
     }
 }

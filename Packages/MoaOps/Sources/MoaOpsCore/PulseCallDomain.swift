@@ -10,11 +10,6 @@ public enum PulsePrivacyMode: String, CaseIterable, Equatable, Sendable {
     public var permitsCloudAudio: Bool { self != .privateSaving }
 }
 
-public enum PulseResponseScope: String, Equatable, Sendable {
-    case mini, full
-    public var spanishLabel: String { self == .mini ? "Mini" : "Completo" }
-}
-
 public enum PulseProvenance: String, Codable, Equatable, Sendable {
     case moaObserved = "moa_observed"
     case moaDerived = "moa_derived"

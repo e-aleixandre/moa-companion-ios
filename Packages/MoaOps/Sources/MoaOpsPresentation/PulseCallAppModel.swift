@@ -89,7 +89,6 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var isRefreshing = false
     @Published public private(set) var providerConfigured = false
     @Published public private(set) var privacyMode: PulsePrivacyMode = .automatic
-    @Published public private(set) var responseScope: PulseResponseScope = .mini
     @Published public private(set) var snapshot: OpsPulse?
     @Published public private(set) var opsSnapshot: OpsSnapshot?
     @Published public private(set) var lastSuccessfulRefreshAt: Date?
@@ -214,8 +213,6 @@ public final class PulseCallAppModel: ObservableObject {
             appendCaption("Modo Privado-ahorro: Pulse no envía audio ni texto a OpenAI; conserva solo el panorama local seguro.", provenance: .localFreshness)
         }
     }
-
-    public func setResponseScope(_ scope: PulseResponseScope) { responseScope = scope }
 
     public func start() async {
         guard hasPairedDevice else { return }
@@ -912,12 +909,7 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func realtimeConfiguration() -> OpenAIRealtimeProviderConfiguration {
-        switch responseScope {
-        case .mini:
-            return .init(model: "gpt-realtime-mini", maxTurnCostUSD: 0.05, pricing: .mini)
-        case .full:
-            return .init(model: OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: 0.25, pricing: .full)
-        }
+        .init()
     }
 
     private func narrate(_ text: String) {

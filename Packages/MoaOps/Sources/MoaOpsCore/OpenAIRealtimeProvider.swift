@@ -44,8 +44,8 @@ public struct PulseRealtimeClientCredential: Decodable, Equatable, Sendable {
 /// is intentionally not implemented here; this transport accepts a caller
 /// supplied short-lived credential only.
 public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
-    public static let defaultModel = "gpt-realtime"
-    public static let approvedModels: Set<String> = ["gpt-realtime", "gpt-realtime-mini"]
+    public static let defaultModel = "gpt-realtime-mini"
+    public static let approvedModels: Set<String> = [defaultModel]
     public let model: String
     public let maxTurnCostUSD: Decimal
     public let pricing: PulseRealtimePricing
@@ -56,7 +56,7 @@ public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
     /// provider billing guarantee and OpenAI account limits remain final.
     public let maximumAudioInputBytes: Int
     public let maxResponseOutputTokens: Int
-    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.25, pricing: PulseRealtimePricing = .full, budget: PulseRealtimeBudget = .init(), maximumAudioInputBytes: Int = 1_440_000, maxResponseOutputTokens: Int = 1_024) {
+    public init(model: String = OpenAIRealtimeProviderConfiguration.defaultModel, maxTurnCostUSD: Decimal = 0.05, pricing: PulseRealtimePricing = .mini, budget: PulseRealtimeBudget = .init(), maximumAudioInputBytes: Int = 1_440_000, maxResponseOutputTokens: Int = 1_024) {
         self.model = model; self.maxTurnCostUSD = maxTurnCostUSD; self.pricing = pricing; self.budget = budget
         self.maximumAudioInputBytes = max(0, maximumAudioInputBytes); self.maxResponseOutputTokens = max(1, maxResponseOutputTokens)
     }
@@ -214,7 +214,7 @@ public enum OpenAIRealtimeUsage {
 /// protocol. It uses JSON events and PCM16/base64 audio events; no unsupported
 /// WebRTC shim or Moa relay is involved.
 public actor OpenAIRealtimeClient {
-    public static let endpoint = URL(string: "wss://api.openai.com/v1/realtime")!
+    public static let endpoint = URL(string: "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini")!
     private let session: URLSession; private let endpoint: URL
     private let ledger: PulseUsageLedger
     private let budgetLedger: PulseRealtimeBudgetLedger

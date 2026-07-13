@@ -279,6 +279,16 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(request.url?.absoluteString.contains("moa.example") == true)
     }
 
+    func testRealtimeBrokerCredentialFixtureLocksCanonicalEndpointAndModel() async throws {
+        let fixture = Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-mini","model":"gpt-realtime-mini"}"#.utf8)
+        let credential = try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: fixture)
+
+        XCTAssertNoThrow(try credential.validated(configuration: .init()))
+        let request = try await OpenAIRealtimeClient().makeRequest(credential: credential, configuration: .init())
+        XCTAssertEqual(request.url?.absoluteString, "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini")
+        XCTAssertEqual(credential.model, OpenAIRealtimeProviderConfiguration.defaultModel)
+    }
+
     func testRealtimePCMAppendCommitAndCancelUseDocumentedSchema() throws {
         let pcm = Data([0, 0, 1, 0])
         let append = OpenAIRealtimePCM16.appendEvent(pcm)
@@ -337,11 +347,11 @@ final class PulseCallCoreTests: XCTestCase {
     func testRealtimeUsagePreservesUnknownAndAppliesBudget() throws {
         let pricing = PulseRealtimePricing(textInput: 5, cachedTextInput: 2.5, textOutput: 20, audioInput: 40, audioOutput: 80)
         let event = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":20,"input_token_details":{"cached_tokens":10,"audio_tokens":30},"output_token_details":{"audio_tokens":40}}}}"#.utf8)) as? [String: Any])
-        let entry = try XCTUnwrap(OpenAIRealtimeUsage.entry(from: event, model: "gpt-realtime", startedAt: Date(), pricing: pricing))
+        let entry = try XCTUnwrap(OpenAIRealtimeUsage.entry(from: event, model: "gpt-realtime-mini", startedAt: Date(), pricing: pricing))
         XCTAssertEqual(entry.audioInputTokens, 30)
         XCTAssertEqual(entry.audioOutputTokens, 40)
         XCTAssertNotNil(entry.estimatedCostUSD)
-        XCTAssertNil(OpenAIRealtimeUsage.entry(from: ["type": "response.done"], model: "gpt-realtime", startedAt: Date(), pricing: pricing))
+        XCTAssertNil(OpenAIRealtimeUsage.entry(from: ["type": "response.done"], model: "gpt-realtime-mini", startedAt: Date(), pricing: pricing))
         let budget = PulseRealtimeBudget(perSessionHardUSD: 1, perDayHardUSD: 2)
         XCTAssertTrue(budget.permitsNewCall(sessionTotal: 0.99, dayTotal: 1.99))
         XCTAssertFalse(budget.permitsNewCall(sessionTotal: 1, dayTotal: 0))
@@ -461,7 +471,7 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     private func realtimeCredential() -> PulseRealtimeClientCredential {
-        try! JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime","model":"gpt-realtime"}"#.utf8))
+        try! JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test-secret","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-mini","model":"gpt-realtime-mini"}"#.utf8))
     }
 
     private func pendingReview() throws -> PulsePendingReview {

@@ -186,9 +186,6 @@ public struct PulseCallSceneView: View {
                         Button(mode.spanishLabel) { model.setPrivacyMode(mode) }
                     }
                 }
-                Button("Respuesta \(model.responseScope.spanishLabel)") {
-                    model.setResponseScope(model.responseScope == .mini ? .full : .mini)
-                }
                 Button("Desconectar este iPhone", systemImage: "iphone.slash", role: .destructive) { showingDisconnect = true }
             } label: {
                 Image(systemName: "ellipsis.circle")

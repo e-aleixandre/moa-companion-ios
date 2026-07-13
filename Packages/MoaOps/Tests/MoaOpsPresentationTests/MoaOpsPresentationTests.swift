@@ -237,10 +237,9 @@ final class MoaOpsPresentationTests: XCTestCase {
     func testTokenProtectedTransportUsesEphemeralCookiePolicy() {
         XCTAssertEqual(MoaOpsSessionFactory.privacy(accessTokenPresent: true), .init(usesEphemeralSession: true, persistsCookies: false))
         XCTAssertEqual(MoaOpsSessionFactory.privacy(accessTokenPresent: false), .init(usesEphemeralSession: false, persistsCookies: true))
-        let session = MoaOpsSessionFactory.ephemeralSession()
-        XCTAssertNil(session.configuration.urlCache)
-        XCTAssertNotNil(session.configuration.httpCookieStorage)
-        session.invalidateAndCancel()
+        let configuration = MoaOpsSessionFactory.ephemeralConfiguration()
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertNotNil(configuration.httpCookieStorage)
     }
 
     @MainActor

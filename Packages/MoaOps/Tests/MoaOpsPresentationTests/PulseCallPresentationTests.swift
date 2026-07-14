@@ -117,7 +117,7 @@ final class PulseCallPresentationTests: XCTestCase {
 
         XCTAssertEqual(model.state, .review, "Review must remain visible while its yes/no answer is captured")
         XCTAssertEqual(model.pttState, .listening)
-        XCTAssertEqual(Array(voice.events.prefix(2)), ["stopNarration", "beginCapture"])
+        XCTAssertEqual(Array(voice.events.prefix(2)), ["stopNarration", "beginReviewCapture"])
 
         voice.emitTranscript("sí", isFinal: true)
         await settle()

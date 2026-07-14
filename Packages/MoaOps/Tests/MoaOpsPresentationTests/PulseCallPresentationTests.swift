@@ -291,6 +291,29 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertTrue(model.operationsAreAvailable)
     }
 
+    func testCompletedStreamDoesNotRetainModelThroughFailureTimer() async throws {
+        let store = try pairedStore()
+        let service = CallTestService()
+        service.pulseResults = [.success(try fixturePulse())]
+        weak var releasedModel: PulseCallAppModel?
+
+        do {
+            let model = PulseCallAppModel(
+                store: store,
+                voice: CallTestVoice(),
+                streamGraceInterval: 60,
+                streamOfflineInterval: 60,
+                serviceFactory: { _ in service }
+            )
+            await model.refresh()
+            await settle()
+            releasedModel = model
+        }
+
+        for _ in 0..<20 where releasedModel != nil { await Task.yield() }
+        XCTAssertNil(releasedModel)
+    }
+
     private func pairedStore() throws -> CallTestStore {
         let store = CallTestStore()
         try store.saveDeviceRegistration(PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "dev", credential: "dev.secret", expiresAt: .distantFuture))

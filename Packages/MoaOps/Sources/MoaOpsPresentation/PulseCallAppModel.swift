@@ -499,14 +499,13 @@ public final class PulseCallAppModel: ObservableObject {
     private func startUpdates(using service: any PulseCallService) {
         guard updatesTask == nil else { return }
         updatesTask = Task { [weak self] in
-            guard let self else { return }
             let events = await service.opsStreamEvents()
             await service.startOpsUpdates()
             for await event in events {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.applyStreamEvent(event)
             }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, let self else { return }
             self.scheduleStreamFailure()
             self.updatesTask = nil
         }
@@ -871,19 +870,23 @@ public final class PulseCallAppModel: ObservableObject {
     private func scheduleStreamFailure() {
         guard isForeground, hasPairedDevice, streamFailureTask == nil else { return }
         let id = UUID()
+        let graceInterval = streamGraceInterval
+        let offlineInterval = streamOfflineInterval
         streamFailureID = id
-        streamFailureTask = Task { [weak self] in
-            guard let self else { return }
-            if self.streamGraceInterval > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(self.streamGraceInterval * 1_000_000_000))
+        streamFailureTask = Task { [weak self, id, graceInterval, offlineInterval] in
+            if graceInterval > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(graceInterval * 1_000_000_000))
             }
-            guard !Task.isCancelled, self.streamFailureID == id else { return }
-            await self.transitionToStaleAfterStreamFailure(id: id)
-            if self.streamOfflineInterval > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(self.streamOfflineInterval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            if let self, self.streamFailureID == id {
+                await self.transitionToStaleAfterStreamFailure(id: id)
             }
-            guard !Task.isCancelled, self.streamFailureID == id else { return }
+            if offlineInterval > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(offlineInterval * 1_000_000_000))
+            }
+            guard !Task.isCancelled, let self, self.streamFailureID == id else { return }
             await self.transitionToOfflineAfterStreamFailure(id: id)
+            self.streamFailureTask = nil
         }
     }
 

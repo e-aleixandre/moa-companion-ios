@@ -82,7 +82,7 @@ final class PulseCallPresentationTests: XCTestCase {
 
     func testFailedEphemeralMintCleansCaptureAndAllowsTheNextPress() async throws {
         let store = try pairedStore()
-        let service = CallTestService()
+        let service = RealtimeCallTestService()
         service.pulseResults = [.success(try fixturePulse())]
         service.mintResults = [.failure(.transport), .failure(.transport)]
         let voice = CallTestVoice()
@@ -181,7 +181,7 @@ final class PulseCallPresentationTests: XCTestCase {
 
     func testOneGlobalTurnReservationRejectsConcurrentVoiceAndTextWithoutOrphanReview() async throws {
         let store = try pairedStore()
-        let service = CallTestService()
+        let service = RealtimeCallTestService()
         service.pulseResults = [.success(try fixturePulse())]
         let prepared = try fixturePreparedResponse(operationID: "CbCdEfGhIjKlMnOpQrStUvWx")
         service.prepareResults = [.success(prepared)]
@@ -399,11 +399,10 @@ private final class CallTestVoice: PulseVoiceControlling {
     }
 }
 
-private final class CallTestService: PulseCallService, PulseRealtimeCredentialIssuing, @unchecked Sendable {
+private class CallTestService: PulseCallService, @unchecked Sendable {
     var pulseResults: [Result<OpsPulse, PulseCallError>] = []
     var streamEvents: [PulseOpsStreamEvent] = []
     var prepareResults: [Result<PulseOperationResponse, PulseCallError>] = []
-    var mintResults: [Result<PulseRealtimeClientCredential, PulseCallError>] = []
     private(set) var confirmCalls = 0
     private(set) var prepareCalls = 0
     private(set) var preparedOperationIDs: [String] = []
@@ -411,10 +410,6 @@ private final class CallTestService: PulseCallService, PulseRealtimeCredentialIs
     func loadPulse() async throws -> OpsPulse {
         guard !pulseResults.isEmpty else { throw PulseCallError.transport }
         return try pulseResults.removeFirst().get()
-    }
-    func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
-        if !mintResults.isEmpty { return try mintResults.removeFirst().get() }
-        return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
     }
     func loadSitrep() async throws -> OpsBriefing {
         try JSONDecoder.moaOps.decode(OpsBriefing.self, from: Data(#"{"sessions":null,"blockers":[],"spoken":"Panorama seguro."}"#.utf8))
@@ -446,6 +441,15 @@ private final class CallTestService: PulseCallService, PulseRealtimeCredentialIs
         }
     }
     func invalidate() async {}
+}
+
+private final class RealtimeCallTestService: CallTestService, PulseRealtimeCredentialIssuing {
+    var mintResults: [Result<PulseRealtimeClientCredential, PulseCallError>] = []
+
+    func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        if !mintResults.isEmpty { return try mintResults.removeFirst().get() }
+        return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
+    }
 }
 
 private actor RecordingProvider: PulseProviderResponding {

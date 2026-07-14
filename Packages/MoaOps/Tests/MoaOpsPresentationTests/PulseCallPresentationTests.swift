@@ -185,7 +185,7 @@ final class PulseCallPresentationTests: XCTestCase {
         service.pulseResults = [.success(try fixturePulse())]
         let prepared = try fixturePreparedResponse(operationID: "CbCdEfGhIjKlMnOpQrStUvWx")
         service.prepareResults = [.success(prepared)]
-        let voice = CallTestVoice()
+        let voice = CallTestVoice(reportsAvailability: false)
         let barrier = PrepareBarrier()
         let model = PulseCallAppModel(
             store: store,
@@ -360,23 +360,27 @@ private final class CallTestVoice: PulseVoiceControlling {
     var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
     var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)?
     private let availability: PulseVoiceAvailability
+    private let reportsAvailability: Bool
     private(set) var events: [String] = []
     private(set) var activeCapture: PulseVoiceCaptureToken?
     private(set) var captures: [PulseVoiceCaptureToken] = []
 
-    init(availability: PulseVoiceAvailability = .available) { self.availability = availability }
+    init(availability: PulseVoiceAvailability = .available, reportsAvailability: Bool = true) {
+        self.availability = availability
+        self.reportsAvailability = reportsAvailability
+    }
     func stopSpeakingForCapture() { events.append("stopNarration") }
     func beginPushToTalk(capture: PulseVoiceCaptureToken) async {
         events.append("beginCapture")
         activeCapture = capture
         captures.append(capture)
-        onAvailability?(capture, availability)
+        if reportsAvailability { onAvailability?(capture, availability) }
     }
     func beginReviewConfirmation(capture: PulseVoiceCaptureToken) async {
         events.append("beginReviewCapture")
         activeCapture = capture
         captures.append(capture)
-        onAvailability?(capture, availability)
+        if reportsAvailability { onAvailability?(capture, availability) }
     }
     func endPushToTalk(capture _: PulseVoiceCaptureToken) { events.append("endCapture") }
     func invalidateCapture() {

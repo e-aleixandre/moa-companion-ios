@@ -25,7 +25,7 @@ jobs:
       # Xcode's shared XCTest process reproducibly hangs around the durable budget ledger group.
       # Keep exactly that group in its own SwiftPM XCTest process; all other core tests stay together.
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsCoreTests
-      - run: swift test --package-path Packages/MoaOps --filter MoaOpsPresentationTests.MoaOpsPresentationTests/testTokenProtectedTransportUsesEphemeralCookiePolicy
+      - run: swift test --package-path Packages/MoaOps --filter MoaOpsPresentationTests.MoaOpsPresentationTests/(testServerConfigurationAcceptsHTTPAndHTTPSHostsOnly|testTargetsAndDetailOnlyComeFromLoadedSnapshot|testStalenessRequiresLiveAndRecentSnapshot|testErrorMappingDoesNotExposeServerDetails|testAskMappingKeepsOnlyRecognizedVerifiedAnswers|testAskHistoryIsBoundedAndKeepsMostRecentEntries|testInstructionReceiptUsesLocalTargetAndDoesNotClaimCompletion|testPulseSectionsKeepInboxPriorityAndKnownVerificationOnly|testPulseRetentionGapRetriesOnceWithoutCursorAndThenPersistsRenderedCursor|testInstructionUsesOnlyPulseSuppliedTargetBinding)
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsBudgetTests
       - run: >-
           xcodebuild

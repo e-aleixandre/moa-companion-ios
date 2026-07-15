@@ -17,6 +17,38 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertNotEqual(callModel.rootDestination, .pairing, "The primary host must not select the old dashboard/tabs")
     }
 
+    func testQRClaimUsesEnvelopeValuesWithoutPublishingOneUsePayload() async throws {
+        let store = CallTestStore()
+        let recorder = PairingClaimRecorder()
+        let registration = try PulseDeviceRegistration(
+            baseURL: URL(string: "https://moa.example")!,
+            deviceID: "pulse_phone",
+            credential: "pulse_phone.device-secret",
+            expiresAt: .distantFuture
+        )
+        let model = PulseCallAppModel(
+            store: store,
+            voice: CallTestVoice(),
+            pairingClaim: { configuration, payload, label in
+                await recorder.record(configuration: configuration, payload: payload, label: label)
+                return registration
+            },
+            serviceFactory: { _ in CallTestService() }
+        )
+        let qr = "moa-pulse-pair-v1:" + base64URL(#"{"server_url":"https://moa.example","pairing_payload":"moa-pair-v1:pair_abc:one-use-secret"}"#)
+
+        await model.claimQRCode(qr, deviceLabel: "El iPhone de Ana")
+
+        let claim = await recorder.claim
+        XCTAssertEqual(claim?.configuration.baseURL, URL(string: "https://moa.example"))
+        XCTAssertEqual(claim?.payload.pairingID, "pair_abc")
+        XCTAssertEqual(claim?.payload.secret, "one-use-secret")
+        XCTAssertEqual(claim?.label, "El iPhone de Ana")
+        XCTAssertNotNil(try store.loadDeviceRegistration())
+        XCTAssertTrue(model.hasPairedDevice)
+        XCTAssertFalse(String(describing: model).contains("one-use-secret"))
+    }
+
     func testRefreshBuildsSpanishSafeBriefAndOfflineKeepsOnlyTransientSnapshot() async throws {
         let store = CallTestStore()
         try store.saveDeviceRegistration(PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "dev", credential: "dev.secret", expiresAt: .distantFuture))
@@ -335,6 +367,13 @@ final class PulseCallPresentationTests: XCTestCase {
         for _ in 0..<20 { await Task.yield() }
     }
 
+    private func base64URL(_ value: String) -> String {
+        Data(value.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     private func wait(seconds: TimeInterval) async {
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         await settle()
@@ -469,6 +508,20 @@ private actor RecordingProvider: PulseProviderResponding {
     }
 
     func callCount() -> Int { calls }
+}
+
+private actor PairingClaimRecorder {
+    struct Claim: Sendable {
+        let configuration: PulseServerConfiguration
+        let payload: PulsePairingPayload
+        let label: String
+    }
+
+    private(set) var claim: Claim?
+
+    func record(configuration: PulseServerConfiguration, payload: PulsePairingPayload, label: String) {
+        claim = Claim(configuration: configuration, payload: payload, label: label)
+    }
 }
 
 private actor PrepareBarrier {

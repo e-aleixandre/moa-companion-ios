@@ -17,6 +17,35 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertFalse(String(describing: store).contains(payload.secret))
     }
 
+    func testPairingQREnvelopeStrictlyBindsServerAndPayload() throws {
+        let json = #"{"server_url":"https://moa.example:8443","pairing_payload":"moa-pair-v1:pair_abc:one-use-secret"}"#
+        let qr = "moa-pulse-pair-v1:" + base64URL(json)
+
+        let envelope = try PulsePairingEnvelope(parsing: qr)
+
+        XCTAssertEqual(envelope.configuration.baseURL, URL(string: "https://moa.example:8443"))
+        XCTAssertEqual(envelope.payload.pairingID, "pair_abc")
+        XCTAssertEqual(envelope.payload.secret, "one-use-secret")
+        // The raw v1 format remains the manual fallback, not a QR envelope.
+        XCTAssertNoThrow(try PulsePairingPayload(parsing: "moa-pair-v1:pair_abc:one-use-secret"))
+        XCTAssertThrowsError(try PulsePairingEnvelope(parsing: "moa-pair-v1:pair_abc:one-use-secret"))
+    }
+
+    func testPairingQREnvelopeRejectsNonCanonicalOrUnexpectedInput() {
+        XCTAssertThrowsError(try PulsePairingEnvelope(parsing: "moa-pulse-pair-v1:not_base64!"))
+        XCTAssertThrowsError(try PulsePairingEnvelope(parsing: "moa-pulse-pair-v1:e30="), "Padding is not part of canonical base64url")
+        XCTAssertThrowsError(try PulsePairingEnvelope(parsing: "moa-pulse-pair-v1:" + base64URL(#"{"server_url":"https://moa.example","pairing_payload":"moa-pair-v1:p:s","extra":true}"#)))
+        XCTAssertThrowsError(try PulsePairingEnvelope(parsing: "moa-pulse-pair-v1:" + base64URL(#"{"server_url":"http://moa.example","pairing_payload":"moa-pair-v1:p:s"}"#)))
+        XCTAssertThrowsError(try PulsePairingEnvelope(parsing: "moa-pulse-pair-v1:" + base64URL(#"{"server_url":"https://moa.example","pairing_payload":"moa-pair-v1:p:s:extra"}"#)))
+    }
+
+    private func base64URL(_ value: String) -> String {
+        Data(value.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     func testHTTPSGuardAllowsOnlyDirectLoopbackHTTP() throws {
         XCTAssertNoThrow(try PulseServerConfiguration(urlText: "https://moa.example"))
         XCTAssertNoThrow(try PulseServerConfiguration(urlText: "http://localhost:8080"))

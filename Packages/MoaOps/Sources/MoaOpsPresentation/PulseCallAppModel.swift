@@ -52,6 +52,7 @@ public struct PulseCallCaption: Identifiable, Equatable, Sendable {
 @MainActor
 public final class PulseCallAppModel: ObservableObject {
     public typealias ServiceFactory = @Sendable (PulseDeviceRegistration) throws -> any PulseCallService
+    public typealias PairingClaim = @Sendable (PulseServerConfiguration, PulsePairingPayload, String) async throws -> PulseDeviceRegistration
     public typealias ProviderFactory = @Sendable (
         any PulseCallService,
         any PulseSecureStore,
@@ -105,6 +106,7 @@ public final class PulseCallAppModel: ObservableObject {
 
     private let store: any PulseSecureStore
     private let serviceFactory: ServiceFactory
+    private let pairingClaim: PairingClaim
     private let providerClient: OpenAIRealtimeClient
     private let providerFactory: ProviderFactory
     private let writeGate = PulseWriteGate()
@@ -144,6 +146,9 @@ public final class PulseCallAppModel: ObservableObject {
         },
         streamGraceInterval: TimeInterval = 45,
         streamOfflineInterval: TimeInterval = 60,
+        pairingClaim: @escaping PairingClaim = { configuration, payload, deviceLabel in
+            try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: deviceLabel)
+        },
         serviceFactory: @escaping ServiceFactory = { registration in try MoaPulseDeviceService(registration: registration) }
     ) {
         self.store = store
@@ -152,6 +157,7 @@ public final class PulseCallAppModel: ObservableObject {
         self.providerFactory = providerFactory
         self.streamGraceInterval = max(0, streamGraceInterval)
         self.streamOfflineInterval = max(0, streamOfflineInterval)
+        self.pairingClaim = pairingClaim
         self.serviceFactory = serviceFactory
         configureVoiceCallbacks()
         restoreRegistration()
@@ -222,12 +228,31 @@ public final class PulseCallAppModel: ObservableObject {
     /// The pairing payload is parsed and claimed in this scope. It is never
     /// placed in a published property, a URL, a prompt, or ordinary storage.
     public func claim(baseURLText: String, pairingPayloadText: String, deviceLabel: String) async {
-        isPairing = true
-        defer { isPairing = false }
         do {
             let configuration = try PulseServerConfiguration(urlText: baseURLText)
             let payload = try PulsePairingPayload(parsing: pairingPayloadText)
-            let registration = try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: deviceLabel)
+            await claim(configuration: configuration, payload: payload, deviceLabel: deviceLabel)
+        } catch {
+            pairingFailed(error)
+        }
+    }
+
+    /// QR pairing keeps its server URL and one-use payload in local call scope,
+    /// then follows the same claim path as manual pairing.
+    public func claimQRCode(_ value: String, deviceLabel: String) async {
+        do {
+            let envelope = try PulsePairingEnvelope(parsing: value)
+            await claim(configuration: envelope.configuration, payload: envelope.payload, deviceLabel: deviceLabel)
+        } catch {
+            pairingFailed(error)
+        }
+    }
+
+    private func claim(configuration: PulseServerConfiguration, payload: PulsePairingPayload, deviceLabel: String) async {
+        isPairing = true
+        defer { isPairing = false }
+        do {
+            let registration = try await pairingClaim(configuration, payload, deviceLabel)
             try store.saveDeviceRegistration(registration)
             service = try serviceFactory(registration)
             hasPairedDevice = true
@@ -237,9 +262,13 @@ public final class PulseCallAppModel: ObservableObject {
             state = .consulting
             await refresh(narrating: true)
         } catch {
-            state = .disconnected
-            userMessage = pairingMessage(for: error)
+            pairingFailed(error)
         }
+    }
+
+    private func pairingFailed(_ error: Error) {
+        state = .disconnected
+        userMessage = pairingMessage(for: error)
     }
 
     /// This revokes local access by deleting the only local device credential.

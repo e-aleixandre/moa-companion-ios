@@ -194,7 +194,7 @@ final class PulseCallPresentationTests: XCTestCase {
         model.beginPushToTalk()
         await settle()
         voice.emitTranscript("no", isFinal: true)
-        await settle()
+        await wait(seconds: 0.05)
         XCTAssertEqual(service.confirmCalls, 1)
         XCTAssertNil(model.pendingReview)
 

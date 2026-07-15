@@ -37,20 +37,28 @@ final class MoaServeModelsTests: XCTestCase {
 
     func testConversationAndToolDetailFixturesKeepTextAndToolMetadataSeparate() throws {
         let pageFixture = #"""
-        {"session_id":"session-1","title":"Fix tests","branch":{"leaf_id":"leaf-1","source":"active"},"order":"newest_first","messages":[{"id":"tool:assistant-1:0","role":"tool","timestamp":"2026-07-15T18:02:00Z","tool":"bash","summary":"ejecutó `go test ./...`","status":"ok"},{"id":"assistant-1","role":"assistant","timestamp":"2026-07-15T18:01:00Z","text":"Los tests terminaron.","truncated":false},{"id":"user-1","role":"user","text":"Prueba los tests."}],"next_cursor":"opaque-cursor","has_more":true}
+        {"session_id":"session-1","title":"Fix tests","branch":{"leaf_id":"leaf-1","source":"active"},"order":"newest_first","messages":[{"id":"tool:assistant-1:0","role":"tool","timestamp":"2026-07-15T18:02:00Z","tool":"bash","action":"bash","target":"go","summary":"Tool activity","status":"ok"},{"id":"assistant-1","role":"assistant","timestamp":"2026-07-15T18:01:00Z","text":"Los tests terminaron.","truncated":false},{"id":"user-1","role":"user","text":"Prueba los tests."}],"next_cursor":"opaque-cursor","has_more":true}
+        """#
+        let legacyToolFixture = #"""
+        {"id":"tool:assistant-0:0","role":"tool","tool":"bash","summary":"Tool activity","status":"ok"}
         """#
         let detailFixture = #"""
         {"output":"[non-sensitive fixture marker]","truncated":true}
         """#
 
         let page = try JSONDecoder.moaOps.decode(MoaServeConversationPage.self, from: Data(pageFixture.utf8))
+        let legacyTool = try JSONDecoder.moaOps.decode(MoaServeConversationItem.self, from: Data(legacyToolFixture.utf8))
         let detail = try JSONDecoder.moaOps.decode(MoaServeToolDetail.self, from: Data(detailFixture.utf8))
 
         XCTAssertEqual(page.messages[0].role, .tool)
         XCTAssertEqual(page.messages[0].tool, "bash")
-        XCTAssertEqual(page.messages[0].summary, "ejecutó `go test ./...`")
+        XCTAssertEqual(page.messages[0].action, "bash")
+        XCTAssertEqual(page.messages[0].target, "go")
+        XCTAssertEqual(page.messages[0].summary, "Tool activity")
         XCTAssertEqual(page.messages[0].status, "ok")
         XCTAssertNil(page.messages[0].text)
+        XCTAssertNil(legacyTool.action)
+        XCTAssertNil(legacyTool.target)
         XCTAssertEqual(page.messages[1].text, "Los tests terminaron.")
         XCTAssertEqual(page.messages[2].text, "Prueba los tests.")
         XCTAssertEqual(page.nextCursor, "opaque-cursor")

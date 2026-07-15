@@ -347,16 +347,18 @@ final class PulseCallCoreTests: XCTestCase {
     }
 
     func testRealtimeGAAudioSessionAndResponseFixturesUseNestedDescriptors() throws {
-        let fixture = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"session.update","session":{"type":"realtime","output_modalities":["text","audio"],"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null},"output":{"format":{"type":"audio/pcm"},"voice":"marin"}}}}"#.utf8)) as? [String: Any])
+        let fixture = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"type":"session.update","session":{"type":"realtime","output_modalities":["audio"],"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null},"output":{"format":{"type":"audio/pcm"},"voice":"marin"}}}}"#.utf8)) as? [String: Any])
         let session = try XCTUnwrap(fixture["session"] as? [String: Any])
         XCTAssertEqual(session["type"] as? String, "realtime")
+        XCTAssertEqual(session["output_modalities"] as? [String], ["audio"])
         XCTAssertNil(session["modalities"])
         XCTAssertNil(session["input_audio_format"])
         let audio = try XCTUnwrap(session["audio"] as? [String: Any])
         let input = try XCTUnwrap(audio["input"] as? [String: Any])
         XCTAssertEqual((try XCTUnwrap(input["format"] as? [String: Any]))["type"] as? String, "audio/pcm")
         XCTAssertEqual((try XCTUnwrap(input["format"] as? [String: Any]))["rate"] as? Int, 24_000)
-        let response = ["type": "response.create", "response": ["output_modalities": ["text", "audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]] as [String : Any]
+        let response = ["type": "response.create", "response": ["output_modalities": ["audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]] as [String : Any]
+        XCTAssertEqual((response["response"] as? [String: Any])?["output_modalities"] as? [String], ["audio"])
         XCTAssertNotNil((((response["response"] as? [String: Any])?["audio"] as? [String: Any])?["output"] as? [String: Any])?["format"])
     }
 

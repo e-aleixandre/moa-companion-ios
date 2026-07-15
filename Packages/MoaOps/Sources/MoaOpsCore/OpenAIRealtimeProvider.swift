@@ -368,7 +368,7 @@ public actor OpenAIRealtimeAudioTurn {
         guard !configured else { return }
         configured = true
         await budgetLedger.markRequestSent(turnID: turnID)
-        try await send(["type": "session.update", "session": ["type": "realtime", "instructions": PulseProviderPrompt.system, "output_modalities": ["audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
+        try await send(["type": "session.update", "session": ["type": "realtime", "instructions": PulseProviderPrompt.system, "output_modalities": ["audio"], "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": NSNull()], "output": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "voice": "marin"]]]])
         // Bounded safe context is text, never raw Moa credentials or context.
         try await send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": context.ownerMessageData]]]])
         receiveTask = Task { [weak self] in await self?.receive() }
@@ -384,7 +384,7 @@ public actor OpenAIRealtimeAudioTurn {
         captureOpen = false
         guard sentAudioBytes > 0 else { await cancelBeforeAudio(); return }
         try await send(OpenAIRealtimePCM16.commitEvent)
-        try await send(["type": "response.create", "response": ["max_output_tokens": maxResponseOutputTokens, "output_modalities": ["audio"], "audio": ["output": ["format": ["type": "audio/pcm"], "voice": "marin"]]]])
+        try await send(["type": "response.create", "response": ["max_output_tokens": maxResponseOutputTokens, "output_modalities": ["audio"], "audio": ["output": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "voice": "marin"]]]])
     }
     public func cancelForBargeIn() async {
         cancelled = true; captureOpen = false

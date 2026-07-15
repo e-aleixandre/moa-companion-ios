@@ -322,11 +322,13 @@ public struct MoaServeConversationItem: Codable, Equatable, Sendable, Identifiab
     public let omitted: Bool
     public let omittedBlocks: Int
     public let tool: String?
+    public let action: String?
+    public let target: String?
     public let summary: String?
     public let status: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, role, timestamp, text, truncated, omitted, tool, summary, status
+        case id, role, timestamp, text, truncated, omitted, tool, action, target, summary, status
         case omittedBlocks = "omitted_blocks"
     }
 
@@ -340,6 +342,8 @@ public struct MoaServeConversationItem: Codable, Equatable, Sendable, Identifiab
         omitted = try container.decodeIfPresent(Bool.self, forKey: .omitted) ?? false
         omittedBlocks = try container.decodeIfPresent(Int.self, forKey: .omittedBlocks) ?? 0
         tool = try container.decodeIfPresent(String.self, forKey: .tool)
+        action = try container.decodeIfPresent(String.self, forKey: .action)
+        target = try container.decodeIfPresent(String.self, forKey: .target)
         summary = try container.decodeIfPresent(String.self, forKey: .summary)
         status = try container.decodeIfPresent(String.self, forKey: .status)
     }

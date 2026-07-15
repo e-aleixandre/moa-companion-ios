@@ -192,6 +192,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Pulse usa la cámara solo para escanear el QR de emparejamiento de Moa.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Pulse usa el micrófono solo mientras mantienes pulsado para hablar con Moa.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Pulse convierte tu pulsación para hablar en texto en este dispositivo.";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
@@ -220,6 +222,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Pulse usa la cámara solo para escanear el QR de emparejamiento de Moa.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Pulse usa el micrófono solo mientras mantienes pulsado para hablar con Moa.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Pulse convierte tu pulsación para hablar con Moa en texto en este dispositivo.";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;

@@ -165,6 +165,76 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
     }
 
+    func testGenericServeRequestsUseEscapedQueriesAndRejectInvalidRoutesOrResponses() async throws {
+        let recorder = PulseRequestRecorder()
+        PulseURLProtocol.handler = { request in
+            recorder.record(request)
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let body: String
+            switch request.url?.path {
+            case "/api/sessions":
+                body = #"[{"id":"session-1","title":"Fix tests","state":"idle","model":"gpt-5","provider":"openai","thinking":"low","cwd":"/workspace","created":"2026-07-15T18:00:00Z","updated":"2026-07-15T18:01:00Z","context_percent":0,"permission_mode":"ask","cost_usd":0}]"#
+            case "/api/attention":
+                body = #"{"items":[]}"#
+            case "/api/sessions/session-1/messages":
+                if components?.queryItems?.contains(where: { $0.name == "detail" && $0.value == "full" }) == true {
+                    body = #"{"output":"[non-sensitive fixture marker]"}"#
+                } else {
+                    body = #"{"session_id":"session-1","title":"Fix tests","branch":{"source":"active"},"order":"newest_first","messages":[],"has_more":false}"#
+                }
+            default:
+                return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        defer { PulseURLProtocol.handler = nil }
+
+        let session = pulseSession()
+        defer { session.invalidateAndCancel() }
+        let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
+        let client = try MoaPulseDeviceClient(registration: registration, session: session)
+
+        let sessions = try await client.listSessions()
+        XCTAssertEqual(sessions.map(\.id), ["session-1"])
+        let attention = try await client.attention()
+        XCTAssertTrue(attention.items.isEmpty)
+        _ = try await client.displayMessages(sessionID: "session-1", limit: 20, cursor: "cursor with spaces")
+        let messagesRequest = try XCTUnwrap(recorder.requests.last)
+        XCTAssertEqual(messagesRequest.url?.path, "/api/sessions/session-1/messages")
+        let messageQuery = try XCTUnwrap(URLComponents(url: try XCTUnwrap(messagesRequest.url), resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(messageQuery.first { $0.name == "limit" }?.value, "20")
+        XCTAssertEqual(messageQuery.first { $0.name == "cursor" }?.value, "cursor with spaces")
+
+        _ = try await client.toolDetail(sessionID: "session-1", itemID: "tool:assistant-1:0")
+        let detailRequest = try XCTUnwrap(recorder.requests.last)
+        let detailQuery = try XCTUnwrap(URLComponents(url: try XCTUnwrap(detailRequest.url), resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(detailQuery.first { $0.name == "detail" }?.value, "full")
+        XCTAssertEqual(detailQuery.first { $0.name == "item_id" }?.value, "tool:assistant-1:0")
+
+        do {
+            _ = try await client.displayMessages(sessionID: "../other", limit: 20)
+            XCTFail("path traversal must be rejected before a request is made")
+        } catch let error as PulseCallError {
+            XCTAssertEqual(error, .operationUnavailable)
+        }
+        do {
+            _ = try await client.displayMessages(sessionID: "session-1", limit: 101)
+            XCTFail("out-of-range limit must be rejected before a request is made")
+        } catch let error as PulseCallError {
+            XCTAssertEqual(error, .operationUnavailable)
+        }
+
+        PulseURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        do {
+            _ = try await client.listSessions()
+            XCTFail("non-success responses must not decode")
+        } catch let error as PulseCallError {
+            XCTAssertEqual(error, .httpStatus(code: 403, retryAfter: nil))
+        }
+    }
+
     func testRealtimeSecretMintUsesOnlyDeviceAuthAndStrictEmptyBody() async throws {
         let recorder = PulseRequestRecorder()
         PulseURLProtocol.handler = { request in

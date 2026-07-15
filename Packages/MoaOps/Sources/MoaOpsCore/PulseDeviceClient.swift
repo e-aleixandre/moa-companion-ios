@@ -217,6 +217,44 @@ public actor MoaPulseDeviceClient {
         return try await get(path: "api/pulse/operations/\(operationID)", as: PulseOperationResponse.self)
     }
 
+    public func listSessions() async throws -> [MoaServeSessionInfo] {
+        try await get(path: "api/sessions", as: [MoaServeSessionInfo].self)
+    }
+
+    public func attention() async throws -> MoaServeAttentionResponse {
+        try await get(path: "api/attention", as: MoaServeAttentionResponse.self)
+    }
+
+    public func displayMessages(sessionID: String, limit: Int = 20, cursor: String? = nil) async throws -> MoaServeConversationPage {
+        guard validRouteComponent(sessionID), (1...100).contains(limit) else {
+            throw PulseCallError.operationUnavailable
+        }
+        if let cursor, !validOpaqueCursor(cursor) {
+            throw PulseCallError.operationUnavailable
+        }
+        var components = URLComponents(url: sessionMessagesEndpoint(sessionID: sessionID), resolvingAgainstBaseURL: false)
+        var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor {
+            queryItems.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else { throw PulseCallError.invalidServerURL }
+        return try await get(url: url, as: MoaServeConversationPage.self)
+    }
+
+    public func toolDetail(sessionID: String, itemID: String) async throws -> MoaServeToolDetail {
+        guard validRouteComponent(sessionID), validRouteComponent(itemID) else {
+            throw PulseCallError.operationUnavailable
+        }
+        var components = URLComponents(url: sessionMessagesEndpoint(sessionID: sessionID), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "detail", value: "full"),
+            URLQueryItem(name: "item_id", value: itemID),
+        ]
+        guard let url = components?.url else { throw PulseCallError.invalidServerURL }
+        return try await get(url: url, as: MoaServeToolDetail.self)
+    }
+
     /// This credential is intentionally returned only to the immediate caller.
     /// It is not a Moa credential and must never be used on another Moa route.
     public func mintRealtimeClientSecret(now: Date = Date(), expirySkew: TimeInterval = 30) async throws -> PulseRealtimeClientCredential {
@@ -288,6 +326,14 @@ public actor MoaPulseDeviceClient {
     private func endpoint(_ path: String) -> URL {
         registration.baseURL.appendingPathComponent(path)
     }
+
+    private func sessionMessagesEndpoint(sessionID: String) -> URL {
+        registration.baseURL
+            .appendingPathComponent("api")
+            .appendingPathComponent("sessions")
+            .appendingPathComponent(sessionID)
+            .appendingPathComponent("messages")
+    }
 }
 
 private struct PulseEmptyObject: Encodable {}
@@ -301,4 +347,13 @@ private func validOperationID(_ value: String) -> Bool {
     value.count == 24 && value.unicodeScalars.allSatisfy {
         ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122) || ($0.value >= 48 && $0.value <= 57) || $0 == "-" || $0 == "_"
     }
+}
+
+private func validRouteComponent(_ value: String) -> Bool {
+    guard validReference(value, limit: 512), value != ".", value != ".." else { return false }
+    return !value.contains("/") && !value.contains("\\")
+}
+
+private func validOpaqueCursor(_ value: String) -> Bool {
+    validReference(value, limit: 4_096)
 }

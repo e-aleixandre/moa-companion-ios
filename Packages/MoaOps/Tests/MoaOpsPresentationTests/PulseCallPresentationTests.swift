@@ -135,6 +135,25 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertFalse(model.isTurnBusy)
     }
 
+    func testPTTRemainsListeningWhileCredentialMintIsPending() async throws {
+        let store = try pairedStore()
+        let service = RealtimeCallTestService()
+        service.pulseResults = [.success(try fixturePulse())]
+        let mintBarrier = MintBarrier()
+        service.mintBarrier = mintBarrier
+        let voice = CallTestVoice()
+        let model = PulseCallAppModel(store: store, voice: voice, serviceFactory: { _ in service })
+        await model.refresh()
+
+        model.beginPushToTalk()
+        await mintBarrier.waitForArrival()
+
+        XCTAssertEqual(model.pttState, .listening)
+        XCTAssertEqual(model.state, .listening, "PTT must not claim to be thinking before the owner releases it")
+        model.stop()
+        await mintBarrier.release()
+    }
+
     func testReviewPTTStopsNarrationThenConfirmsOrCancelsWithoutProviderTurn() async throws {
         let store = try pairedStore()
         let service = CallTestService()
@@ -488,10 +507,40 @@ private class CallTestService: PulseCallService, @unchecked Sendable {
 
 private final class RealtimeCallTestService: CallTestService, PulseRealtimeCredentialIssuing {
     var mintResults: [Result<PulseRealtimeClientCredential, PulseCallError>] = []
+    var mintBarrier: MintBarrier?
 
     func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        if let mintBarrier { await mintBarrier.arriveAndWait() }
         if !mintResults.isEmpty { return try mintResults.removeFirst().get() }
         return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_test","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
+    }
+}
+
+private actor MintBarrier {
+    private var arrived = false
+    private var released = false
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func arriveAndWait() async {
+        arrived = true
+        let waiters = arrivalWaiters
+        arrivalWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitForArrival() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrivalWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 }
 

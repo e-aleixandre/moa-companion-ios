@@ -392,6 +392,20 @@ final class PulseCallCoreTests: XCTestCase {
     func testAudioPlaybackPlanActivatesBeforeEngineAndScheduling() {
         XCTAssertEqual(PulseAudioPlaybackPlan.steps(sessionIsActive: false, engineIsRunning: false), [.activateSession, .startEngine, .schedule])
         XCTAssertEqual(PulseAudioPlaybackPlan.steps(sessionIsActive: true, engineIsRunning: true), [.schedule])
+        var drain = PulseAudioPlaybackDrain()
+        drain.schedule(); drain.schedule(); drain.schedule()
+        XCTAssertFalse(drain.isDrained)
+        drain.finishBuffer(); drain.finishBuffer()
+        XCTAssertFalse(drain.isDrained, "response.done must not stop playback before the last buffer")
+        drain.finishBuffer()
+        XCTAssertTrue(drain.isDrained)
+    }
+
+    func testRealtimeAudioTurnOnlyTreatsCompletedResponseDoneAsSuccess() {
+        XCTAssertEqual(OpenAIRealtimeAudioTurnCompletion.responseDoneCompletion(["response": ["status": "completed"]]), .completed)
+        XCTAssertEqual(OpenAIRealtimeAudioTurnCompletion.responseDoneCompletion(["response": ["status": "failed"]]), .providerFailed)
+        XCTAssertEqual(OpenAIRealtimeAudioTurnCompletion.responseDoneCompletion(["response": ["status": "incomplete"]]), .providerFailed)
+        XCTAssertEqual(OpenAIRealtimeAudioTurnCompletion.responseDoneCompletion([:]), .providerFailed)
     }
 
     func testPTTReducerStopsOnInterruptionAndForegroundLoss() {

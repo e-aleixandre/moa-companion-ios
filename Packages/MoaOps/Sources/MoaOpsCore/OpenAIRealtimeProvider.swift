@@ -4,6 +4,21 @@ public enum OpenAIRealtimeClientError: Error, Equatable, Sendable {
     case missingCredential, invalidCredential, expiredCredential, invalidResponse, httpStatus(Int), decoding, transport, tooManyToolRounds, budgetExceeded, inputTooLarge
 }
 
+/// A non-sensitive terminal outcome for one direct Realtime audio turn.
+/// Provider payloads are deliberately not carried into UI state or logs.
+public enum OpenAIRealtimeAudioTurnCompletion: Equatable, Sendable {
+    case completed
+    case providerFailed
+    case transportFailed
+
+    static func responseDoneCompletion(_ event: [String: Any]) -> Self {
+        guard let response = event["response"] as? [String: Any], response["status"] as? String == "completed" else {
+            return .providerFailed
+        }
+        return .completed
+    }
+}
+
 /// One in-memory direct-WebSocket capability.  It deliberately is neither
 /// Codable nor persistable by this package's secure store.
 public struct PulseRealtimeClientCredential: Decodable, Equatable, Sendable {
@@ -231,7 +246,7 @@ public actor OpenAIRealtimeClient {
 
     /// Opens one explicit PTT turn. Nothing is captured or sent by this
     /// method; callers must append PCM only while their capture token is live.
-    public func beginAudioTurn(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) async throws -> OpenAIRealtimeAudioTurn {
+    public func beginAudioTurn(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable (OpenAIRealtimeAudioTurnCompletion) -> Void) async throws -> OpenAIRealtimeAudioTurn {
         let request = try makeRequest(credential: credential, configuration: configuration)
         guard let turnID = await budgetLedger.reserve(amountUSD: configuration.maxTurnCostUSD, budget: configuration.budget) else { throw OpenAIRealtimeClientError.budgetExceeded }
         let socket = session.webSocketTask(with: request)
@@ -330,10 +345,10 @@ public actor OpenAIRealtimeClient {
 /// typed prepare/review path.
 public actor OpenAIRealtimeAudioTurn {
     private let socket: URLSessionWebSocketTask; private let turnID: UUID; private let model: String; private let pricing: PulseRealtimePricing?; private let maximumAudioInputBytes: Int; private let maxResponseOutputTokens: Int; private let ledger: PulseUsageLedger; private let budgetLedger: PulseRealtimeBudgetLedger
-    private let onText: @Sendable (String) -> Void; private let onAudio: @Sendable (Data) -> Void; private let onFinished: @Sendable () -> Void
+    private let onText: @Sendable (String) -> Void; private let onAudio: @Sendable (Data) -> Void; private let onFinished: @Sendable (OpenAIRealtimeAudioTurnCompletion) -> Void
     private let context: PulseProviderContext
     private let startedAt = Date(); private var captureOpen = true; private var cancelled = false; private var configured = false; private var sentAudioBytes = 0; private var receiveTask: Task<Void, Never>?
-    init(socket: URLSessionWebSocketTask, turnID: UUID, model: String, pricing: PulseRealtimePricing?, maximumAudioInputBytes: Int, maxResponseOutputTokens: Int, ledger: PulseUsageLedger, budgetLedger: PulseRealtimeBudgetLedger, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable () -> Void) { self.socket = socket; self.turnID = turnID; self.model = model; self.pricing = pricing; self.maximumAudioInputBytes = maximumAudioInputBytes; self.maxResponseOutputTokens = maxResponseOutputTokens; self.ledger = ledger; self.budgetLedger = budgetLedger; self.context = context; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
+    init(socket: URLSessionWebSocketTask, turnID: UUID, model: String, pricing: PulseRealtimePricing?, maximumAudioInputBytes: Int, maxResponseOutputTokens: Int, ledger: PulseUsageLedger, budgetLedger: PulseRealtimeBudgetLedger, context: PulseProviderContext, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onFinished: @escaping @Sendable (OpenAIRealtimeAudioTurnCompletion) -> Void) { self.socket = socket; self.turnID = turnID; self.model = model; self.pricing = pricing; self.maximumAudioInputBytes = maximumAudioInputBytes; self.maxResponseOutputTokens = maxResponseOutputTokens; self.ledger = ledger; self.budgetLedger = budgetLedger; self.context = context; self.onText = onText; self.onAudio = onAudio; self.onFinished = onFinished }
     deinit { receiveTask?.cancel(); socket.cancel(with: .goingAway, reason: nil) }
     func configure(context _: PulseProviderContext) async throws {
         // Deliberately defer every cloud event until there is valid PCM.
@@ -368,7 +383,8 @@ public actor OpenAIRealtimeAudioTurn {
     }
     private func cancelBeforeAudio() async { cancelled = true; receiveTask?.cancel(); socket.cancel(with: .normalClosure, reason: nil); await budgetLedger.releaseIfPreSend(turnID: turnID) }
     private func receive() async {
-        defer { onFinished() }
+        var completion: OpenAIRealtimeAudioTurnCompletion = .transportFailed
+        defer { onFinished(completion) }
         while !Task.isCancelled {
             guard let message = try? await socket.receive() else { return }
             let data: Data
@@ -383,8 +399,10 @@ public actor OpenAIRealtimeAudioTurn {
                 let entry = OpenAIRealtimeUsage.entry(from: object, model: model, startedAt: startedAt, pricing: pricing)
                 if let entry { await ledger.record(entry) }
                 await budgetLedger.settle(turnID: turnID, knownCostUSD: entry?.estimatedCostUSD)
+                completion = OpenAIRealtimeAudioTurnCompletion.responseDoneCompletion(object)
                 return
             case "error":
+                completion = .providerFailed
                 return
             default: continue
             }

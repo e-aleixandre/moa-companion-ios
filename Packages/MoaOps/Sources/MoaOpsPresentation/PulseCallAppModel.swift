@@ -128,9 +128,11 @@ public final class PulseCallAppModel: ObservableObject {
     private var turnReservation: TurnReservation?
     private var providerTask: Task<Void, Never>?
     private var audioMintTask: Task<Void, Never>?
+    private var audioSendTask: Task<Void, Never>?
     private var realtimeAudioTurn: OpenAIRealtimeAudioTurn?
     private var isBargingIn = false
     private var endedAudioCapture: PulseVoiceCaptureToken?
+    private var audioCommitCapture: PulseVoiceCaptureToken?
     private var preconnectPCM = PulsePTTPreconnectBuffer()
 
     public init(
@@ -394,10 +396,7 @@ public final class PulseCallAppModel: ObservableObject {
             preconnectPCM.release()
             if let reservation = turnReservation {
                 state = .thinking
-                Task { [weak self] in
-                    do { try await self?.realtimeAudioTurn?.endCapture() }
-                    catch { await MainActor.run { self?.failAudioAttempt(capture: capture.token, reservationID: reservation.id) } }
-                }
+                enqueueAudioCommit(capture: capture.token, reservationID: reservation.id)
             }
         }
         pttState = PulsePTTReducer.reduce(pttState, event: .release)
@@ -720,15 +719,13 @@ public final class PulseCallAppModel: ObservableObject {
             }
         }
         voice.onPCM16 = { [weak self] capture, pcm in
-            guard let self, self.activeVoiceCapture?.token == capture else { return }
-            if let turn = self.realtimeAudioTurn {
-                guard let reservation = self.turnReservation else { return }
-                Task { [weak self] in
-                    do { try await turn.appendPCM16(pcm) }
-                    catch { await MainActor.run { self?.failAudioAttempt(capture: capture, reservationID: reservation.id) } }
+            Task { @MainActor [weak self] in
+                guard let self, self.activeVoiceCapture?.token == capture else { return }
+                if let reservation = self.turnReservation, self.realtimeAudioTurn != nil {
+                    self.enqueueAudioAppend(pcm, capture: capture, reservationID: reservation.id)
+                } else {
+                    self.preconnectPCM.append(pcm)
                 }
-            } else {
-                self.preconnectPCM.append(pcm)
             }
         }
     }
@@ -766,21 +763,17 @@ public final class PulseCallAppModel: ObservableObject {
                     await MainActor.run { model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: false) }
                     return
                 }
-                await MainActor.run { model.realtimeAudioTurn = turn; model.audioMintTask = nil }
-                let flush = await MainActor.run { model.preconnectPCM.takeForFlush() }
-                for chunk in flush.chunks { try await turn.appendPCM16(chunk) }
-                let wasReleased = await MainActor.run { model.endedAudioCapture == capture }
-                if flush.shouldCommit || wasReleased {
-                    await MainActor.run {
-                        guard model.reservationIsProvider(reservation.id), model.realtimeAudioTurn === turn else { return }
-                        model.state = .thinking
+                await MainActor.run {
+                    guard model.reservationIsProvider(reservation.id), model.activeVoiceCapture?.token == capture else { return }
+                    model.realtimeAudioTurn = turn
+                    model.audioMintTask = nil
+                    let flush = model.preconnectPCM.takeForFlush()
+                    for chunk in flush.chunks {
+                        model.enqueueAudioAppend(chunk, capture: capture, reservationID: reservation.id)
                     }
-                    try await turn.endCapture()
-                    await MainActor.run {
-                        guard model.reservationIsProvider(reservation.id), model.realtimeAudioTurn === turn else { return }
-                        if !flush.shouldCommit {
-                            model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: true)
-                        }
+                    if flush.shouldCommit || model.endedAudioCapture == capture {
+                        model.state = .thinking
+                        model.enqueueAudioCommit(capture: capture, reservationID: reservation.id)
                     }
                 }
             } catch {
@@ -799,6 +792,40 @@ public final class PulseCallAppModel: ObservableObject {
         return reservation.phase == .provider
     }
 
+    private func enqueueAudioAppend(_ pcm: Data, capture: PulseVoiceCaptureToken, reservationID: UUID) {
+        let previous = audioSendTask
+        audioSendTask = Task { [weak self] in
+            _ = await previous?.value
+            guard let self,
+                  self.activeVoiceCapture?.token == capture,
+                  self.reservationIsProvider(reservationID),
+                  let turn = self.realtimeAudioTurn else { return }
+            do {
+                try await turn.appendPCM16(pcm)
+            } catch {
+                self.failAudioAttempt(capture: capture, reservationID: reservationID)
+            }
+        }
+    }
+
+    private func enqueueAudioCommit(capture: PulseVoiceCaptureToken, reservationID: UUID) {
+        guard audioCommitCapture != capture else { return }
+        audioCommitCapture = capture
+        let previous = audioSendTask
+        audioSendTask = Task { [weak self] in
+            _ = await previous?.value
+            guard let self,
+                  self.activeVoiceCapture?.token == capture,
+                  self.reservationIsProvider(reservationID),
+                  let turn = self.realtimeAudioTurn else { return }
+            do {
+                try await turn.endCapture()
+            } catch {
+                self.failAudioAttempt(capture: capture, reservationID: reservationID)
+            }
+        }
+    }
+
     private func reservationIsReview(for operationID: String) -> Bool {
         guard let reservation = turnReservation else { return false }
         if case let .review(id) = reservation.phase { return id == operationID }
@@ -814,7 +841,10 @@ public final class PulseCallAppModel: ObservableObject {
     private func invalidateActiveVoiceCapture() {
         audioMintTask?.cancel()
         audioMintTask = nil
+        audioSendTask?.cancel()
+        audioSendTask = nil
         preconnectPCM.cancel()
+        audioCommitCapture = nil
         if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
         if let reservation = turnReservation, reservation.phase == .provider { releaseTurnReservation(reservation.id) }
         clearActiveVoiceCapture(invalidateNative: true)
@@ -826,8 +856,11 @@ public final class PulseCallAppModel: ObservableObject {
         guard turnReservation?.id == reservationID else { return }
         audioMintTask?.cancel()
         audioMintTask = nil
+        audioSendTask?.cancel()
+        audioSendTask = nil
         preconnectPCM.cancel()
         endedAudioCapture = nil
+        audioCommitCapture = nil
         if cancelTurn, let turn = realtimeAudioTurn {
             Task { await turn.cancelForBargeIn() }
         }

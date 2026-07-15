@@ -107,6 +107,9 @@ public struct PulsePairingView: View {
 
                         DisclosureGroup("Introducir datos manualmente") {
                             VStack(alignment: .leading, spacing: 12) {
+                                Text("No necesitas un token de Serve. Este método usa la URL de Moa y un código temporal de un solo uso generado por el panel Pair Pulse de Serve.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
                                 TextField("https://moa.example", text: $manualBaseURL)
                                     .textFieldStyle(.roundedBorder)
                                     .autocorrectionDisabled()
@@ -114,17 +117,22 @@ public struct PulsePairingView: View {
                                     .textInputAutocapitalization(.never)
                                     .keyboardType(.URL)
 #endif
-                                TextField("moa-pair-v1:…", text: $manualPairingPayload, axis: .vertical)
+                                TextField("Código temporal de emparejamiento (moa-pair-v1:…)", text: $manualPairingPayload, axis: .vertical)
                                     .textFieldStyle(.roundedBorder)
                                     .lineLimit(1...3)
                                     .autocorrectionDisabled()
 #if os(iOS)
                                     .textInputAutocapitalization(.never)
 #endif
+                                if manualPairingPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text("En Serve: abre Pair Pulse, crea un emparejamiento y despliega «Introducir manualmente» para copiar este código. No pegues un token de Serve aquí.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
                                 TextField("Nombre de este iPhone", text: $manualDeviceLabel)
                                     .textFieldStyle(.roundedBorder)
                                     .autocorrectionDisabled()
-                                Button(model.isPairing ? "Emparejando…" : "Emparejar manualmente") {
+                                Button(model.isPairing ? "Emparejando…" : "Emparejar con código temporal") {
                                     Task {
                                         await model.claim(baseURLText: manualBaseURL, pairingPayloadText: manualPairingPayload, deviceLabel: manualDeviceLabel)
                                         manualPairingPayload = ""
@@ -419,29 +427,54 @@ private struct PulsePresenceOrb: View {
     private var duration: Double { state == .listening ? 0.55 : state == .thinking ? 0.85 : 2.1 }
 }
 
+struct PulsePTTGestureState: Equatable {
+    private(set) var isActive = false
+
+    mutating func begin(disabled: Bool) -> Bool {
+        guard !isActive, !disabled else { return false }
+        isActive = true
+        return true
+    }
+
+    mutating func end() -> Bool {
+        guard isActive else { return false }
+        isActive = false
+        return true
+    }
+
+    func acceptsHitTesting(disabled: Bool) -> Bool { !disabled || isActive }
+}
+
 private struct PulsePTTButton: View {
     let isListening: Bool
     let disabled: Bool
     let onPress: () -> Void
     let onRelease: () -> Void
+    @State private var gestureState = PulsePTTGestureState()
 
     var body: some View {
         VStack(spacing: 5) {
-            Image(systemName: isListening ? "mic.fill" : "mic")
+            Image(systemName: isListening || gestureState.isActive ? "mic.fill" : "mic")
                 .font(.title2)
-            Text(isListening ? "Escuchando" : "Mantén para hablar")
+            Text(isListening || gestureState.isActive ? "Escuchando" : "Mantén para hablar")
                 .font(.caption.bold())
         }
         .foregroundStyle(.indigo)
         .frame(width: 132, height: 68)
         .background(.white, in: Capsule())
         .contentShape(Capsule())
-        .onLongPressGesture(minimumDuration: 0, maximumDistance: 80, pressing: { pressing in
-            pressing ? onPress() : onRelease()
-        }, perform: {})
-        .opacity(disabled ? 0.45 : 1)
-        .allowsHitTesting(!disabled)
-        .accessibilityLabel(isListening ? "Escuchando; suelta para terminar" : "Mantén pulsado para hablar")
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if gestureState.begin(disabled: disabled) { onPress() }
+                }
+                .onEnded { _ in
+                    if gestureState.end() { onRelease() }
+                }
+        )
+        .opacity(disabled && !gestureState.isActive ? 0.45 : 1)
+        .allowsHitTesting(gestureState.acceptsHitTesting(disabled: disabled))
+        .accessibilityLabel(isListening || gestureState.isActive ? "Escuchando; suelta para terminar" : "Mantén pulsado para hablar")
     }
 }
 

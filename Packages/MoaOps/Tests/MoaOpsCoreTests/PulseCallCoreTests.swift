@@ -235,6 +235,124 @@ final class PulseCallCoreTests: XCTestCase {
         }
     }
 
+    func testGenericServeMutationsUseDeviceAuthorizationStrictPayloadsAndContractStatuses() async throws {
+        let recorder = PulseRequestRecorder()
+        let sessionFixture = #"{"id":"session-1","title":"Fix tests","state":"idle","model":"gpt-5","provider":"openai","thinking":"low","cwd":"/workspace","created":"2026-07-15T18:00:00Z","updated":"2026-07-15T18:01:00Z","context_percent":0,"permission_mode":"ask","cost_usd":0}"#
+        PulseURLProtocol.handler = { request in
+            recorder.record(request)
+            let response: (Int, String)
+            switch request.url?.path {
+            case "/api/sessions": response = (201, sessionFixture)
+            case "/api/sessions/session-1/send": response = (202, #"{"action":"steer","steer_id":"steer-1"}"#)
+            case "/api/sessions/session-1/ask", "/api/sessions/session-1/permission", "/api/sessions/session-1/cancel": response = (204, "")
+            case "/api/sessions/session-1/resume": response = (200, sessionFixture)
+            case "/api/sessions/session-1/archive": response = (200, #"{"ok":true,"archived":true}"#)
+            default: response = (404, "")
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: response.0, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, Data(response.1.utf8))
+        }
+        defer { PulseURLProtocol.handler = nil }
+
+        let session = pulseSession(); defer { session.invalidateAndCancel() }
+        let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
+        let client = try MoaPulseDeviceClient(registration: registration, session: session)
+
+        let created = try await client.createSession(.init(model: "gpt-5", title: "Fix tests", cwd: "/workspace"))
+        let sent = try await client.sendMessage(sessionID: "session-1", request: .init(text: "continue", attachments: [.init(name: "note.txt", mime: "text/plain", data: "aGVsbG8=")], steerID: "steer-1"))
+        try await client.answerAsk(sessionID: "session-1", request: .init(id: "ask-1", answers: [""]))
+        try await client.decidePermission(sessionID: "session-1", request: .init(id: "permission-1", approved: true, feedback: "approved", allow: "read:*", rule: "allow read", action: "add_rule"))
+        let resumed = try await client.resumeSession(sessionID: "session-1")
+        try await client.cancelSession(sessionID: "session-1")
+        let archived = try await client.archiveSession(sessionID: "session-1", archived: true)
+
+        XCTAssertEqual(created.id, "session-1")
+        XCTAssertEqual(sent.action, "steer")
+        XCTAssertEqual(sent.steerID, "steer-1")
+        XCTAssertEqual(resumed.id, "session-1")
+        XCTAssertTrue(archived.ok)
+        XCTAssertTrue(archived.archived)
+
+        let requests = recorder.requests
+        XCTAssertEqual(requests.map { $0.url?.path }, [
+            "/api/sessions",
+            "/api/sessions/session-1/send",
+            "/api/sessions/session-1/ask",
+            "/api/sessions/session-1/permission",
+            "/api/sessions/session-1/resume",
+            "/api/sessions/session-1/cancel",
+            "/api/sessions/session-1/archive",
+        ])
+        for request in requests {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Moa-Device device.secret")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Moa-Request"), "1")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            XCTAssertNil(request.url?.query)
+        }
+        let createBody = try XCTUnwrap(requests[0].httpBody).utf8JSON
+        XCTAssertEqual(Set(createBody.keys), Set(["model", "title", "cwd"]))
+        XCTAssertEqual(createBody["cwd"] as? String, "/workspace")
+        let sendBody = try XCTUnwrap(requests[1].httpBody).utf8JSON
+        XCTAssertEqual(Set(sendBody.keys), Set(["text", "attachments", "steer_id"]))
+        XCTAssertEqual((sendBody["attachments"] as? [[String: Any]])?.first?["mime"] as? String, "text/plain")
+        let askBody = try XCTUnwrap(requests[2].httpBody).utf8JSON
+        XCTAssertEqual(Set(askBody.keys), Set(["id", "answers"]))
+        XCTAssertEqual(askBody["answers"] as? [String], [""])
+        let permissionBody = try XCTUnwrap(requests[3].httpBody).utf8JSON
+        XCTAssertEqual(Set(permissionBody.keys), Set(["id", "approved", "feedback", "allow", "rule", "action"]))
+        XCTAssertTrue(try XCTUnwrap(requests[4].httpBody).utf8JSON.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(requests[5].httpBody).utf8JSON.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(requests[6].httpBody).utf8JSON["archived"] as? Bool, true)
+
+        PulseURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"action":"send"}"#.utf8))
+        }
+        do {
+            _ = try await client.sendMessage(sessionID: "session-1", request: .init(text: "continue"))
+            XCTFail("send must require the Serve 202 contract status")
+        } catch let error as PulseCallError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+    }
+
+    func testGenericServeMutationBodyLimitUsesFinalEncodedDataSize() throws {
+        let request = MoaServeAskAnswerRequest(id: "ask-1", answers: [""])
+        let encoded = try JSONEncoder.moaOps.encode(request)
+
+        XCTAssertEqual(try XCTUnwrap(encodeMoaServeMutationBody(request, maximumBytes: encoded.count)), encoded)
+        XCTAssertNil(encodeMoaServeMutationBody(request, maximumBytes: encoded.count - 1))
+        XCTAssertEqual(MoaServeMutationBodyLimit.normal, 1 << 20)
+        XCTAssertEqual(MoaServeMutationBodyLimit.send, 90 << 20)
+    }
+
+    func testGenericServeMutationsRejectInvalidIdentifiersRoutesAndPayloadsBeforeTransport() async throws {
+        let recorder = PulseRequestRecorder()
+        PulseURLProtocol.handler = { request in
+            recorder.record(request)
+            return (HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { PulseURLProtocol.handler = nil }
+
+        let session = pulseSession(); defer { session.invalidateAndCancel() }
+        let registration = try PulseDeviceRegistration(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture)
+        let client = try MoaPulseDeviceClient(registration: registration, session: session)
+
+        let invalidCalls: [() async -> Void] = [
+            { _ = try? await client.createSession(.init(model: "bad\0model")) },
+            { _ = try? await client.sendMessage(sessionID: "../other", request: .init(text: "message")) },
+            { _ = try? await client.sendMessage(sessionID: "session-1", request: .init(text: "")) },
+            { _ = try? await client.sendMessage(sessionID: "session-1", request: .init(text: "message", attachments: [.init(name: "note.txt", mime: "text/plain", data: "not-base64")])) },
+            { try? await client.answerAsk(sessionID: "../other", request: .init(id: "ask-1", answers: ["yes"])) },
+            { try? await client.answerAsk(sessionID: "session-1", request: .init(id: "ask/1", answers: [])) },
+            { try? await client.decidePermission(sessionID: "session-1", request: .init(id: "permission-1", approved: true, action: "bad\0action")) },
+            { _ = try? await client.resumeSession(sessionID: "../other") },
+            { try? await client.cancelSession(sessionID: "../other") },
+            { _ = try? await client.archiveSession(sessionID: "../other", archived: true) },
+        ]
+        for call in invalidCalls { await call() }
+        XCTAssertTrue(recorder.requests.isEmpty)
+    }
+
     func testRealtimeSecretMintUsesOnlyDeviceAuthAndStrictEmptyBody() async throws {
         let recorder = PulseRequestRecorder()
         PulseURLProtocol.handler = { request in

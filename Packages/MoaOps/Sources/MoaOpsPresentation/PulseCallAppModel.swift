@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SwiftUI
 import MoaOpsCore
 
@@ -51,6 +52,7 @@ public struct PulseCallCaption: Identifiable, Equatable, Sendable {
 
 @MainActor
 public final class PulseCallAppModel: ObservableObject {
+    private let voiceLog = Logger(subsystem: "com.ealeixandre.moa.pulse", category: "ptt")
     public typealias ServiceFactory = @Sendable (PulseDeviceRegistration) throws -> any PulseCallService
     public typealias PairingClaim = @Sendable (PulseServerConfiguration, PulsePairingPayload, String) async throws -> PulseDeviceRegistration
     public typealias ProviderFactory = @Sendable (
@@ -380,6 +382,7 @@ public final class PulseCallAppModel: ObservableObject {
         nextVoiceCaptureGeneration &+= 1
         let capture = ActiveVoiceCapture(token: .init(generation: nextVoiceCaptureGeneration), intent: intent)
         activeVoiceCapture = capture
+        voiceLog.debug("ptt_press")
         if pendingReview == nil { state = .listening }
         voice.stopSpeakingForCapture()
         switch intent {
@@ -390,13 +393,16 @@ public final class PulseCallAppModel: ObservableObject {
 
     public func endPushToTalk() {
         guard let capture = activeVoiceCapture else { return }
+        voiceLog.debug("ptt_release")
         voice.endPushToTalk(capture: capture.token)
         if capture.intent == .ownerTurn {
             endedAudioCapture = capture.token
             preconnectPCM.release()
             if let reservation = turnReservation {
                 state = .thinking
-                enqueueAudioCommit(capture: capture.token, reservationID: reservation.id)
+                if realtimeAudioTurn != nil {
+                    enqueueAudioCommit(capture: capture.token, reservationID: reservation.id)
+                }
             }
         }
         pttState = PulsePTTReducer.reduce(pttState, event: .release)
@@ -666,10 +672,20 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func configureVoiceCallbacks() {
+        voice.onPlaybackFailure = { [weak self] in
+            guard let self else { return }
+            self.voiceLog.error("playback_failure")
+            self.userMessage = "No se pudo reproducir la respuesta de voz. El turno sigue activo; puedes detenerlo o esperar el resultado escrito."
+        }
         voice.onAvailability = { [weak self] capture, availability in
             guard let self else { return }
             guard self.activeVoiceCapture?.token == capture else { return }
             self.voiceUnavailable = availability == .unavailable
+            if availability == .available {
+                self.voiceLog.debug("capture_available")
+            } else {
+                self.voiceLog.debug("capture_unavailable")
+            }
             self.pttState = PulsePTTReducer.reduce(self.pttState, event: .permission(granted: availability == .available))
             if availability == .unavailable {
                 if let reservation = self.turnReservation, reservation.phase == .provider {
@@ -736,12 +752,15 @@ public final class PulseCallAppModel: ObservableObject {
               activeVoiceCapture?.token == capture, turnReservation == nil else { return }
         let reservation = TurnReservation(id: UUID(), phase: .provider)
         turnReservation = reservation
+        voice.setRealtimeTurnActive(true)
+        voiceLog.debug("realtime_turn_reserved")
         let model = self
         audioMintTask = Task { [weak model, providerClient] in
             guard let model else { return }
             do {
                 try Task.checkCancellation()
                 let credential = try await issuer.mintRealtimeClientSecret()
+                await MainActor.run { model.voiceLog.debug("realtime_mint_succeeded") }
                 try Task.checkCancellation()
                 let turn = try await providerClient.beginAudioTurn(credential: credential, configuration: await MainActor.run { model.realtimeConfiguration() }, context: .init(brief: brief), onText: { [weak model] delta in
                     Task { @MainActor [weak model] in model?.appendProviderDelta(delta, for: reservation.id) }
@@ -752,8 +771,10 @@ public final class PulseCallAppModel: ObservableObject {
                         guard let model, model.reservationIsProvider(reservation.id) else { return }
                         switch completion {
                         case .completed:
+                            model.voiceLog.debug("realtime_completed")
                             model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: false)
                         case .providerFailed, .transportFailed:
+                            model.voiceLog.error("realtime_failed")
                             model.failAudioAttempt(capture: capture, reservationID: reservation.id)
                         }
                     }
@@ -767,6 +788,7 @@ public final class PulseCallAppModel: ObservableObject {
                     guard model.reservationIsProvider(reservation.id), model.activeVoiceCapture?.token == capture else { return }
                     model.realtimeAudioTurn = turn
                     model.audioMintTask = nil
+                    model.voiceLog.debug("realtime_turn_opened")
                     let flush = model.preconnectPCM.takeForFlush()
                     for chunk in flush.chunks {
                         model.enqueueAudioAppend(chunk, capture: capture, reservationID: reservation.id)
@@ -811,6 +833,7 @@ public final class PulseCallAppModel: ObservableObject {
     private func enqueueAudioCommit(capture: PulseVoiceCaptureToken, reservationID: UUID) {
         guard audioCommitCapture != capture else { return }
         audioCommitCapture = capture
+        voiceLog.debug("realtime_commit_queued")
         let previous = audioSendTask
         audioSendTask = Task { [weak self] in
             _ = await previous?.value
@@ -820,6 +843,7 @@ public final class PulseCallAppModel: ObservableObject {
                   let turn = self.realtimeAudioTurn else { return }
             do {
                 try await turn.endCapture()
+                self.voiceLog.debug("realtime_commit_sent")
             } catch {
                 self.failAudioAttempt(capture: capture, reservationID: reservationID)
             }
@@ -845,6 +869,7 @@ public final class PulseCallAppModel: ObservableObject {
         audioSendTask = nil
         preconnectPCM.cancel()
         audioCommitCapture = nil
+        voice.setRealtimeTurnActive(false)
         if let realtimeAudioTurn { Task { await realtimeAudioTurn.cancelForBargeIn() }; self.realtimeAudioTurn = nil }
         if let reservation = turnReservation, reservation.phase == .provider { releaseTurnReservation(reservation.id) }
         clearActiveVoiceCapture(invalidateNative: true)
@@ -861,6 +886,7 @@ public final class PulseCallAppModel: ObservableObject {
         preconnectPCM.cancel()
         endedAudioCapture = nil
         audioCommitCapture = nil
+        voice.setRealtimeTurnActive(false)
         if cancelTurn, let turn = realtimeAudioTurn {
             Task { await turn.cancelForBargeIn() }
         }

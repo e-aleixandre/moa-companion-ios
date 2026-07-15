@@ -87,6 +87,91 @@ public struct PulsePairingPayload: Equatable, Sendable {
     }
 }
 
+/// A QR-only pairing envelope. The server address and one-use pairing payload
+/// travel together so scanning does not require a separate URL transcription.
+/// The legacy `moa-pair-v1` payload remains accepted for the manual fallback.
+public struct PulsePairingEnvelope: Equatable, Sendable {
+    public let configuration: PulseServerConfiguration
+    public let payload: PulsePairingPayload
+
+    public init(parsing value: String) throws {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "moa-pulse-pair-v1:"
+        guard text.hasPrefix(prefix) else { throw PulseCallError.invalidPairingPayload }
+
+        let encoded = String(text.dropFirst(prefix.count))
+        guard !encoded.isEmpty,
+              encoded.count <= 8_192,
+              encoded.unicodeScalars.allSatisfy({
+                  (65...90).contains($0.value) ||
+                  (97...122).contains($0.value) ||
+                  (48...57).contains($0.value) ||
+                  $0.value == 95 || $0.value == 45
+              }) else {
+            throw PulseCallError.invalidPairingPayload
+        }
+
+        let padding = String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+        guard let data = Data(base64Encoded: encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/") + padding),
+              Self.base64URLEncoded(data) == encoded else {
+            throw PulseCallError.invalidPairingPayload
+        }
+
+        do {
+            let envelope = try JSONDecoder().decode(EncodedEnvelope.self, from: data)
+            guard envelope.serverURL == envelope.serverURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                  envelope.pairingPayload == envelope.pairingPayload.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw PulseCallError.invalidPairingPayload
+            }
+            configuration = try PulseServerConfiguration(urlText: envelope.serverURL)
+            payload = try PulsePairingPayload(parsing: envelope.pairingPayload)
+        } catch let error as PulseCallError {
+            throw error
+        } catch {
+            throw PulseCallError.invalidPairingPayload
+        }
+    }
+
+    private static func base64URLEncoded(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private struct EncodedEnvelope: Decodable {
+        let serverURL: String
+        let pairingPayload: String
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicCodingKey.self)
+            let expected = Set(["server_url", "pairing_payload"])
+            guard Set(container.allKeys.map(\.stringValue)) == expected,
+                  let serverURLKey = DynamicCodingKey(stringValue: "server_url"),
+                  let pairingPayloadKey = DynamicCodingKey(stringValue: "pairing_payload") else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid pairing envelope"))
+            }
+            serverURL = try container.decode(String.self, forKey: serverURLKey)
+            pairingPayload = try container.decode(String.self, forKey: pairingPayloadKey)
+        }
+    }
+
+    private struct DynamicCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int?
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+            intValue = nil
+        }
+
+        init?(intValue: Int) {
+            stringValue = String(intValue)
+            self.intValue = intValue
+        }
+    }
+}
+
 public struct PulseDeviceRegistration: Codable, Equatable, Sendable {
     public let baseURL: URL
     public let deviceID: String

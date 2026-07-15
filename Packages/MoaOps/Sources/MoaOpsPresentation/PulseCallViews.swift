@@ -31,9 +31,13 @@ public struct PulseCallRootView: View {
 
 public struct PulsePairingView: View {
     @ObservedObject var model: PulseCallAppModel
-    @State private var baseURL = ""
-    @State private var pairingPayload = ""
-    @State private var deviceLabel = "iPhone Pulse"
+    @State private var scannedQRCode: String?
+    @State private var scannedHost = ""
+    @State private var scannerMessage: String?
+    @State private var qrDeviceLabel = "iPhone Pulse"
+    @State private var manualBaseURL = ""
+    @State private var manualPairingPayload = ""
+    @State private var manualDeviceLabel = "iPhone Pulse"
     @State private var showingScanner = false
 
     public init(model: PulseCallAppModel) { self.model = model }
@@ -52,53 +56,88 @@ public struct PulsePairingView: View {
                     Text("Llamar a Moa")
                         .font(.system(.largeTitle, design: .rounded).bold())
                         .foregroundStyle(.white)
-                    Text("Pulse es tu terminal de voz. Empareja este iPhone con un Serve de Moa que ya tenga una URL configurada.")
+                    Text("Pulse es tu terminal de voz. Escanea el QR de emparejamiento que muestra Moa.")
                         .foregroundStyle(.white.opacity(0.78))
                     VStack(alignment: .leading, spacing: 14) {
                         Text("Emparejar este dispositivo")
                             .font(.headline)
-                        TextField("https://moa.example", text: $baseURL)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
 #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
-#endif
-                        TextField("moa-pair-v1:…", text: $pairingPayload, axis: .vertical)
-                            .textFieldStyle(.roundedBorder)
-                            .lineLimit(1...3)
-                            .autocorrectionDisabled()
-#if os(iOS)
-                            .textInputAutocapitalization(.never)
-#endif
-                        HStack {
-                            Text("Pega el payload del QR de Moa. No incluye una dirección de servidor.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-#if os(iOS) && canImport(AVFoundation)
-                            Button("Escanear QR", systemImage: "qrcode.viewfinder") { showingScanner = true }
-                                .font(.footnote)
-#endif
-                        }
-                        TextField("Nombre de este iPhone", text: $deviceLabel)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                        Text("Pulse exige HTTPS salvo para localhost o 127.x directo. La credencial del dispositivo se guarda solo en el Llavero; no usamos tokens en URL ni cookies de Serve.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Button(model.isPairing ? "Emparejando…" : "Emparejar Pulse") {
-                            Task {
-                                await model.claim(baseURLText: baseURL, pairingPayloadText: pairingPayload, deviceLabel: deviceLabel)
-                                // The paste/scan value is one-use input, never a draft
-                                // retained after a claim attempt.
-                                pairingPayload = ""
-                            }
+                        Button("Escanear QR de Moa", systemImage: "qrcode.viewfinder") {
+                            scannerMessage = nil
+                            showingScanner = true
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
                         .frame(maxWidth: .infinity)
-                        .disabled(model.isPairing || baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pairingPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+#else
+                        Text("El escáner QR está disponible en iPhone.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+#endif
+                        if let scannedQRCode {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label("QR leído", systemImage: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                Text("Moa en \(scannedHost)")
+                                    .font(.subheadline.weight(.semibold))
+                                TextField("Nombre de este iPhone", text: $qrDeviceLabel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .autocorrectionDisabled()
+                                Button(model.isPairing ? "Emparejando…" : "Confirmar emparejamiento") {
+                                    Task {
+                                        await model.claimQRCode(scannedQRCode, deviceLabel: qrDeviceLabel)
+                                        self.scannedQRCode = nil
+                                        scannedHost = ""
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.large)
+                                .frame(maxWidth: .infinity)
+                                .disabled(model.isPairing || qrDeviceLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                            .padding(14)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+
+                        if let scannerMessage {
+                            Text(scannerMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                        }
+
+                        DisclosureGroup("Introducir datos manualmente") {
+                            VStack(alignment: .leading, spacing: 12) {
+                                TextField("https://moa.example", text: $manualBaseURL)
+                                    .textFieldStyle(.roundedBorder)
+                                    .autocorrectionDisabled()
+#if os(iOS)
+                                    .textInputAutocapitalization(.never)
+                                    .keyboardType(.URL)
+#endif
+                                TextField("moa-pair-v1:…", text: $manualPairingPayload, axis: .vertical)
+                                    .textFieldStyle(.roundedBorder)
+                                    .lineLimit(1...3)
+                                    .autocorrectionDisabled()
+#if os(iOS)
+                                    .textInputAutocapitalization(.never)
+#endif
+                                TextField("Nombre de este iPhone", text: $manualDeviceLabel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .autocorrectionDisabled()
+                                Button(model.isPairing ? "Emparejando…" : "Emparejar manualmente") {
+                                    Task {
+                                        await model.claim(baseURLText: manualBaseURL, pairingPayloadText: manualPairingPayload, deviceLabel: manualDeviceLabel)
+                                        manualPairingPayload = ""
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+                                .disabled(model.isPairing || manualBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manualPairingPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manualDeviceLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }
+                        Text("Pulse exige HTTPS salvo para localhost o 127.x directo. La credencial del dispositivo se guarda solo en el Llavero; no usamos tokens en URL ni cookies de Serve.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(20)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -111,7 +150,16 @@ public struct PulsePairingView: View {
 #if os(iOS) && canImport(AVFoundation)
         .sheet(isPresented: $showingScanner) {
             PulseQRScannerView { value in
-                pairingPayload = value
+                do {
+                    let envelope = try PulsePairingEnvelope(parsing: value)
+                    scannedQRCode = value
+                    scannedHost = envelope.configuration.baseURL.host ?? "Moa"
+                    scannerMessage = nil
+                } catch {
+                    scannedQRCode = nil
+                    scannedHost = ""
+                    scannerMessage = "El QR no es un emparejamiento de Pulse válido. Escanea el QR mostrado por Moa."
+                }
                 showingScanner = false
             }
         }

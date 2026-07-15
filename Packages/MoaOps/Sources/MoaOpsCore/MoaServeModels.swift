@@ -1,5 +1,193 @@
 import Foundation
 
+/// The body accepted by `POST /api/sessions`.
+public struct MoaServeCreateSessionRequest: Encodable, Equatable, Sendable {
+    public let model: String
+    public let title: String
+    public let cwd: String
+
+    public init(model: String = "", title: String = "", cwd: String = "") {
+        self.model = model
+        self.title = title
+        self.cwd = cwd
+    }
+}
+
+/// An inline attachment accepted by `POST /api/sessions/{id}/send`.
+public struct MoaServeAttachment: Encodable, Equatable, Sendable {
+    public let name: String
+    public let mime: String
+    public let data: String
+
+    public init(name: String, mime: String, data: String) {
+        self.name = name
+        self.mime = mime
+        self.data = data
+    }
+}
+
+/// The body accepted by `POST /api/sessions/{id}/send`.
+public struct MoaServeSendMessageRequest: Encodable, Equatable, Sendable {
+    public let text: String
+    public let attachments: [MoaServeAttachment]?
+    public let steerID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case text, attachments
+        case steerID = "steer_id"
+    }
+
+    public init(text: String, attachments: [MoaServeAttachment]? = nil, steerID: String? = nil) {
+        self.text = text
+        self.attachments = attachments
+        self.steerID = steerID
+    }
+}
+
+/// The accepted response from `POST /api/sessions/{id}/send`.
+public struct MoaServeSendMessageResponse: Decodable, Equatable, Sendable {
+    public let action: String
+    public let steerID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case steerID = "steer_id"
+    }
+}
+
+/// The body accepted by `POST /api/sessions/{id}/ask`.
+public struct MoaServeAskAnswerRequest: Encodable, Equatable, Sendable {
+    public let id: String
+    public let answers: [String]
+
+    public init(id: String, answers: [String]) {
+        self.id = id
+        self.answers = answers
+    }
+}
+
+/// The body accepted by `POST /api/sessions/{id}/permission`.
+public struct MoaServePermissionDecisionRequest: Encodable, Equatable, Sendable {
+    public let id: String
+    public let approved: Bool
+    public let feedback: String?
+    public let allow: String?
+    public let rule: String?
+    public let action: String?
+
+    public init(
+        id: String,
+        approved: Bool,
+        feedback: String? = nil,
+        allow: String? = nil,
+        rule: String? = nil,
+        action: String? = nil
+    ) {
+        self.id = id
+        self.approved = approved
+        self.feedback = feedback
+        self.allow = allow
+        self.rule = rule
+        self.action = action
+    }
+}
+
+/// The response from `POST /api/sessions/{id}/archive`.
+public struct MoaServeArchiveSessionResponse: Decodable, Equatable, Sendable {
+    public let ok: Bool
+    public let archived: Bool
+}
+
+/// The body accepted by `POST /api/sessions/{id}/archive`.
+public struct MoaServeArchiveSessionRequest: Encodable, Equatable, Sendable {
+    public let archived: Bool
+
+    public init(archived: Bool) {
+        self.archived = archived
+    }
+}
+
+extension MoaServeCreateSessionRequest {
+    var isValidMutationPayload: Bool {
+        validMoaServeField(model) && validMoaServeField(title) && validMoaServeField(cwd)
+    }
+}
+
+extension MoaServeSendMessageRequest {
+    var isValidMutationPayload: Bool {
+        let attachmentList = attachments ?? []
+        guard text.utf8.count <= 90 << 20,
+              !text.contains("\0"),
+              !text.isEmpty || !attachmentList.isEmpty,
+              steerID.map(validMoaServeReferenceID) ?? true,
+              attachmentList.count <= 8,
+              attachmentList.allSatisfy(\.isValidMutationPayload),
+              attachmentList.reduce(0, { $0 + Data(base64Encoded: $1.data)!.count }) <= 64 << 20 else {
+            return false
+        }
+        return true
+    }
+}
+
+extension MoaServeAttachment {
+    var isValidMutationPayload: Bool {
+        guard !name.isEmpty,
+              !mime.isEmpty,
+              validMoaServeField(name),
+              validMoaServeField(mime),
+              let decoded = Data(base64Encoded: data),
+              !decoded.isEmpty,
+              decoded.count <= 32 << 20 else {
+            return false
+        }
+        return true
+    }
+}
+
+extension MoaServeAskAnswerRequest {
+    var isValidMutationPayload: Bool {
+        validMoaServeReferenceID(id) && !answers.isEmpty &&
+            answers.allSatisfy(validMoaServeField)
+    }
+}
+
+extension MoaServePermissionDecisionRequest {
+    var isValidMutationPayload: Bool {
+        guard validMoaServeReferenceID(id),
+              [feedback, allow, rule].allSatisfy({ $0.map(validMoaServeField) ?? true }) else {
+            return false
+        }
+        return action.map(validMoaServeReferenceID) ?? true
+    }
+}
+
+private func validMoaServeField(_ value: String) -> Bool {
+    value.utf8.count <= 1 << 20 && !value.contains("\0")
+}
+
+private func validMoaServeReferenceID(_ value: String) -> Bool {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !trimmed.isEmpty &&
+        trimmed.unicodeScalars.count <= 512 &&
+        !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) &&
+        value != "." && value != ".." &&
+        !value.contains("/") && !value.contains("\\")
+}
+
+enum MoaServeMutationBodyLimit {
+    static let normal = 1 << 20
+    static let send = 90 << 20
+}
+
+func encodeMoaServeMutationBody<Body: Encodable>(_ body: Body, maximumBytes: Int) -> Data? {
+    guard maximumBytes >= 0,
+          let data = try? JSONEncoder.moaOps.encode(body),
+          data.count <= maximumBytes else {
+        return nil
+    }
+    return data
+}
+
 /// The public session DTO returned by `GET /api/sessions`.
 public struct MoaServeSessionInfo: Codable, Equatable, Sendable, Identifiable {
     public let id: String

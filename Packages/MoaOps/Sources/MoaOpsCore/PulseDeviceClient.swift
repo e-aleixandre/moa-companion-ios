@@ -255,6 +255,74 @@ public actor MoaPulseDeviceClient {
         return try await get(url: url, as: MoaServeToolDetail.self)
     }
 
+    /// Creates a Serve session through the generic paired-device API.
+    public func createSession(_ request: MoaServeCreateSessionRequest) async throws -> MoaServeSessionInfo {
+        guard request.isValidMutationPayload,
+              let body = encodeMoaServeMutationBody(request, maximumBytes: MoaServeMutationBodyLimit.normal) else {
+            throw PulseCallError.operationUnavailable
+        }
+        return try await postMutation(path: "api/sessions", body: body, expectedStatus: 201, as: MoaServeSessionInfo.self)
+    }
+
+    /// Sends a user message or steer through the generic paired-device API.
+    public func sendMessage(sessionID: String, request: MoaServeSendMessageRequest) async throws -> MoaServeSendMessageResponse {
+        guard validRouteComponent(sessionID), request.isValidMutationPayload,
+              let body = encodeMoaServeMutationBody(request, maximumBytes: MoaServeMutationBodyLimit.send) else {
+            throw PulseCallError.operationUnavailable
+        }
+        return try await postMutation(url: sessionMutationEndpoint(sessionID: sessionID, action: "send"), body: body, expectedStatus: 202, as: MoaServeSendMessageResponse.self)
+    }
+
+    /// Resolves a pending ask-user request through the generic paired-device API.
+    public func answerAsk(sessionID: String, request: MoaServeAskAnswerRequest) async throws {
+        guard validRouteComponent(sessionID), request.isValidMutationPayload,
+              let body = encodeMoaServeMutationBody(request, maximumBytes: MoaServeMutationBodyLimit.normal) else {
+            throw PulseCallError.operationUnavailable
+        }
+        try await postMutationNoContent(url: sessionMutationEndpoint(sessionID: sessionID, action: "ask"), body: body)
+    }
+
+    /// Resolves a pending permission request through the generic paired-device API.
+    public func decidePermission(sessionID: String, request: MoaServePermissionDecisionRequest) async throws {
+        guard validRouteComponent(sessionID), request.isValidMutationPayload,
+              let body = encodeMoaServeMutationBody(request, maximumBytes: MoaServeMutationBodyLimit.normal) else {
+            throw PulseCallError.operationUnavailable
+        }
+        try await postMutationNoContent(url: sessionMutationEndpoint(sessionID: sessionID, action: "permission"), body: body)
+    }
+
+    /// Resumes a persisted session through the generic paired-device API.
+    public func resumeSession(sessionID: String) async throws -> MoaServeSessionInfo {
+        guard validRouteComponent(sessionID),
+              let body = encodeMoaServeMutationBody(PulseEmptyObject(), maximumBytes: MoaServeMutationBodyLimit.normal) else {
+            throw PulseCallError.operationUnavailable
+        }
+        return try await postMutation(url: sessionMutationEndpoint(sessionID: sessionID, action: "resume"), body: body, expectedStatus: 200, as: MoaServeSessionInfo.self)
+    }
+
+    /// Cancels the active run for a session through the generic paired-device API.
+    public func cancelSession(sessionID: String) async throws {
+        guard validRouteComponent(sessionID),
+              let body = encodeMoaServeMutationBody(PulseEmptyObject(), maximumBytes: MoaServeMutationBodyLimit.normal) else {
+            throw PulseCallError.operationUnavailable
+        }
+        try await postMutationNoContent(url: sessionMutationEndpoint(sessionID: sessionID, action: "cancel"), body: body)
+    }
+
+    /// Archives or unarchives a session through the generic paired-device API.
+    public func archiveSession(sessionID: String, archived: Bool) async throws -> MoaServeArchiveSessionResponse {
+        guard validRouteComponent(sessionID),
+              let body = encodeMoaServeMutationBody(MoaServeArchiveSessionRequest(archived: archived), maximumBytes: MoaServeMutationBodyLimit.normal) else {
+            throw PulseCallError.operationUnavailable
+        }
+        return try await postMutation(
+            url: sessionMutationEndpoint(sessionID: sessionID, action: "archive"),
+            body: body,
+            expectedStatus: 200,
+            as: MoaServeArchiveSessionResponse.self
+        )
+    }
+
     /// This credential is intentionally returned only to the immediate caller.
     /// It is not a Moa credential and must never be used on another Moa route.
     public func mintRealtimeClientSecret(now: Date = Date(), expirySkew: TimeInterval = 30) async throws -> PulseRealtimeClientCredential {
@@ -316,6 +384,43 @@ public actor MoaPulseDeviceClient {
         }
     }
 
+    private func postMutation<Response: Decodable>(path: String, body: Data, expectedStatus: Int, as type: Response.Type) async throws -> Response {
+        try await postMutation(url: endpoint(path), body: body, expectedStatus: expectedStatus, as: type)
+    }
+
+    private func postMutation<Response: Decodable>(url: URL, body: Data, expectedStatus: Int, as type: Response.Type) async throws -> Response {
+        var request = authenticatedRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = body
+        let (data, response) = try await perform(request, session: session)
+        guard let http = response as? HTTPURLResponse else { throw PulseCallError.invalidResponse }
+        guard http.statusCode == expectedStatus else {
+            try validate(http)
+            throw PulseCallError.invalidResponse
+        }
+        do {
+            return try JSONDecoder.moaOps.decode(type, from: data)
+        } catch {
+            throw PulseCallError.decoding
+        }
+    }
+
+    private func postMutationNoContent(url: URL, body: Data) async throws {
+        var request = authenticatedRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Moa-Request")
+        request.httpBody = body
+        let (_, response) = try await perform(request, session: session)
+        guard let http = response as? HTTPURLResponse else { throw PulseCallError.invalidResponse }
+        guard http.statusCode == 204 else {
+            try validate(http)
+            throw PulseCallError.invalidResponse
+        }
+    }
+
     private func authenticatedRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue("Moa-Device \(registration.credential)", forHTTPHeaderField: "Authorization")
@@ -333,6 +438,14 @@ public actor MoaPulseDeviceClient {
             .appendingPathComponent("sessions")
             .appendingPathComponent(sessionID)
             .appendingPathComponent("messages")
+    }
+
+    private func sessionMutationEndpoint(sessionID: String, action: String) -> URL {
+        registration.baseURL
+            .appendingPathComponent("api")
+            .appendingPathComponent("sessions")
+            .appendingPathComponent(sessionID)
+            .appendingPathComponent(action)
     }
 }
 

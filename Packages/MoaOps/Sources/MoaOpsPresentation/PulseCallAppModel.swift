@@ -393,6 +393,7 @@ public final class PulseCallAppModel: ObservableObject {
             endedAudioCapture = capture.token
             preconnectPCM.release()
             if let reservation = turnReservation {
+                state = .thinking
                 Task { [weak self] in
                     do { try await self?.realtimeAudioTurn?.endCapture() }
                     catch { await MainActor.run { self?.failAudioAttempt(capture: capture.token, reservationID: reservation.id) } }
@@ -738,7 +739,6 @@ public final class PulseCallAppModel: ObservableObject {
               activeVoiceCapture?.token == capture, turnReservation == nil else { return }
         let reservation = TurnReservation(id: UUID(), phase: .provider)
         turnReservation = reservation
-        state = .thinking
         let model = self
         audioMintTask = Task { [weak model, providerClient] in
             guard let model else { return }
@@ -750,10 +750,15 @@ public final class PulseCallAppModel: ObservableObject {
                     Task { @MainActor [weak model] in model?.appendProviderDelta(delta, for: reservation.id) }
                 }, onAudio: { [weak model] pcm in
                     Task { @MainActor [weak model] in model?.voice.playPCM16(pcm) }
-                }, onFinished: { [weak model] in
+                }, onFinished: { [weak model] completion in
                     Task { @MainActor [weak model] in
                         guard let model, model.reservationIsProvider(reservation.id) else { return }
-                        model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: false)
+                        switch completion {
+                        case .completed:
+                            model.finishAudioAttempt(capture: capture, reservationID: reservation.id, cancelTurn: false)
+                        case .providerFailed, .transportFailed:
+                            model.failAudioAttempt(capture: capture, reservationID: reservation.id)
+                        }
                     }
                 })
                 guard await MainActor.run(body: { model.activeVoiceCapture?.token == capture }) else {
@@ -766,6 +771,10 @@ public final class PulseCallAppModel: ObservableObject {
                 for chunk in flush.chunks { try await turn.appendPCM16(chunk) }
                 let wasReleased = await MainActor.run { model.endedAudioCapture == capture }
                 if flush.shouldCommit || wasReleased {
+                    await MainActor.run {
+                        guard model.reservationIsProvider(reservation.id), model.realtimeAudioTurn === turn else { return }
+                        model.state = .thinking
+                    }
                     try await turn.endCapture()
                     await MainActor.run {
                         guard model.reservationIsProvider(reservation.id), model.realtimeAudioTurn === turn else { return }

@@ -88,6 +88,17 @@ public enum PulseAudioPlaybackPlan {
     }
 }
 
+/// Tracks queued playback independently from microphone capture. A provider
+/// can finish sending audio before the final scheduled buffer is audible.
+public struct PulseAudioPlaybackDrain: Equatable, Sendable {
+    public private(set) var pendingBuffers = 0
+    public init() {}
+    public mutating func schedule() { pendingBuffers += 1 }
+    public mutating func finishBuffer() { pendingBuffers = max(0, pendingBuffers - 1) }
+    public mutating func reset() { pendingBuffers = 0 }
+    public var isDrained: Bool { pendingBuffers == 0 }
+}
+
 @MainActor
 public protocol PulseVoiceControlling: AnyObject {
     var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)? { get set }
@@ -126,6 +137,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var audioSessionActive = false
     private var interruptionObserver: NSObjectProtocol?
     private var captureGate = PulseVoiceCaptureGate()
+    private var playbackDrain = PulseAudioPlaybackDrain()
 #if canImport(Speech)
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -146,6 +158,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
                   let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
             guard let capture = self.captureGate.activeCapture else { return }
+            self.player.stop()
+            self.playbackDrain.reset()
             self.finishRecording(cancel: true, invalidating: capture)
             self.onInterruption?(capture)
         }
@@ -243,6 +257,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
 
     public func stopSpeakingForCapture() {
         player.stop()
+        playbackDrain.reset()
+        stopAudioWhenIdle()
     }
 
     public func speak(_ text: String) {
@@ -254,11 +270,17 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public func stopAll() {
         invalidateCapture()
         player.stop()
+        playbackDrain.reset()
+        stopAudioWhenIdle()
     }
 
     public func setMuted(_ muted: Bool) {
         self.muted = muted
-        if muted { player.stop() }
+        if muted {
+            player.stop()
+            playbackDrain.reset()
+            stopAudioWhenIdle()
+        }
     }
 
     public func setForegroundActive(_ active: Bool) {
@@ -269,7 +291,6 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private func finishRecording(cancel: Bool, invalidating capture: PulseVoiceCaptureToken?) {
         guard recording || capture != nil else { return }
         recording = false
-        audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
 #if canImport(Speech)
         recognitionRequest?.endAudio()
@@ -277,8 +298,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         recognitionTask = nil; recognitionRequest = nil
 #endif
         if let capture { captureGate.invalidate(capture) }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        audioSessionActive = false
+        stopAudioWhenIdle()
     }
 
     private func configureAudioSession() throws {
@@ -310,8 +330,24 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             onAvailability?(captureGate.activeCapture ?? .init(generation: 0), .unavailable)
             return
         }
-        player.scheduleBuffer(buffer)
+        playbackDrain.schedule()
+        player.scheduleBuffer(buffer) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.playbackDrain.finishBuffer()
+                self.stopAudioWhenIdle()
+            }
+        }
         if !player.isPlaying { player.play() }
+    }
+
+    private func stopAudioWhenIdle() {
+        guard !recording, playbackDrain.isDrained else { return }
+        player.stop()
+        audioEngine.stop()
+        guard audioSessionActive else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        audioSessionActive = false
     }
 
     private func microphoneAuthorization() async -> Bool {

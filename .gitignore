@@ -23,3 +23,6 @@ Secrets.xcconfig
 # Signed distributables
 *.ipa
 *.xcarchive/
+
+# Local implementation plans and working notes
+tmp/

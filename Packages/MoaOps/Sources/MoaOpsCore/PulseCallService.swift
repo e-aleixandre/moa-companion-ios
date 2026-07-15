@@ -13,7 +13,6 @@ public protocol PulseCallService: Sendable {
     func loadPulse() async throws -> OpsPulse
     func loadSitrep() async throws -> OpsBriefing
     func loadStatus(target: String) async throws -> OpsStatusResult
-    func loadSafeConversationEvidence(sessionID: String) async throws -> ConversationPage
     func prepareOperation(_ operation: PulseOperationPrepare) async throws -> PulseOperationResponse
     func confirmOperation(_ operationID: String) async throws -> PulseOperationResponse
     func loadOperation(_ operationID: String) async throws -> PulseOperationResponse
@@ -199,9 +198,6 @@ public actor MoaPulseDeviceService: PulseCallService, PulseRealtimeCredentialIss
     public func loadPulse() async throws -> OpsPulse { try await client.pulse() }
     public func loadSitrep() async throws -> OpsBriefing { try await client.sitrep() }
     public func loadStatus(target: String) async throws -> OpsStatusResult { try await client.status(target: target) }
-    public func loadSafeConversationEvidence(sessionID: String) async throws -> ConversationPage {
-        try await client.displayMessages(sessionID: sessionID)
-    }
     public func prepareOperation(_ operation: PulseOperationPrepare) async throws -> PulseOperationResponse {
         try await client.prepare(operation)
     }

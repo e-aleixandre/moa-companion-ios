@@ -491,7 +491,6 @@ private class CallTestService: PulseCallService, @unchecked Sendable {
         try JSONDecoder.moaOps.decode(OpsBriefing.self, from: Data(#"{"sessions":null,"blockers":[],"spoken":"Panorama seguro."}"#.utf8))
     }
     func loadStatus(target _: String) async throws -> OpsStatusResult { throw PulseCallError.transport }
-    func loadSafeConversationEvidence(sessionID _: String) async throws -> ConversationPage { throw PulseCallError.transport }
     func prepareOperation(_: PulseOperationPrepare) async throws -> PulseOperationResponse {
         prepareCalls += 1
         guard !prepareResults.isEmpty else { throw PulseCallError.transport }

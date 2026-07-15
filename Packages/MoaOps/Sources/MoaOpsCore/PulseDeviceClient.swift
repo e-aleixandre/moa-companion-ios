@@ -195,19 +195,6 @@ public actor MoaPulseDeviceClient {
         return try await ops(view: "status", target: target, as: OpsStatusResult.self)
     }
 
-    /// This is the only conversation evidence route exposed to Call Moa. It
-    /// returns Serve's display DTO; this client never connects to a normal
-    /// session WebSocket or receives raw agent/tool frames.
-    public func displayMessages(sessionID: String, limit: Int = 8) async throws -> ConversationPage {
-        guard validReference(sessionID, limit: 256), (1...20).contains(limit) else { throw PulseCallError.operationUnavailable }
-        var components = URLComponents(url: endpoint("api/sessions/\(sessionID)/messages"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
-        guard let url = components?.url else { throw PulseCallError.invalidServerURL }
-        let page: ConversationPage = try await get(url: url, as: ConversationPage.self)
-        guard page.sessionID == sessionID, page.order == "newest_first" else { throw PulseCallError.decoding }
-        return page
-    }
-
     public func prepare(_ operation: PulseOperationPrepare) async throws -> PulseOperationResponse {
         switch operation {
         case let .directedInstruction(target, text):

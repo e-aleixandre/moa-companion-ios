@@ -131,6 +131,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
 
     private let audioEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    private let realtimePlaybackFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1, interleaved: true)!
     private var muted = false
     private var recording = false
     private var foreground = true
@@ -148,7 +149,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         super.init()
         audioEngine.attach(player)
         let output = audioEngine.mainMixerNode
-        audioEngine.connect(player, to: output, format: output.outputFormat(forBus: 0))
+        audioEngine.connect(player, to: output, format: realtimePlaybackFormat)
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
@@ -199,8 +200,17 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
                 let ratio = realtimeFormat.sampleRate / sourceFormat.sampleRate
                 let output = AVAudioPCMBuffer(pcmFormat: realtimeFormat, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1))!
                 var error: NSError?
-                converter.convert(to: output, error: &error) { _, status in status.pointee = .haveData; return buffer }
-                guard error == nil, let samples = output.int16ChannelData else { return }
+                var suppliedInput = false
+                let conversion = converter.convert(to: output, error: &error) { _, status in
+                    guard !suppliedInput else {
+                        status.pointee = .noDataNow
+                        return nil
+                    }
+                    suppliedInput = true
+                    status.pointee = .haveData
+                    return buffer
+                }
+                guard conversion != .error, error == nil, output.frameLength > 0, let samples = output.int16ChannelData else { return }
                 self.onPCM16?(capture, Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size))
             }
             audioEngine.prepare()
@@ -316,9 +326,9 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     }
 
     public func playPCM16(_ pcm: Data) {
-        guard foreground, !muted, !pcm.isEmpty, pcm.count.isMultiple(of: 2), let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1, interleaved: true) else { return }
+        guard foreground, !muted, !pcm.isEmpty, pcm.count.isMultiple(of: 2) else { return }
         let frames = AVAudioFrameCount(pcm.count / MemoryLayout<Int16>.size)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: realtimePlaybackFormat, frameCapacity: frames) else { return }
         buffer.frameLength = frames
         pcm.withUnsafeBytes { raw in memcpy(buffer.int16ChannelData![0], raw.baseAddress!, pcm.count) }
         do {
@@ -331,7 +341,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             return
         }
         playbackDrain.schedule()
-        player.scheduleBuffer(buffer) { [weak self] in
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.playbackDrain.finishBuffer()

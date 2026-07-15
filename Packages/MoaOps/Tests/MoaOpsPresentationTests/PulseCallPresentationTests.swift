@@ -154,6 +154,18 @@ final class PulseCallPresentationTests: XCTestCase {
         await mintBarrier.release()
     }
 
+    func testPTTGestureKeepsAnActivePressTouchableAfterModelDisablesNewPresses() {
+        var gesture = PulsePTTGestureState()
+        XCTAssertTrue(gesture.begin(disabled: false))
+        XCTAssertTrue(gesture.isActive)
+        XCTAssertTrue(gesture.acceptsHitTesting(disabled: true), "a live PTT gesture must not cancel itself when the model rejects a second press")
+        XCTAssertFalse(gesture.begin(disabled: true))
+        XCTAssertTrue(gesture.end())
+        XCTAssertFalse(gesture.isActive)
+        XCTAssertFalse(gesture.acceptsHitTesting(disabled: true))
+        XCTAssertFalse(gesture.end())
+    }
+
     func testReviewPTTStopsNarrationThenConfirmsOrCancelsWithoutProviderTurn() async throws {
         let store = try pairedStore()
         let service = CallTestService()

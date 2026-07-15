@@ -330,13 +330,13 @@ final class PulseCallCoreTests: XCTestCase {
         XCTAssertEqual(OpenAIRealtimePCM16.channels, 1)
     }
 
-    func testRealtimePCM16ConvertsLittleEndianSamplesForPlayback() {
+    func testRealtimePCM16ConvertsLittleEndianSamplesForPlayback() throws {
         let pcm = Data([0x00, 0x80, 0x00, 0x00, 0xFF, 0x7F])
-        let samples = OpenAIRealtimePCM16.float32Samples(pcm)
-        XCTAssertEqual(samples?.count, 3)
-        XCTAssertEqual(samples?[0], -1, accuracy: 0.0001)
-        XCTAssertEqual(samples?[1], 0, accuracy: 0.0001)
-        XCTAssertEqual(samples?[2], 32767.0 / 32768.0, accuracy: 0.0001)
+        let samples = try XCTUnwrap(OpenAIRealtimePCM16.float32Samples(pcm))
+        XCTAssertEqual(samples.count, 3)
+        XCTAssertEqual(samples[0], -1, accuracy: 0.0001)
+        XCTAssertEqual(samples[1], 0, accuracy: 0.0001)
+        XCTAssertEqual(samples[2], 32767.0 / 32768.0, accuracy: 0.0001)
         XCTAssertNil(OpenAIRealtimePCM16.float32Samples(Data([0x00])))
     }
 

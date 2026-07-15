@@ -156,6 +156,17 @@ public enum OpenAIRealtimePCM16 {
         guard let encoded = object["delta"] as? String else { return nil }
         return Data(base64Encoded: encoded)
     }
+
+    public static func float32Samples(_ pcm: Data) -> [Float]? {
+        guard !pcm.isEmpty, pcm.count.isMultiple(of: MemoryLayout<Int16>.size) else { return nil }
+        return pcm.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            return stride(from: 0, to: bytes.count, by: MemoryLayout<Int16>.size).map { index in
+                let value = Int16(bitPattern: UInt16(bytes[index]) | UInt16(bytes[index + 1]) << 8)
+                return Float(value) / 32_768
+            }
+        }
+    }
 }
 
 /// Bounded local-only PCM staging for the explicit PTT/socket startup race.

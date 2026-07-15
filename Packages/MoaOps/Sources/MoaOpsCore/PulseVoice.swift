@@ -104,6 +104,7 @@ public protocol PulseVoiceControlling: AnyObject {
     var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)? { get set }
     var onInterruption: ((PulseVoiceCaptureToken) -> Void)? { get set }
     var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)? { get set }
+    var onPlaybackFailure: (() -> Void)? { get set }
     var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)? { get set }
     /// Stops narration before Speech permission/recording can begin, so the
     /// recognizer never receives Pulse's own spoken turn.
@@ -118,6 +119,7 @@ public protocol PulseVoiceControlling: AnyObject {
     func stopAll()
     func setMuted(_ muted: Bool)
     func setForegroundActive(_ active: Bool)
+    func setRealtimeTurnActive(_ active: Bool)
     func playPCM16(_ pcm: Data)
 }
 
@@ -127,11 +129,12 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
     public var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
     public var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
+    public var onPlaybackFailure: (() -> Void)?
     public var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)?
 
     private let audioEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    private let realtimePlaybackFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1, interleaved: true)!
+    private let realtimePlaybackFormat = AVAudioFormat(standardFormatWithSampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1)!
     private var muted = false
     private var recording = false
     private var foreground = true
@@ -139,6 +142,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var interruptionObserver: NSObjectProtocol?
     private var captureGate = PulseVoiceCaptureGate()
     private var playbackDrain = PulseAudioPlaybackDrain()
+    private var realtimeTurnActive = false
 #if canImport(Speech)
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -278,6 +282,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     }
 
     public func stopAll() {
+        realtimeTurnActive = false
         invalidateCapture()
         player.stop()
         playbackDrain.reset()
@@ -296,6 +301,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public func setForegroundActive(_ active: Bool) {
         foreground = active
         if !active { stopAll() }
+    }
+
+    public func setRealtimeTurnActive(_ active: Bool) {
+        realtimeTurnActive = active
+        if !active { stopAudioWhenIdle() }
     }
 
     private func finishRecording(cancel: Bool, invalidating capture: PulseVoiceCaptureToken?) {
@@ -326,18 +336,20 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     }
 
     public func playPCM16(_ pcm: Data) {
-        guard foreground, !muted, !pcm.isEmpty, pcm.count.isMultiple(of: 2) else { return }
-        let frames = AVAudioFrameCount(pcm.count / MemoryLayout<Int16>.size)
+        guard foreground, !muted, let samples = OpenAIRealtimePCM16.float32Samples(pcm) else { return }
+        let frames = AVAudioFrameCount(samples.count)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: realtimePlaybackFormat, frameCapacity: frames) else { return }
         buffer.frameLength = frames
-        pcm.withUnsafeBytes { raw in memcpy(buffer.int16ChannelData![0], raw.baseAddress!, pcm.count) }
+        samples.withUnsafeBufferPointer { source in
+            buffer.floatChannelData![0].assign(from: source.baseAddress!, count: samples.count)
+        }
         do {
             // PTT teardown deactivates the session; never start playback into
             // that inactive route.
             try configurePlaybackSession()
             if !audioEngine.isRunning { try audioEngine.start() }
         } catch {
-            onAvailability?(captureGate.activeCapture ?? .init(generation: 0), .unavailable)
+            onPlaybackFailure?()
             return
         }
         playbackDrain.schedule()
@@ -352,7 +364,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     }
 
     private func stopAudioWhenIdle() {
-        guard !recording, playbackDrain.isDrained else { return }
+        guard !recording, !realtimeTurnActive, playbackDrain.isDrained else { return }
         player.stop()
         audioEngine.stop()
         guard audioSessionActive else { return }
@@ -385,6 +397,7 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
     public var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
     public var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
+    public var onPlaybackFailure: (() -> Void)?
     public var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)?
     public init() {}
     public func stopSpeakingForCapture() {}
@@ -396,6 +409,7 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public func stopAll() {}
     public func setMuted(_: Bool) {}
     public func setForegroundActive(_: Bool) {}
+    public func setRealtimeTurnActive(_: Bool) {}
     public func playPCM16(_: Data) {}
 }
 #endif

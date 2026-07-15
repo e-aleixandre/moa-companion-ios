@@ -428,6 +428,7 @@ private final class CallTestVoice: PulseVoiceControlling {
     var onTranscript: ((PulseVoiceCaptureToken, String, Bool) -> Void)?
     var onInterruption: ((PulseVoiceCaptureToken) -> Void)?
     var onAvailability: ((PulseVoiceCaptureToken, PulseVoiceAvailability) -> Void)?
+    var onPlaybackFailure: (() -> Void)?
     var onPCM16: ((PulseVoiceCaptureToken, Data) -> Void)?
     private let availability: PulseVoiceAvailability
     private let reportsAvailability: Bool
@@ -461,6 +462,7 @@ private final class CallTestVoice: PulseVoiceControlling {
     func stopAll() { invalidateCapture() }
     func setMuted(_: Bool) {}
     func setForegroundActive(_ active: Bool) { if !active { invalidateCapture() } }
+    func setRealtimeTurnActive(_: Bool) {}
     func playPCM16(_: Data) {}
     func emitTranscript(_ text: String, isFinal: Bool, capture: PulseVoiceCaptureToken? = nil) {
         guard let capture = capture ?? activeCapture else { return }

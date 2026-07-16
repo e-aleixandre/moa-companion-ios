@@ -83,8 +83,6 @@ public struct PulseStatusPill: View {
     /// Si el punto debe parpadear suavemente (estados transitorios).
     public var pulses: Bool
 
-    @State private var dotDimmed = false
-
     public init(_ text: String, tone: PulseTone, pulses: Bool = false) {
         self.text = text
         self.tone = tone
@@ -93,11 +91,7 @@ public struct PulseStatusPill: View {
 
     public var body: some View {
         HStack(spacing: PulseSpacing.xs) {
-            Circle()
-                .fill(tone.color)
-                .frame(width: 7, height: 7)
-                .opacity(dotDimmed ? 0.3 : 1)
-                .pulseGlow(tone.color, radius: 5, opacity: 0.6)
+            dot
             Text(text)
                 .font(PulseFont.footnote.weight(.medium))
                 .foregroundStyle(PulseColor.textPrimary)
@@ -106,12 +100,27 @@ public struct PulseStatusPill: View {
         .padding(.horizontal, PulseSpacing.sm)
         .background(Capsule().fill(PulseColor.backgroundRaised))
         .overlay(Capsule().strokeBorder(tone.color.opacity(0.25), lineWidth: 1))
-        .onAppear {
-            guard pulses else { return }
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                dotDimmed = true
+    }
+
+    @ViewBuilder
+    private var dot: some View {
+        if pulses {
+            // Parpadeo sin @State animado: texto y flag pueden cambiar sin
+            // dejar una animación repeatForever huérfana.
+            TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: false)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                dotShape.opacity(0.65 + 0.35 * sin(t * 2 * .pi / 1.6))
             }
+        } else {
+            dotShape
         }
+    }
+
+    private var dotShape: some View {
+        Circle()
+            .fill(tone.color)
+            .frame(width: 7, height: 7)
+            .pulseGlow(tone.color, radius: 5, opacity: 0.6)
     }
 }
 

@@ -5,14 +5,55 @@ import AVFoundation
 import UIKit
 #endif
 
+// MARK: - Mapeo estado → design system
+
+extension PulseCallState {
+    var tone: PulseTone {
+        switch self {
+        case .disconnected, .ready, .ended: .neutral
+        case .connecting, .reconnecting: .warning
+        case .listening: .listening
+        case .responding: .accent
+        case .error: .danger
+        }
+    }
+
+    var isTransient: Bool {
+        switch self {
+        case .connecting, .reconnecting: true
+        default: false
+        }
+    }
+
+    var orbMode: PulseOrbMode {
+        switch self {
+        case .connecting, .reconnecting: .connecting
+        case .listening: .listening
+        case .responding: .speaking
+        case .disconnected, .ready, .ended, .error: .idle
+        }
+    }
+}
+
+// MARK: - Raíz
+
 public struct PulseCallRootView: View {
     @ObservedObject private var model: PulseCallAppModel
     public init(model: PulseCallAppModel) { self.model = model }
+
     public var body: some View {
-        Group { model.rootDestination == .pairing ? AnyView(PulsePairingView(model: model)) : AnyView(PulseCallSceneView(model: model)) }
-            .task { await model.start() }
+        Group {
+            if model.rootDestination == .pairing {
+                PulsePairingView(model: model)
+            } else {
+                PulseCallSceneView(model: model)
+            }
+        }
+        .task { await model.start() }
     }
 }
+
+// MARK: - Emparejamiento
 
 public struct PulsePairingView: View {
     @ObservedObject var model: PulseCallAppModel
@@ -21,35 +62,92 @@ public struct PulsePairingView: View {
     @State private var label = "iPhone Pulse"
     @State private var showingScanner = false
     @State private var scannerMessage: String?
+    @State private var showManualEntry = false
+
     public init(model: PulseCallAppModel) { self.model = model }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Spacer(); Image(systemName: "waveform.circle.fill").font(.system(size: 64)).foregroundStyle(.tint)
-            Text("Llamar a Moa").font(.largeTitle.bold())
-            Text("Escanea el QR de Moa o introduce el código temporal manualmente.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: PulseSpacing.lg) {
+                PulseVoiceOrb(mode: .idle, diameter: 110)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, PulseSpacing.xl)
+
+                VStack(alignment: .leading, spacing: PulseSpacing.xs) {
+                    Text("Pulse")
+                        .pulseMicroCaps()
+                        .foregroundStyle(PulseColor.ember)
+                    Text("Llamar a Moa")
+                        .font(PulseFont.display)
+                        .foregroundStyle(PulseColor.textPrimary)
+                    Text("Escanea el QR de Moa o introduce el código temporal manualmente.")
+                        .font(PulseFont.callout)
+                        .foregroundStyle(PulseColor.textSecondary)
+                }
+
 #if os(iOS) && canImport(AVFoundation)
-            Button("Escanear QR de Moa", systemImage: "qrcode.viewfinder") { scannerMessage = nil; showingScanner = true }
-                .buttonStyle(.borderedProminent).controlSize(.large)
+                Button {
+                    scannerMessage = nil
+                    showingScanner = true
+                } label: {
+                    Label("Escanear QR de Moa", systemImage: "qrcode.viewfinder")
+                }
+                .buttonStyle(PulsePrimaryButtonStyle())
 #endif
-            if let scannerMessage { Text(scannerMessage).foregroundStyle(.red).font(.footnote) }
-            DisclosureGroup("Introducir datos manualmente") {
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField("https://moa.example", text: $baseURL).textFieldStyle(.roundedBorder).autocorrectionDisabled()
-                    TextField("Código moa-pair-v1:…", text: $payload).textFieldStyle(.roundedBorder).autocorrectionDisabled()
-                    TextField("Nombre del dispositivo", text: $label).textFieldStyle(.roundedBorder)
-                    Button(model.isPairing ? "Emparejando…" : "Emparejar") { Task { await model.claim(baseURLText: baseURL, pairingPayloadText: payload, deviceLabel: label); payload = "" } }
-                        .buttonStyle(.bordered).disabled(model.isPairing || baseURL.isEmpty || payload.isEmpty || label.isEmpty)
-                }.padding(.top, 8)
+                if let scannerMessage {
+                    PulseInlineNotice(scannerMessage)
+                }
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) { showManualEntry.toggle() }
+                } label: {
+                    HStack {
+                        Text("Introducir datos manualmente")
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .rotationEffect(.degrees(showManualEntry ? 180 : 0))
+                    }
+                }
+                .buttonStyle(PulseSecondaryButtonStyle())
+
+                if showManualEntry {
+                    VStack(alignment: .leading, spacing: PulseSpacing.sm) {
+                        PulseTextField("https://moa.example", text: $baseURL, monospaced: true)
+                        PulseTextField("Código moa-pair-v1:…", text: $payload, monospaced: true)
+                        PulseTextField("Nombre del dispositivo", text: $label)
+                        Button(model.isPairing ? "Emparejando…" : "Emparejar") {
+                            Task {
+                                await model.claim(baseURLText: baseURL, pairingPayloadText: payload, deviceLabel: label)
+                                payload = ""
+                            }
+                        }
+                        .buttonStyle(PulseSecondaryButtonStyle(tone: .accent))
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.isPairing || baseURL.isEmpty || payload.isEmpty || label.isEmpty)
+                        .opacity(model.isPairing || baseURL.isEmpty || payload.isEmpty || label.isEmpty ? 0.5 : 1)
+                    }
+                    .pulseCard()
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                if let message = model.userMessage {
+                    PulseInlineNotice(message)
+                }
             }
-            if let message = model.userMessage { Text(message).foregroundStyle(.red).font(.footnote) }
-            Spacer()
+            .padding(PulseSpacing.lg)
+            .frame(maxWidth: 560, alignment: .leading)
         }
-        .padding().frame(maxWidth: 560, alignment: .leading)
+        .pulseScreenBackground()
 #if os(iOS) && canImport(AVFoundation)
         .sheet(isPresented: $showingScanner) {
             PulseQRScannerView { value in
-                do { _ = try PulsePairingEnvelope(parsing: value); Task { await model.claimQRCode(value, deviceLabel: label) } }
-                catch { scannerMessage = "El QR no es un emparejamiento de Pulse válido." }
+                do {
+                    _ = try PulsePairingEnvelope(parsing: value)
+                    Task { await model.claimQRCode(value, deviceLabel: label) }
+                } catch {
+                    scannerMessage = "El QR no es un emparejamiento de Pulse válido."
+                }
                 showingScanner = false
             }
         }
@@ -57,57 +155,192 @@ public struct PulsePairingView: View {
     }
 }
 
+// MARK: - Llamada
+
 public struct PulseCallSceneView: View {
     @ObservedObject var model: PulseCallAppModel
     @State private var showingSettings = false
+
     public init(model: PulseCallAppModel) { self.model = model }
+
     public var body: some View {
-        VStack(spacing: 20) {
-            HStack { VStack(alignment: .leading) { Text("Pulse").font(.title.bold()); Text(model.serverName).foregroundStyle(.secondary) }; Spacer(); Button { showingSettings = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Ajustes") }
-            Spacer()
-            Image(systemName: symbol).font(.system(size: 80)).foregroundStyle(model.isCallActive ? Color.green : Color.accentColor)
-            Text(model.state.spanishLabel).font(.title2.weight(.semibold))
-            Text(model.isCallActive ? "Conversación continua · habla con normalidad" : "Inicia una llamada para hablar con tus sesiones.").foregroundStyle(.secondary)
-            if let message = model.userMessage { Text(message).font(.footnote).foregroundStyle(.red) }
-            ScrollView { LazyVStack(alignment: .leading, spacing: 8) { ForEach(model.captions) { caption in Text(caption.text).frame(maxWidth: .infinity, alignment: caption.isOwner ? .trailing : .leading).padding(10).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12)) } } }.frame(maxHeight: 220)
-            HStack(spacing: 18) {
-                Button { model.isMuted.toggle() } label: { Image(systemName: model.isMuted ? "mic.slash.fill" : "mic.fill").frame(width: 52, height: 52) }
-                    .accessibilityLabel(model.isMuted ? "Activar micrófono" : "Silenciar micrófono")
-                    .buttonStyle(.bordered)
-                if model.isCallActive || model.isConnectingOrReconnecting {
-                    Button("Colgar") { model.endCall() }.buttonStyle(.borderedProminent).controlSize(.large)
-                } else {
-                    Button("Llamar a Pulse") { model.startCall() }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canStartCall)
-                }
+        VStack(spacing: PulseSpacing.md) {
+            header
+
+            Spacer(minLength: 0)
+
+            PulseVoiceOrb(mode: model.state.orbMode)
+
+            VStack(spacing: PulseSpacing.xs) {
+                PulseStatusPill(
+                    model.state.spanishLabel,
+                    tone: model.state.tone,
+                    pulses: model.state.isTransient
+                )
+                Text(model.isCallActive
+                    ? "Conversación continua · habla con normalidad"
+                    : "Inicia una llamada para hablar con tus sesiones.")
+                    .font(PulseFont.footnote)
+                    .foregroundStyle(PulseColor.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            if let message = model.userMessage {
+                PulseInlineNotice(message)
+            }
+
+            transcript
+
+            controls
+        }
+        .padding(PulseSpacing.lg)
+        .pulseScreenBackground()
+        .sheet(isPresented: $showingSettings) { PulseCallSettingsView(model: model) }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Pulse")
+                    .font(PulseFont.title)
+                    .foregroundStyle(PulseColor.textPrimary)
+                Text(model.serverName)
+                    .font(PulseFont.monoSmall)
+                    .foregroundStyle(PulseColor.textSecondary)
             }
             Spacer()
-        }.padding().sheet(isPresented: $showingSettings) { PulseCallSettingsView(model: model) }
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "gearshape.fill")
+            }
+            .buttonStyle(PulseIconButtonStyle(diameter: 40))
+            .accessibilityLabel("Ajustes")
+        }
     }
-    private var symbol: String { model.isCallActive ? "waveform" : "phone.fill" }
+
+    @ViewBuilder
+    private var transcript: some View {
+        if model.captions.isEmpty {
+            Spacer(minLength: 0)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: PulseSpacing.xs) {
+                    ForEach(model.captions) { caption in
+                        PulseCaptionBubble(text: caption.text, isOwner: caption.isOwner)
+                    }
+                }
+                .padding(PulseSpacing.sm)
+            }
+            .frame(maxHeight: 220)
+            .background(
+                RoundedRectangle(cornerRadius: PulseRadius.sheet, style: .continuous)
+                    .fill(PulseColor.backgroundBase.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: PulseRadius.sheet, style: .continuous)
+                    .strokeBorder(PulseColor.hairline, lineWidth: 1)
+            )
+        }
+    }
+
+    private var controls: some View {
+        HStack(spacing: PulseSpacing.md) {
+            Button {
+                model.isMuted.toggle()
+            } label: {
+                Image(systemName: model.isMuted ? "mic.slash.fill" : "mic.fill")
+            }
+            .buttonStyle(PulseIconButtonStyle(tone: model.isMuted ? .danger : .neutral, diameter: 56))
+            .accessibilityLabel(model.isMuted ? "Activar micrófono" : "Silenciar micrófono")
+
+            if model.isCallActive || model.isConnectingOrReconnecting {
+                Button("Colgar") { model.endCall() }
+                    .buttonStyle(PulsePrimaryButtonStyle(tone: .danger))
+            } else {
+                Button("Llamar a Pulse") { model.startCall() }
+                    .buttonStyle(PulsePrimaryButtonStyle())
+                    .disabled(!model.canStartCall)
+                    .opacity(model.canStartCall ? 1 : 0.5)
+            }
+        }
+    }
 }
+
+// MARK: - Ajustes
 
 public struct PulseCallSettingsView: View {
     @ObservedObject var model: PulseCallAppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showDisconnect = false
+
     public init(model: PulseCallAppModel) { self.model = model }
+
     public var body: some View {
         NavigationStack {
-            Form {
-                Section("Servidor") {
-                    LabeledContent("Nombre", value: model.serverName)
-                    LabeledContent("Conexión", value: model.state.spanishLabel)
+            ScrollView {
+                VStack(alignment: .leading, spacing: PulseSpacing.lg) {
+                    PulseSectionHeader("Servidor")
+                    VStack(spacing: 0) {
+                        settingsRow(label: "Nombre", value: model.serverName, monospaced: true)
+                        Divider().overlay(PulseColor.hairline)
+                        HStack {
+                            Text("Conexión")
+                                .font(PulseFont.body)
+                                .foregroundStyle(PulseColor.textPrimary)
+                            Spacer()
+                            PulseStatusPill(
+                                model.state.spanishLabel,
+                                tone: model.state.tone,
+                                pulses: model.state.isTransient
+                            )
+                        }
+                        .padding(.vertical, PulseSpacing.sm)
+                    }
+                    .pulseCard()
+
+                    PulseSectionHeader("Peligro")
+                    Button("Desconectar y borrar credencial") { showDisconnect = true }
+                        .buttonStyle(PulseSecondaryButtonStyle(tone: .danger))
+                        .frame(maxWidth: .infinity)
                 }
-                Section("Peligro") {
-                    Button("Desconectar y borrar credencial", role: .destructive) { showDisconnect = true }
+                .padding(PulseSpacing.lg)
+            }
+            .pulseScreenBackground()
+            .navigationTitle("Ajustes")
+            .pulseInlineNavigationTitle()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cerrar") { dismiss() }
+                        .tint(PulseColor.ember)
                 }
             }
-            .navigationTitle("Ajustes")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cerrar") { dismiss() } } }
-            .alert("Desconectar Pulse", isPresented: $showDisconnect) { Button("Borrar credencial local", role: .destructive) { model.disconnectAndClearLocalCredential() }; Button("Cancelar", role: .cancel) {} } message: { Text("Para usar Pulse otra vez tendrás que emparejar este iPhone.") }
+            .alert("Desconectar Pulse", isPresented: $showDisconnect) {
+                Button("Borrar credencial local", role: .destructive) {
+                    model.disconnectAndClearLocalCredential()
+                }
+                Button("Cancelar", role: .cancel) {}
+            } message: {
+                Text("Para usar Pulse otra vez tendrás que emparejar este iPhone.")
+            }
         }
     }
+
+    private func settingsRow(label: String, value: String, monospaced: Bool = false) -> some View {
+        HStack {
+            Text(label)
+                .font(PulseFont.body)
+                .foregroundStyle(PulseColor.textPrimary)
+            Spacer()
+            Text(value)
+                .font(monospaced ? PulseFont.mono : PulseFont.callout)
+                .foregroundStyle(PulseColor.textSecondary)
+        }
+        .padding(.vertical, PulseSpacing.sm)
+    }
 }
+
+// MARK: - Escáner QR
 
 #if os(iOS) && canImport(AVFoundation)
 private struct PulseQRScannerView: UIViewControllerRepresentable {

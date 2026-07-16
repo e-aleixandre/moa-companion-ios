@@ -43,12 +43,8 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         didFire = false
         active = true
         task = recognizer.recognitionTask(with: request) { [weak self] result, _ in
-            guard let self, self.active, !self.didFire,
-                  let text = result?.bestTranscription.formattedString.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: self.locale) else { return }
-            let words = text.split(whereSeparator: { !$0.isLetter }).map(String.init)
-            guard words.contains(where: { $0.caseInsensitiveCompare("pulse") == .orderedSame }) else { return }
-            self.didFire = true
-            self.onWakeWord?()
+            guard let text = result?.bestTranscription.formattedString else { return }
+            Task { @MainActor [weak self] in self?.recognize(text) }
         }
         return true
     }
@@ -79,6 +75,15 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
+    }
+
+    private func recognize(_ value: String) {
+        guard active, !didFire else { return }
+        let text = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+        let words = text.split(whereSeparator: { !$0.isLetter }).map(String.init)
+        guard words.contains(where: { $0.caseInsensitiveCompare("pulse") == .orderedSame }) else { return }
+        didFire = true
+        onWakeWord?()
     }
 }
 #else

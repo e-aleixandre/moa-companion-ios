@@ -41,6 +41,18 @@ extension View {
         shadow(color: color.opacity(opacity), radius: radius)
     }
 
+    /// Título de navegación inline, multiplataforma-seguro
+    /// (`navigationBarTitleDisplayMode` no existe en macOS y el paquete
+    /// también declara macOS 13).
+    @ViewBuilder
+    public func pulseInlineNavigationTitle() -> some View {
+        #if os(iOS)
+        navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
+    }
+
     /// Fondo de pantalla completo: base casi negra con un halo cálido muy tenue
     /// en la parte superior. Fija el esquema oscuro.
     public func pulseScreenBackground() -> some View {

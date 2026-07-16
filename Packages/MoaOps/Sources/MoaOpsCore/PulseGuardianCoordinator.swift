@@ -103,6 +103,9 @@ public final class PulseGuardianCoordinator {
     private let warmupCapacity = 100
     private var bufferingOwnerSpeech = false
     private var pcmTask: Task<Void, Never>?
+    // Every open and close invalidates work owned by the previous socket. This
+    // prevents a cancelled sender from draining PCM belonging to a new call.
+    private var socketGeneration = 0
     private var closeTask: Task<Void, Never>?
     private var isRunning = false
     private var isOpeningRealtime = false
@@ -149,6 +152,7 @@ public final class PulseGuardianCoordinator {
         wakeWord.stop()
         Task { await attention.stop() }
         closeTask?.cancel(); closeTask = nil
+        socketGeneration &+= 1
         pcmTask?.cancel(); pcmTask = nil; pcmQueue.removeAll()
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false
         voice.stopAll()
@@ -279,18 +283,21 @@ public final class PulseGuardianCoordinator {
 
     private func openRealtimeForActivation() {
         guard isRunning, !isOpeningRealtime else { return }
+        socketGeneration &+= 1
+        let generation = socketGeneration
+        isOpeningRealtime = true
         state = .waking
         Task { [weak self] in
             guard let self else { return }
             do {
                 let credential = try await self.service.mintRealtimeClientSecret()
-                guard self.isRunning else { return }
+                guard self.isRunning, self.socketGeneration == generation else { return }
                 let executor = PulseGenericToolExecutor(service: self.service)
                 let owner = self
                 let initialContext = self.guardianInitialContext()
                 let opened = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: initialContext, onState: { [weak owner] event in
                     let value = owner
-                    Task { @MainActor in value?.receive(event) }
+                    Task { @MainActor in value?.receive(event, generation: generation) }
                 }, onText: { [weak owner] text in
                     let value = owner
                     Task { @MainActor in value?.onText?(text) }
@@ -301,19 +308,20 @@ public final class PulseGuardianCoordinator {
                     let value = owner
                     Task { @MainActor in value?.voice.flushPlayback() }
                 })
-                guard self.isRunning else { await opened.end(); return }
+                guard self.isRunning, self.socketGeneration == generation else { await opened.end(); return }
                 self.call = opened
                 self.isOpeningRealtime = false
                 // BUG 2: don't stream audio until the session is actually ready to
                 // receive it, then flush everything the owner said during warmup so
                 // the phrase started right after "Pulse" is not lost.
                 await opened.awaitSessionReady()
-                guard self.isRunning, self.call != nil else { return }
+                guard self.isRunning, self.socketGeneration == generation, self.call != nil else { return }
                 self.flushWarmupBuffer()
                 self.logActivation("socket ready")
                 self.signalListeningReady()
                 self.processQueue()
             } catch {
+                guard self.socketGeneration == generation else { return }
                 self.isOpeningRealtime = false
                 self.bufferingOwnerSpeech = false
                 self.warmupBuffer.removeAll()
@@ -338,20 +346,25 @@ public final class PulseGuardianCoordinator {
 
     private func pumpPCMQueue() {
         guard let call, pcmTask == nil, !pcmQueue.isEmpty else { return }
+        let generation = socketGeneration
         pcmTask = Task { [weak self] in
             guard let self else { return }
             while true {
-                guard self.isRunning, !self.pcmQueue.isEmpty else { break }
+                guard self.isRunning, self.socketGeneration == generation, !self.pcmQueue.isEmpty else { break }
                 let next = self.pcmQueue.removeFirst()
                 do { try await call.appendPCM16(next) }
-                catch { self.realtimeFailed(); break }
+                catch {
+                    if self.socketGeneration == generation { self.realtimeFailed() }
+                    break
+                }
             }
-            self.pcmTask = nil
+            if self.socketGeneration == generation { self.pcmTask = nil }
         }
     }
 
-    private func receive(_ realtimeState: PulseRealtimeCallState) {
+    private func receive(_ realtimeState: PulseRealtimeCallState, generation: Int? = nil) {
         guard isRunning else { return }
+        guard generation == nil || generation == socketGeneration else { return }
         switch realtimeState {
         case .connecting: state = .waking
         case .responding: state = .speaking
@@ -473,6 +486,7 @@ public final class PulseGuardianCoordinator {
 
     private func closeRealtime() {
         closeTask?.cancel(); closeTask = nil
+        socketGeneration &+= 1
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; ownerSpeaking = false; activeAcknowledgement = nil
         bufferingOwnerSpeech = false; warmupBuffer.removeAll()
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil

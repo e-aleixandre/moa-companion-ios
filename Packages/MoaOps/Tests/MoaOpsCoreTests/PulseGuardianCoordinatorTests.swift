@@ -118,6 +118,32 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(appended, frames)
     }
 
+    func testPCMFromClosedSocketNeverDrainsIntoReopenedSocket() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        let first = try XCTUnwrap(await realtime.currentCall())
+        voice.emitPCM(Data([1, 1]))
+        try await waitFor { await first.appendedCount() == 1 }
+
+        await realtime.emit(.failed)
+        try await waitFor { coordinator.state == .guardianStandby }
+        wake.fire()
+        try await waitFor { await realtime.begins() == 2 }
+        let second = try XCTUnwrap(await realtime.currentCall())
+        voice.emitPCM(Data([2, 2]))
+        try await waitFor { await second.appendedCount() == 1 }
+
+        XCTAssertEqual(await first.allAppended(), [Data([1, 1])])
+        XCTAssertEqual(await second.allAppended(), [Data([2, 2])])
+    }
+
     // BUG 4: the initial context the prompt promises must actually be built from
     // the snapshot the coordinator already holds — sessions roster + pending
     // items — and empty when there is nothing to report.

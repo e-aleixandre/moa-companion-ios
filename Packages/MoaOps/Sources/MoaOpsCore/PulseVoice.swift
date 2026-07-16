@@ -89,6 +89,14 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    // Keep-alive: a silent looping node that keeps the output active while we
+    // capture. iOS reaps a recording-only session when the screen locks (more
+    // aggressively on iOS 26.x); a running output node signals "actively doing
+    // audio" so the guardian survives in the pocket. We are genuinely recording
+    // the whole time — this is the standard keep-alive node, not a fake-activity
+    // trick.
+    private let keepAlive = AVAudioPlayerNode()
+    private var keepAliveRunning = false
     private let format = AVAudioFormat(standardFormatWithSampleRate: Double(OpenAIRealtimePCM16.sampleRate), channels: 1)!
     private var muted = false
     private var capturing = false
@@ -111,6 +119,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         super.init()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
+        engine.attach(keepAlive)
+        engine.connect(keepAlive, to: engine.mainMixerNode, format: format)
         interruptionObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
             self?.handleInterruption(notification)
         }
@@ -164,6 +174,28 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         try installCaptureTap(on: input)
         engine.prepare()
         try engine.start()
+        startKeepAlive()
+    }
+
+    // Schedules an endless buffer of silence on the keep-alive node so the
+    // output stays active for as long as we are capturing. Without a running
+    // output, iOS treats the session as idle recording and kills the app after
+    // ~50s in the background on recent releases. Idempotent and safe to call
+    // after every engine (re)start, since engine.stop() also stops this node.
+    private func startKeepAlive() {
+        guard engine.isRunning else { return }
+        let frames = AVAudioFrameCount(format.sampleRate / 10) // 100 ms of silence
+        guard frames > 0, let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
+        silence.frameLength = frames // zero-filled: silent
+        keepAlive.scheduleBuffer(silence, at: nil, options: .loops, completionHandler: nil)
+        if !keepAlive.isPlaying { keepAlive.play() }
+        keepAliveRunning = true
+    }
+
+    private func stopKeepAlive() {
+        guard keepAliveRunning else { return }
+        keepAlive.stop()
+        keepAliveRunning = false
     }
 
     private func configureVoiceProcessing(for input: AVAudioInputNode) {
@@ -216,6 +248,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         captureRebuildScheduled = true
         capturedPCM.removeAll()
         player.stop()
+        stopKeepAlive()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         captureRebuildTask = Task { @MainActor [weak self] in
@@ -256,6 +289,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             captureRebuildTask = nil
             captureRebuildScheduled = false
             capturedPCM.removeAll()
+            stopKeepAlive()
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
             temporaryInterruptionHandler?()
@@ -298,6 +332,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         captureRebuildTask = nil
         captureRebuildScheduled = false
         capturedPCM.removeAll()
+        stopKeepAlive()
         engine.inputNode.removeTap(onBus: 0)
     }
 
@@ -329,7 +364,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             buffer.floatChannelData?[0].assign(from: samples.baseAddress!, count: samples.count)
         }
         do {
-            if !engine.isRunning, !interrupted, captureRebuildTask == nil { try engine.start() }
+            if !engine.isRunning, !interrupted, captureRebuildTask == nil { try engine.start(); startKeepAlive() }
         } catch {
             onPlaybackFailure?()
             return

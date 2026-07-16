@@ -81,7 +81,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         // While the owner is speaking, the window timer must not fire.
         try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertNotEqual(coordinator.state, .guardianStandby)
-        XCTAssertEqual(await realtime.currentCall()?.wasEnded(), false)
+        let ended = await realtime.currentCall()?.wasEnded()
+        XCTAssertEqual(ended, false)
 
         await realtime.emit(.speechStopped)
         try await waitFor { coordinator.state == .guardianStandby }

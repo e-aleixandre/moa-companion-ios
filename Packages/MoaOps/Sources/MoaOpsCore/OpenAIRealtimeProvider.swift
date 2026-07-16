@@ -251,8 +251,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                     if hasFunctionCallOutputsForCurrentResponse {
                         hasFunctionCallOutputsForCurrentResponse = false
                         try await send(["type": "response.create", "response": ["output_modalities": ["audio"]]])
+                        onState(.responding)
+                    } else {
+                        onState(.listening)
                     }
-                    onState(.listening)
                 case "error": throw OpenAIRealtimeClientError.invalidResponse
                 default: break
                 }

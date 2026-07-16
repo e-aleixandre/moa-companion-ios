@@ -110,6 +110,8 @@ public final class PulseGuardianCoordinator {
     private var isRunning = false
     private var isOpeningRealtime = false
     private var isNarrating = false
+    private var isResponding = false
+    private var isPlayingResponseAudio = false
     private var ownerSpeaking = false
     private var wakeAvailable = false
     private var wakeWordActive = false
@@ -160,7 +162,7 @@ public final class PulseGuardianCoordinator {
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
         pcmTask?.cancel(); pcmTask = nil; pcmQueue.removeAll()
-        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false
+        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false
         voice.stopAll()
         state = .idle
         Task { await old?.end() }
@@ -318,6 +320,7 @@ public final class PulseGuardianCoordinator {
                     Task { @MainActor in
                         guard let value, value.socketGeneration == generation else { return }
                         value.notePulseAudio()
+                        value.isPlayingResponseAudio = true
                         value.voice.playPCM16(pcm, completion: played)
                     }
                 }, onBargeIn: { [weak owner] in
@@ -384,10 +387,14 @@ public final class PulseGuardianCoordinator {
         guard generation == nil || generation == socketGeneration else { return }
         switch realtimeState {
         case .connecting: state = .waking
-        case .responding: state = .speaking
+        case .responding:
+            isResponding = true
+            closeTask?.cancel(); closeTask = nil
+            state = .speaking
         case .listening:
+            isResponding = false
             if isNarrating { state = .draining }
-            else { state = .listening; scheduleCloseAfterHotWindow() }
+            else { state = .listening; if !isPlayingResponseAudio { scheduleCloseAfterHotWindow() } }
         case .speechStarted:
             // Real owner voice (server VAD): keep the call open through the turn.
             ownerSpeaking = true
@@ -402,7 +409,13 @@ public final class PulseGuardianCoordinator {
     }
 
     private func playbackDrained() {
-        guard isRunning, isNarrating else { return }
+        guard isRunning else { return }
+        if !isNarrating {
+            guard isPlayingResponseAudio else { return }
+            isPlayingResponseAudio = false
+            if !isResponding, !ownerSpeaking, queue.isEmpty { scheduleCloseAfterHotWindow() }
+            return
+        }
         state = .draining
         let acknowledgement = activeAcknowledgement
         activeAcknowledgement = nil
@@ -519,12 +532,12 @@ public final class PulseGuardianCoordinator {
     }
 
     private func scheduleCloseAfterHotWindow() {
-        guard call != nil, !isNarrating, !ownerSpeaking else { return }
+        guard call != nil, !isNarrating, !isResponding, !isPlayingResponseAudio, !ownerSpeaking else { return }
         closeTask?.cancel()
         closeTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(self.hotWindow * 1_000_000_000))
-            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.ownerSpeaking else { return }
+            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking else { return }
             self.closeRealtime()
             if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }
         }
@@ -533,7 +546,7 @@ public final class PulseGuardianCoordinator {
     private func closeRealtime() {
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
-        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; ownerSpeaking = false; activeAcknowledgement = nil
+        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false; ownerSpeaking = false; activeAcknowledgement = nil
         bufferingOwnerSpeech = false; warmupBuffer.removeAll()
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil
         Task { await old?.end() }

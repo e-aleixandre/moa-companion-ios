@@ -10,7 +10,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
             #"{"type":"response.done"}"#,
         ])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "initial", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "initial", onState: { _ in }, onText: { _ in }, onAudio: { _, _ in }, onBargeIn: {})
         await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "response.create" } }
         let frames = await socket.sentJSON
         let session = try XCTUnwrap(frames.first { $0["type"] as? String == "session.update" })
@@ -40,7 +40,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
     func testCancellationClosesSocketAndNeverNeedsASecondSocket() async throws {
         let socket = FixtureSocket(events: [])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _, _ in }, onBargeIn: {})
         await call.end()
         let cancelled = await socket.wasCancelled
         let resumes = await socket.resumeCount
@@ -65,7 +65,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
         // onAudio/onBargeIn fire synchronously from the read loop in wire order;
         // recording synchronously keeps that order deterministic (an intervening
         // Task per delta would interleave and make the assertion flaky).
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { recorder.append($0) }, onBargeIn: { recorder.recordBargeIn() })
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { pcm, _ in recorder.append(pcm) }, onBargeIn: { recorder.recordBargeIn() })
         await waitUntil { recorder.hasExpectedBargeIn() }
         XCTAssertEqual(recorder.bargeInCount, 1)
         XCTAssertEqual(recorder.audio, [Data([1, 2]), Data([5, 6])])
@@ -80,20 +80,20 @@ final class PulseRealtimeTransportTests: XCTestCase {
             #"{"type":"input_audio_buffer.speech_started"}"#,
         ])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _, _ in }, onBargeIn: {})
         await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "conversation.item.truncate" } }
         let frames = await socket.sentJSON
         let truncate = try XCTUnwrap(frames.first { $0["type"] as? String == "conversation.item.truncate" })
         XCTAssertEqual(truncate["item_id"] as? String, "item-audio-1")
         XCTAssertEqual(truncate["content_index"] as? Int, 0)
-        XCTAssertNotNil(truncate["audio_end_ms"])
+        XCTAssertEqual(truncate["audio_end_ms"] as? Int, 0)
         await call.end()
     }
 
     func testSessionEnablesInputAudioTranscription() async throws {
         let socket = FixtureSocket(events: [])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _, _ in }, onBargeIn: {})
         await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "session.update" } }
         let frames = await socket.sentJSON
         let session = try XCTUnwrap(frames.first { $0["type"] as? String == "session.update" })

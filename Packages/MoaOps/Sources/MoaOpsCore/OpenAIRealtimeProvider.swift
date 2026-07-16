@@ -41,7 +41,7 @@ public struct PulseRealtimeClientCredential: Decodable, Equatable, Sendable {
 }
 
 public struct OpenAIRealtimeProviderConfiguration: Equatable, Sendable {
-    public static let defaultModel = "gpt-realtime-2.1-mini"
+    public static let defaultModel = "gpt-realtime-2.1"
     public let model: String
 
     public init(model: String = Self.defaultModel) {

@@ -111,7 +111,7 @@ public final class PulseCallAppModel: ObservableObject {
     public func startGuardian() async {
         guard hasPairedDevice, let service, let registration, !isGuardianActive, call == nil else { return }
         let attention = PulseAttentionWebSocket(registration: registration)
-        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: voice)
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: voice, wakeWord: PulseWakeWordDetector())
         coordinator.onState = { [weak self] state in
             Task { @MainActor [weak self] in self?.guardianState = state }
         }

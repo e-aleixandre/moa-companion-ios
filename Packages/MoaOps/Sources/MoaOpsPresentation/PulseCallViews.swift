@@ -59,11 +59,11 @@ public struct PulsePairingView: View {
 
 public struct PulseCallSceneView: View {
     @ObservedObject var model: PulseCallAppModel
-    @State private var showDisconnect = false
+    @State private var showingSettings = false
     public init(model: PulseCallAppModel) { self.model = model }
     public var body: some View {
         VStack(spacing: 20) {
-            HStack { VStack(alignment: .leading) { Text("Pulse").font(.title.bold()); Text(model.serverName).foregroundStyle(.secondary) }; Spacer(); Button("Desconectar", role: .destructive) { showDisconnect = true } }
+            HStack { VStack(alignment: .leading) { Text("Pulse").font(.title.bold()); Text(model.serverName).foregroundStyle(.secondary) }; Spacer(); Button { showingSettings = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Ajustes") }
             Spacer()
             Image(systemName: symbol).font(.system(size: 80)).foregroundStyle(model.isCallActive ? Color.green : Color.accentColor)
             Text(model.state.spanishLabel).font(.title2.weight(.semibold))
@@ -81,9 +81,32 @@ public struct PulseCallSceneView: View {
                 }
             }
             Spacer()
-        }.padding().alert("Desconectar Pulse", isPresented: $showDisconnect) { Button("Borrar credencial local", role: .destructive) { model.disconnectAndClearLocalCredential() }; Button("Cancelar", role: .cancel) {} } message: { Text("Para usar Pulse otra vez tendrás que emparejar este iPhone.") }
+        }.padding().sheet(isPresented: $showingSettings) { PulseCallSettingsView(model: model) }
     }
     private var symbol: String { model.isCallActive ? "waveform" : "phone.fill" }
+}
+
+public struct PulseCallSettingsView: View {
+    @ObservedObject var model: PulseCallAppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var showDisconnect = false
+    public init(model: PulseCallAppModel) { self.model = model }
+    public var body: some View {
+        NavigationStack {
+            Form {
+                Section("Servidor") {
+                    LabeledContent("Nombre", value: model.serverName)
+                    LabeledContent("Conexión", value: model.state.spanishLabel)
+                }
+                Section("Peligro") {
+                    Button("Desconectar y borrar credencial", role: .destructive) { showDisconnect = true }
+                }
+            }
+            .navigationTitle("Ajustes")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cerrar") { dismiss() } } }
+            .alert("Desconectar Pulse", isPresented: $showDisconnect) { Button("Borrar credencial local", role: .destructive) { model.disconnectAndClearLocalCredential() }; Button("Cancelar", role: .cancel) {} } message: { Text("Para usar Pulse otra vez tendrás que emparejar este iPhone.") }
+        }
+    }
 }
 
 #if os(iOS) && canImport(AVFoundation)

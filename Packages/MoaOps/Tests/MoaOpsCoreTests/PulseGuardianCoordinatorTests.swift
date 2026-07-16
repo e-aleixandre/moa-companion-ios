@@ -113,6 +113,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await settle()
         wake.fire()
         try await waitFor { await realtime.begins() == 1 }
+        await settle()
         await realtime.emit(.listening)
         await realtime.emit(.responding)
         await settle()

@@ -31,5 +31,16 @@ jobs:
           -configuration Debug
           -sdk iphonesimulator
           -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath $RUNNER_TEMP/dd
           CODE_SIGNING_ALLOWED=NO
           build
+      - name: Inspect compiled Info.plist (UIBackgroundModes)
+        run: |
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products" -maxdepth 2 -name '*.app' -type d | head -1)
+          echo "app bundle: $APP"
+          PLIST="$APP/Info.plist"
+          echo "=== plutil dump of UIBackgroundModes ==="
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$PLIST" || echo "UIBackgroundModes KEY MISSING"
+          echo "=== raw type check ==="
+          plutil -extract UIBackgroundModes raw -expect array "$PLIST" || echo "NOT AN ARRAY (iOS ignores it)"
+

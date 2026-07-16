@@ -93,6 +93,8 @@
 				TargetAttributes = {
 					A1000000000000000000000C = {
 						CreatedOnToolsVersion = 15.4;
+						DevelopmentTeam = 4H47VQ3UP4;
+						ProvisioningStyle = Automatic;
 					};
 				};
 			};

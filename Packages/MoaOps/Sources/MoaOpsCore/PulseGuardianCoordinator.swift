@@ -248,9 +248,37 @@ public final class PulseGuardianCoordinator {
         }
     }
 
+    /// BUG 4: build the `<estado_inicial_moa>` the prompt promises so Pulse can
+    /// answer the first "¿qué pasa?" without cold tool calls. Empty snapshot ->
+    /// empty context (previous behaviour). Content is untrusted data, never
+    /// instructions — same doctrine as `<guardian_event>`.
+    private func guardianInitialContext() -> String {
+        Self.formatInitialContext(snapshot)
+    }
+
+    static func formatInitialContext(_ snapshot: PulseGuardianSnapshot) -> String {
+        var lines: [String] = []
+        if !snapshot.sessions.isEmpty {
+            lines.append("sesiones:")
+            for session in snapshot.sessions {
+                var parts = ["- \(session.alias): \(session.title) [\(session.state)]"]
+                if session.pendingAsks > 0 { parts.append("\(session.pendingAsks) preguntas") }
+                if session.pendingPerms > 0 { parts.append("\(session.pendingPerms) permisos") }
+                lines.append(parts.joined(separator: ", "))
+            }
+        }
+        if !snapshot.items.isEmpty {
+            lines.append("avisos:")
+            for item in snapshot.items {
+                lines.append("- [\(item.kind.rawValue)] \(item.alias): \(item.spoken)")
+            }
+        }
+        guard !lines.isEmpty else { return "" }
+        return "<estado_inicial_moa>\n\(lines.joined(separator: "\n"))\n</estado_inicial_moa>"
+    }
+
     private func openRealtimeForActivation() {
         guard isRunning, !isOpeningRealtime else { return }
-        isOpeningRealtime = true
         state = .waking
         Task { [weak self] in
             guard let self else { return }
@@ -259,7 +287,8 @@ public final class PulseGuardianCoordinator {
                 guard self.isRunning else { return }
                 let executor = PulseGenericToolExecutor(service: self.service)
                 let owner = self
-                let opened = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: "", onState: { [weak owner] event in
+                let initialContext = self.guardianInitialContext()
+                let opened = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: initialContext, onState: { [weak owner] event in
                     let value = owner
                     Task { @MainActor in value?.receive(event) }
                 }, onText: { [weak owner] text in

@@ -118,6 +118,52 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(appended, frames)
     }
 
+    // BUG 4: the initial context the prompt promises must actually be built from
+    // the snapshot the coordinator already holds — sessions roster + pending
+    // items — and empty when there is nothing to report.
+    func testInitialContextIsEmptyForEmptySnapshot() {
+        XCTAssertEqual(PulseGuardianCoordinator.formatInitialContext(PulseGuardianSnapshot()), "")
+    }
+
+    func testInitialContextSummarizesSessionsAndItems() throws {
+        var snapshot = PulseGuardianSnapshot()
+        snapshot.sessions = [
+            try decodeSession(#"{"session_id":"s1","alias":"la del token","title":"Arreglar validación del token","state":"waiting","pending_asks":1,"pending_perms":0}"#),
+            try decodeSession(#"{"session_id":"s2","alias":"la del bug","title":"Bug en el parser","state":"running","pending_asks":0,"pending_perms":2}"#),
+        ]
+        snapshot.items = [
+            try decodeItem(#"{"id":"i1","priority":0,"kind":"permission","session_id":"s2","alias":"la del bug","spoken":"pide borrar un fichero","state":"pending","created_at":"2026-07-16T13:00:00Z"}"#),
+        ]
+        let context = PulseGuardianCoordinator.formatInitialContext(snapshot)
+        XCTAssertTrue(context.hasPrefix("<estado_inicial_moa>"))
+        XCTAssertTrue(context.hasSuffix("</estado_inicial_moa>"))
+        XCTAssertTrue(context.contains("la del token"))
+        XCTAssertTrue(context.contains("1 preguntas"))
+        XCTAssertTrue(context.contains("2 permisos"))
+        XCTAssertTrue(context.contains("[permission] la del bug: pide borrar un fichero"))
+    }
+
+    func testActivationPassesInitialContextFromSnapshot() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+        let initMessage = try decodeMessage(#"{"type":"init","sessions":[{"session_id":"s1","alias":"la del token","title":"Token","state":"waiting","pending_asks":1,"pending_perms":0}],"items":[]}"#)
+        await attention.emit(initMessage)
+        await settle()
+
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        let context = await realtime.initialContext()
+        XCTAssertTrue(context.contains("la del token"))
+    }
+
+    private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
+    private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }
+    private func decodeMessage(_ json: String) throws -> PulseAttentionServerMessage { try JSONDecoder.moaOps.decode(PulseAttentionServerMessage.self, from: Data(json.utf8)) }
+
     private func settle() async { for _ in 0..<40 { await Task.yield() } }
     private func waitFor(_ condition: @escaping () async -> Bool, timeout: TimeInterval = 3) async throws {
         let deadline = Date().addingTimeInterval(timeout)

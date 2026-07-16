@@ -1,0 +1,99 @@
+name: TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Import distribution certificate
+        env:
+          DIST_CERT_P12_BASE64: ${{ secrets.DIST_CERT_P12_BASE64 }}
+          DIST_CERT_PASSWORD: ${{ secrets.DIST_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$DIST_CERT_P12_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 1800 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import $RUNNER_TEMP/cert.p12 -k "$KEYCHAIN" -P "$DIST_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm $RUNNER_TEMP/cert.p12
+
+      - name: Install provisioning profile
+        env:
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          PROFILE=$RUNNER_TEMP/pulse.mobileprovision
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE"
+          UUID=$(security cms -D -i "$PROFILE" | plutil -extract UUID raw -o - -)
+          NAME=$(security cms -D -i "$PROFILE" | plutil -extract Name raw -o - -)
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID".mobileprovision
+          echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Archive
+        run: >-
+          xcodebuild archive
+          -project MoaCompanion.xcodeproj
+          -scheme MoaCompanion
+          -configuration Release
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -archivePath $RUNNER_TEMP/MoaPulse.xcarchive
+          CODE_SIGN_STYLE=Manual
+          CODE_SIGN_IDENTITY="Apple Distribution"
+          DEVELOPMENT_TEAM=4H47VQ3UP4
+          PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+          CURRENT_PROJECT_VERSION=${{ github.run_number }}
+
+      - name: Export IPA
+        run: |
+          cat > $RUNNER_TEMP/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>4H47VQ3UP4</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.ealeixandre.moa.pulse</key><string>$PROFILE_NAME</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath $RUNNER_TEMP/MoaPulse.xcarchive \
+            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
+            -exportPath $RUNNER_TEMP/export
+
+      - name: Upload to TestFlight
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "$ASC_API_KEY_P8_BASE64" | base64 --decode > ~/private_keys/AuthKey_$ASC_API_KEY_ID.p8
+          xcrun altool --upload-app -f "$RUNNER_TEMP/export/Moa Pulse.ipa" -t ios \
+            --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_API_ISSUER_ID"
+          rm -rf ~/private_keys
+
+      - name: Clean up keychain
+        if: always()
+        run: security delete-keychain $RUNNER_TEMP/signing.keychain-db || true

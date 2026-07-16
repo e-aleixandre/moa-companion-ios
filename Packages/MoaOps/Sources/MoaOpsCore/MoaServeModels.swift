@@ -263,7 +263,6 @@ public struct MoaServeAttentionItem: Codable, Equatable, Sendable, Identifiable 
     public let refID: String?
     public let riskLevel: String?
     public let riskFlags: [String]?
-    public let requiresVerbatimConfirm: Bool?
     public let verbatim: String?
 
     enum CodingKeys: String, CodingKey {
@@ -273,7 +272,6 @@ public struct MoaServeAttentionItem: Codable, Equatable, Sendable, Identifiable 
         case refID = "ref_id"
         case riskLevel = "risk_level"
         case riskFlags = "risk_flags"
-        case requiresVerbatimConfirm = "requires_verbatim_confirm"
     }
 }
 
@@ -362,5 +360,58 @@ public struct MoaServeToolDetail: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         output = try container.decode(String.self, forKey: .output)
         truncated = try container.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+    }
+}
+
+/// The bounded transcript page for one subagent job. It intentionally shares
+/// the conversation item contract: tool output remains absent unless an
+/// explicit tool-detail request is made for the parent session.
+public struct MoaServeSubagentPage: Codable, Equatable, Sendable {
+    public let sessionID: String
+    public let jobID: String
+    public let order: String
+    public let messages: [MoaServeConversationItem]
+    public let nextCursor: String?
+    public let hasMore: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case order, messages
+        case sessionID = "session_id"
+        case jobID = "job_id"
+        case nextCursor = "next_cursor"
+        case hasMore = "has_more"
+    }
+}
+
+/// A discoverable subagent belonging to one session. The model first reads
+/// this list to resolve the job ID, then asks for its transcript.
+public struct MoaServeSubagentSummary: Codable, Equatable, Sendable, Identifiable {
+    public let jobID: String
+    public let task: String
+    public let model: String?
+    public let status: String
+    public let isAsync: Bool
+    public let startedAt: Date?
+    public let finishedAt: Date?
+    public let source: String
+
+    public var id: String { jobID }
+
+    enum CodingKeys: String, CodingKey {
+        case task, model, status, source
+        case jobID = "job_id"
+        case isAsync = "async"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+    }
+}
+
+public struct MoaServeSubagentListResponse: Codable, Equatable, Sendable {
+    public let sessionID: String
+    public let subagents: [MoaServeSubagentSummary]
+
+    enum CodingKeys: String, CodingKey {
+        case subagents
+        case sessionID = "session_id"
     }
 }

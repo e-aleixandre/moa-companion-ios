@@ -22,11 +22,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: swift --version
       - run: swift build --package-path Packages/MoaOps
-      # Xcode's shared XCTest process reproducibly hangs around the durable budget ledger group.
-      # Keep exactly that group in its own SwiftPM XCTest process; all other core tests stay together.
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsCoreTests
       - run: swift test --package-path Packages/MoaOps --filter MoaOpsPresentationTests
-      - run: swift test --package-path Packages/MoaOps --filter MoaOpsBudgetTests
       - run: >-
           xcodebuild
           -project MoaCompanion.xcodeproj

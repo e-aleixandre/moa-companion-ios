@@ -23,16 +23,16 @@ final class MoaServeModelsTests: XCTestCase {
 
     func testAttentionFixtureDecodesItems() throws {
         let fixture = #"""
-        {"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"session-1","alias":"Fix tests","spoken":"Moa necesita permiso.","state":"pending","created_at":"2026-07-15T18:02:00Z","ref_id":"perm_1","risk_level":"medium","risk_flags":["shell"],"requires_verbatim_confirm":true}]}
+        {"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"session-1","alias":"Fix tests","spoken":"Moa necesita permiso.","verbatim":"go test ./...","state":"pending","created_at":"2026-07-15T18:02:00Z","ref_id":"perm_1","risk_level":"medium","risk_flags":["shell"]}]}
         """#
 
         let response = try JSONDecoder.moaOps.decode(MoaServeAttentionResponse.self, from: Data(fixture.utf8))
 
         let item = try XCTUnwrap(response.items.first)
         XCTAssertEqual(item.sessionID, "session-1")
+        XCTAssertEqual(item.riskLevel, "medium")
         XCTAssertEqual(item.riskFlags, ["shell"])
-        XCTAssertEqual(item.requiresVerbatimConfirm, true)
-        XCTAssertNil(item.verbatim)
+        XCTAssertEqual(item.verbatim, "go test ./...")
     }
 
     func testConversationAndToolDetailFixturesKeepTextAndToolMetadataSeparate() throws {
@@ -43,13 +43,14 @@ final class MoaServeModelsTests: XCTestCase {
         {"id":"tool:assistant-0:0","role":"tool","tool":"bash","summary":"Tool activity","status":"ok"}
         """#
         let detailFixture = #"""
-        {"output":"[non-sensitive fixture marker]","truncated":true}
+        {"output":"[fixture marker]","truncated":true}
         """#
 
         let page = try JSONDecoder.moaOps.decode(MoaServeConversationPage.self, from: Data(pageFixture.utf8))
         let legacyTool = try JSONDecoder.moaOps.decode(MoaServeConversationItem.self, from: Data(legacyToolFixture.utf8))
         let detail = try JSONDecoder.moaOps.decode(MoaServeToolDetail.self, from: Data(detailFixture.utf8))
 
+        XCTAssertEqual(page.order, "newest_first")
         XCTAssertEqual(page.messages[0].role, .tool)
         XCTAssertEqual(page.messages[0].tool, "bash")
         XCTAssertEqual(page.messages[0].action, "bash")
@@ -63,7 +64,33 @@ final class MoaServeModelsTests: XCTestCase {
         XCTAssertEqual(page.messages[2].text, "Prueba los tests.")
         XCTAssertEqual(page.nextCursor, "opaque-cursor")
         XCTAssertTrue(page.hasMore)
-        XCTAssertEqual(detail.output, "[non-sensitive fixture marker]")
+        XCTAssertEqual(detail.output, "[fixture marker]")
         XCTAssertTrue(detail.truncated)
+    }
+
+    func testSubagentFixtureUsesTheSameMetadataOnlyTranscriptContract() throws {
+        let fixture = #"""
+        {"session_id":"session-1","job_id":"job-1","order":"newest_first","messages":[{"id":"tool-1","role":"tool","tool":"bash","status":"running"}],"next_cursor":"cursor","has_more":true}
+        """#
+        let page = try JSONDecoder.moaOps.decode(MoaServeSubagentPage.self, from: Data(fixture.utf8))
+        XCTAssertEqual(page.sessionID, "session-1")
+        XCTAssertEqual(page.jobID, "job-1")
+        XCTAssertEqual(page.order, "newest_first")
+        XCTAssertEqual(page.messages.first?.role, .tool)
+        XCTAssertNil(page.messages.first?.text)
+        XCTAssertEqual(page.nextCursor, "cursor")
+        XCTAssertTrue(page.hasMore)
+    }
+
+    func testSubagentListFixturePreservesTaskAndLifecycle() throws {
+        let fixture = #"""
+        {"session_id":"session-1","subagents":[{"job_id":"job-1","task":"restore test coverage","model":"gpt-5","status":"running","async":true,"started_at":"2026-07-15T18:02:00Z","source":"active"}]}
+        """#
+        let response = try JSONDecoder.moaOps.decode(MoaServeSubagentListResponse.self, from: Data(fixture.utf8))
+        let subagent = try XCTUnwrap(response.subagents.first)
+        XCTAssertEqual(subagent.jobID, "job-1")
+        XCTAssertEqual(subagent.task, "restore test coverage")
+        XCTAssertTrue(subagent.isAsync)
+        XCTAssertEqual(subagent.source, "active")
     }
 }

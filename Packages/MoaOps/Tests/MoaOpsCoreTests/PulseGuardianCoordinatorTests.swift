@@ -128,7 +128,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         wake.fire()
         try await waitFor { await realtime.begins() == 1 }
-        let first = try XCTUnwrap(await realtime.currentCall())
+        let firstCall = await realtime.currentCall()
+        let first = try XCTUnwrap(firstCall)
         voice.emitPCM(Data([1, 1]))
         try await waitFor { await first.appendedCount() == 1 }
 
@@ -136,12 +137,15 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         try await waitFor { coordinator.state == .guardianStandby }
         wake.fire()
         try await waitFor { await realtime.begins() == 2 }
-        let second = try XCTUnwrap(await realtime.currentCall())
+        let secondCall = await realtime.currentCall()
+        let second = try XCTUnwrap(secondCall)
         voice.emitPCM(Data([2, 2]))
         try await waitFor { await second.appendedCount() == 1 }
 
-        XCTAssertEqual(await first.allAppended(), [Data([1, 1])])
-        XCTAssertEqual(await second.allAppended(), [Data([2, 2])])
+        let firstAppended = await first.allAppended()
+        let secondAppended = await second.allAppended()
+        XCTAssertEqual(firstAppended, [Data([1, 1])])
+        XCTAssertEqual(secondAppended, [Data([2, 2])])
     }
 
     // BUG 4: the initial context the prompt promises must actually be built from

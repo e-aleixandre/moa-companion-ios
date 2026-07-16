@@ -275,6 +275,9 @@ public final class PulseGuardianCoordinator {
             lines.append("sesiones:")
             for session in snapshot.sessions {
                 var parts = ["- \(session.alias): \(session.title) [\(session.state)]"]
+                if let attempting = session.attempting, !attempting.isEmpty { parts.append("intenta: \(attempting)") }
+                if let progress = session.progress, !progress.isEmpty { parts.append("va: \(progress)") }
+                if let updated = session.updated { parts.append("brief actualizado: \(ISO8601DateFormatter.moaOps.string(from: updated))") }
                 if session.pendingAsks > 0 { parts.append("\(session.pendingAsks) preguntas") }
                 if session.pendingPerms > 0 { parts.append("\(session.pendingPerms) permisos") }
                 lines.append(parts.joined(separator: ", "))

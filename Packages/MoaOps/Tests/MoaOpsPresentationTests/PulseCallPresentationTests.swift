@@ -60,6 +60,18 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertTrue(ended)
     }
 
+    func testSpeechStartedFlushesQueuedAssistantPlayback() async throws {
+        let realtime = PresentationRealtime()
+        let voice = PresentationVoice()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: voice, realtime: realtime, reconnectDelay: { _ in 0 }, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emitBargeIn()
+        await settle()
+        XCTAssertEqual(voice.playbackFlushes, 1)
+        model.endCall()
+    }
+
     private func registration() throws -> PulseDeviceRegistration { try .init(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture) }
     private func pairedStore() throws -> PresentationStore { let store = PresentationStore(); try store.saveDeviceRegistration(registration()); return store }
     private func settle() async { for _ in 0..<40 { await Task.yield() } }
@@ -78,10 +90,12 @@ private final class PresentationVoice: PulseVoiceControlling {
     var onInterruption: (() -> Void)?
     var onPlaybackFailure: (() -> Void)?
     private let captureStarts: Bool
+    private(set) var playbackFlushes = 0
     init(captureStarts: Bool = true) { self.captureStarts = captureStarts }
     func startContinuousCapture() async -> Bool { captureStarts }
     func stopContinuousCapture() {}
     func playPCM16(_: Data) {}
+    func flushPlayback() { playbackFlushes += 1 }
     func stopAll() {}
     func setMuted(_: Bool) {}
 }
@@ -114,13 +128,15 @@ private actor PresentationCall: PulseRealtimeCallControlling {
 private actor PresentationRealtime: PulseRealtimeCalling {
     private var count = 0
     private var callback: (@Sendable (PulseRealtimeCallState) -> Void)?
+    private var bargeInCallback: (@Sendable () -> Void)?
     private var lastCall: PresentationCall?
-    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext _: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio _: @escaping @Sendable (Data) -> Void) async throws -> any PulseRealtimeCallControlling {
-        count += 1; callback = onState
+    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext _: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio _: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
+        count += 1; callback = onState; bargeInCallback = onBargeIn
         let call = PresentationCall(); lastCall = call
         return call
     }
     func emit(_ event: PulseRealtimeCallState) { callback?(event) }
+    func emitBargeIn() { bargeInCallback?() }
     func beginCount() -> Int { count }
     func lastCallEnded() async -> Bool {
         guard let lastCall else { return false }

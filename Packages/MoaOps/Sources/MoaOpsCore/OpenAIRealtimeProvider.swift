@@ -109,7 +109,7 @@ public protocol PulseRealtimeCallControlling: Sendable {
 }
 
 public protocol PulseRealtimeCalling: Sendable {
-    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void) async throws -> any PulseRealtimeCallControlling
+    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling
 }
 
 /// Direct, persistent WebSocket for one hands-free call. Audio stays iPhone ↔
@@ -120,12 +120,14 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private let onState: @Sendable (PulseRealtimeCallState) -> Void
     private let onText: @Sendable (String) -> Void
     private let onAudio: @Sendable (Data) -> Void
+    private let onBargeIn: @Sendable () -> Void
     private var receiveTask: Task<Void, Never>?
     private var hasFunctionCallOutputsForCurrentResponse = false
+    private var discardingInterruptedAudio = false
     private var closed = false
 
-    init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void) {
-        self.socket = socket; self.executor = executor; self.onState = onState; self.onText = onText; self.onAudio = onAudio
+    init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) {
+        self.socket = socket; self.executor = executor; self.onState = onState; self.onText = onText; self.onAudio = onAudio; self.onBargeIn = onBargeIn
     }
 
     public func start(initialContext: String) async throws {
@@ -162,7 +164,8 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 let data = Data(text.utf8)
                 guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { throw OpenAIRealtimeClientError.decoding }
                 switch type {
-                case "response.output_audio.delta": if let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) { onAudio(audio) }
+                case "response.output_audio.delta":
+                    if !discardingInterruptedAudio, let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) { onAudio(audio) }
                 case "response.output_audio_transcript.delta", "response.output_text.delta": if let delta = event["delta"] as? String { onText(delta) }
                 case "response.function_call_arguments.done":
                     guard let callID = event["call_id"] as? String, let name = event["name"] as? String else { throw OpenAIRealtimeClientError.decoding }
@@ -170,7 +173,12 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                     let result = await executor.execute(.init(id: callID, name: name, arguments: arguments))
                     try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": callID, "output": result.output]])
                     hasFunctionCallOutputsForCurrentResponse = true
-                case "response.created": onState(.responding)
+                case "input_audio_buffer.speech_started":
+                    discardingInterruptedAudio = true
+                    onBargeIn()
+                case "response.created":
+                    discardingInterruptedAudio = false
+                    onState(.responding)
                 case "response.done":
                     if hasFunctionCallOutputsForCurrentResponse {
                         hasFunctionCallOutputsForCurrentResponse = false
@@ -211,11 +219,11 @@ public actor OpenAIRealtimeClient: PulseRealtimeCalling {
         self.socketFactory = socketFactory
     }
 
-    public func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void) async throws -> any PulseRealtimeCallControlling {
+    public func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
         let credential = try credential.validated(configuration: configuration)
         var request = URLRequest(url: credential.endpoint)
         request.setValue("Bearer \(credential.clientSecret)", forHTTPHeaderField: "Authorization")
-        let call = OpenAIRealtimeCall(socket: await socketFactory.makeSocket(request: request), executor: executor, onState: onState, onText: onText, onAudio: onAudio)
+        let call = OpenAIRealtimeCall(socket: await socketFactory.makeSocket(request: request), executor: executor, onState: onState, onText: onText, onAudio: onAudio, onBargeIn: onBargeIn)
         try await call.start(initialContext: initialContext)
         return call
     }

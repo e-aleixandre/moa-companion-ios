@@ -38,6 +38,12 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var userMessage: String?
     @Published public private(set) var isPairing = false
     @Published public private(set) var isCallActive = false
+    @Published public private(set) var isGuardianActive = false
+    @Published public private(set) var guardianState: PulseGuardianState = .idle
+    @Published public private(set) var guardianSnapshot = PulseGuardianSnapshot()
+    /// Guardián is the default UI mode. `startCall()` remains the explicit
+    /// legacy Conversation entry point for callers that rely on it.
+    @Published public var isGuardianMode = true
     @Published public var isMuted = false { didSet { voice.setMuted(isMuted) } }
 
     private let store: any PulseSecureStore
@@ -53,6 +59,8 @@ public final class PulseCallAppModel: ObservableObject {
     private var pcmDrainGeneration: UInt64?
     private var callGeneration: UInt64 = 0
     private var wantsCall = false
+    private var registration: PulseDeviceRegistration?
+    private var guardian: PulseGuardianCoordinator?
 
     public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
         self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
@@ -85,6 +93,7 @@ public final class PulseCallAppModel: ObservableObject {
         let registration = try await pairingClaim(configuration, payload, deviceLabel)
         try store.saveDeviceRegistration(registration)
         service = try serviceFactory(registration)
+        self.registration = registration
         hasPairedDevice = true; serverName = configuration.baseURL.host ?? "Moa"; state = .ready; userMessage = nil
     }
 
@@ -99,7 +108,41 @@ public final class PulseCallAppModel: ObservableObject {
         startConnection(generation: callGeneration, service: service, attempt: 0)
     }
 
+    public func startGuardian() async {
+        guard hasPairedDevice, let service, let registration, !isGuardianActive, call == nil else { return }
+        let attention = PulseAttentionWebSocket(registration: registration)
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: voice)
+        coordinator.onState = { [weak self] state in
+            Task { @MainActor [weak self] in self?.guardianState = state }
+        }
+        coordinator.onSnapshot = { [weak self] snapshot in
+            Task { @MainActor [weak self] in self?.guardianSnapshot = snapshot }
+        }
+        coordinator.onText = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self, !text.isEmpty else { return }
+                self.captions = Array((self.captions + [.init(text: text)]).suffix(20))
+            }
+        }
+        guardian = coordinator
+        await coordinator.start()
+        isGuardianActive = coordinator.state != .failed
+        if !isGuardianActive { userMessage = "No se pudo iniciar el micrófono del Guardián." }
+    }
+
+    public func stopGuardian() {
+        guardian?.stop()
+        guardian = nil
+        isGuardianActive = false
+        guardianState = .idle
+        guardianSnapshot = .init()
+    }
+
+    public func activateGuardianTalk() { guardian?.activateTalk() }
+    public func reclaimGuardianAttention() { guardian?.reclaimAttention() }
+
     public func endCall() {
+        if isGuardianActive { stopGuardian(); return }
         callGeneration &+= 1
         wantsCall = false
         connectionTask?.cancel(); connectionTask = nil
@@ -112,7 +155,7 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func disconnectAndClearLocalCredential() {
-        endCall(); let old = service; service = nil; try? store.clearDeviceRegistration(); hasPairedDevice = false; serverName = ""; captions = []; userMessage = nil; state = .disconnected
+        stopGuardian(); endCall(); let old = service; service = nil; registration = nil; try? store.clearDeviceRegistration(); hasPairedDevice = false; serverName = ""; captions = []; userMessage = nil; state = .disconnected
         Task { await old?.invalidate() }
     }
 
@@ -224,7 +267,7 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func restoreRegistration() {
-        do { guard let registration = try store.loadDeviceRegistration() else { return }; service = try serviceFactory(registration); hasPairedDevice = true; serverName = registration.baseURL.host ?? "Moa"; state = .ready }
+        do { guard let registration = try store.loadDeviceRegistration() else { return }; service = try serviceFactory(registration); self.registration = registration; hasPairedDevice = true; serverName = registration.baseURL.host ?? "Moa"; state = .ready }
         catch { try? store.clearDeviceRegistration(); userMessage = "La credencial local no está disponible. Empareja Pulse de nuevo." }
     }
 

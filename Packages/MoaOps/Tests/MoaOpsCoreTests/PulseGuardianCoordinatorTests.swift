@@ -254,8 +254,10 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await attention.emit(initMessage)
         await settle()
 
-        XCTAssertEqual(await realtime.begins(), 0, "a stale termination backlog must not open a call to narrate")
-        XCTAssertEqual(await attention.ackedTerminationList(), ["run_1"], "the stale termination must be acked silently")
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 0, "a stale termination backlog must not open a call to narrate")
+        let ackedTerminations = await attention.ackedTerminationList()
+        XCTAssertEqual(ackedTerminations, ["run_1"], "the stale termination must be acked silently")
         XCTAssertEqual(coordinator.state, .guardianStandby)
     }
 

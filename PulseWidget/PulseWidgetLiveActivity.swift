@@ -1,4 +1,5 @@
-// Target Widget Extension pendiente de crear (perfil Apple). No compilado aún por CI.
+// Widget Extension "PulseWidgetExtension" — bundle com.ealeixandre.moa.pulse.LiveActivity.
+// La "cara" del Guardián en isla dinámica / pantalla de bloqueo. No mantiene la app viva.
 import ActivityKit
 import MoaOpsCore
 import SwiftUI

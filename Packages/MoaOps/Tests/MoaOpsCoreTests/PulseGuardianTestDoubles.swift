@@ -70,13 +70,31 @@ actor MockRealtimeCall: PulseRealtimeCallControlling {
     private(set) var appendedPCM: [Data] = []
     private(set) var narrations: [String] = []
     private(set) var ended = false
+    private var ready: Bool
+    private var readyWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(startsReady: Bool = true) { self.ready = startsReady }
 
     func appendPCM16(_ pcm: Data) async throws { appendedPCM.append(pcm) }
     func requestGuardianNarration(_ event: String) async throws { narrations.append(event) }
-    func end() async { ended = true }
+    func awaitSessionReady() async {
+        if ready { return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            if ready { c.resume() } else { readyWaiters.append(c) }
+        }
+    }
+    func markReady() {
+        guard !ready else { return }
+        ready = true
+        let waiters = readyWaiters
+        readyWaiters.removeAll()
+        for w in waiters { w.resume() }
+    }
+    func end() async { ended = true; markReady() }
 
     func appendedCount() -> Int { appendedPCM.count }
     func firstAppended() -> Data? { appendedPCM.first }
+    func allAppended() -> [Data] { appendedPCM }
     func wasEnded() -> Bool { ended }
     func recordedNarrations() -> [String] { narrations }
 }
@@ -84,16 +102,19 @@ actor MockRealtimeCall: PulseRealtimeCallControlling {
 actor MockRealtime: PulseRealtimeCalling {
     private(set) var beginCount = 0
     private(set) var lastInitialContext = ""
+    private let startsReady: Bool
     private var onState: (@Sendable (PulseRealtimeCallState) -> Void)?
     private var onBargeIn: (@Sendable () -> Void)?
     private var call: MockRealtimeCall?
+
+    init(startsReady: Bool = true) { self.startsReady = startsReady }
 
     func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio _: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
         beginCount += 1
         lastInitialContext = initialContext
         self.onState = onState
         self.onBargeIn = onBargeIn
-        let call = MockRealtimeCall()
+        let call = MockRealtimeCall(startsReady: startsReady)
         self.call = call
         return call
     }

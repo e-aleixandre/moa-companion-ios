@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum PulseGuardianState: Equatable, Sendable {
     case idle, guardianStarting, guardianStandby, waking, listening, speaking, resolving, draining, attentionReconnecting, interrupted, inactive, failed
@@ -95,6 +96,12 @@ public final class PulseGuardianCoordinator {
     // Larger than the previous 8 (~300 ms): tolerate brief network hiccups
     // during warmup/flush without dropping the owner's opening words.
     private let pcmQueueCapacity = 40
+    // BUG 2: owner speech captured between activation and socket-ready. At 24 kHz
+    // mono 16-bit, ~100 frames of ~40 ms ≈ 4 s, enough to hold the phrase the
+    // owner starts right after "Pulse".
+    private var warmupBuffer: [Data] = []
+    private let warmupCapacity = 100
+    private var bufferingOwnerSpeech = false
     private var pcmTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
     private var isRunning = false
@@ -104,6 +111,8 @@ public final class PulseGuardianCoordinator {
     private var wakeAvailable = false
     private var privateRouteWasPresent = false
     private var announcementsPausedForRoute = false
+    private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
+    private var activationStart: Date?
 
     public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25) {
         self.service = service
@@ -258,7 +267,7 @@ public final class PulseGuardianCoordinator {
                     Task { @MainActor in value?.onText?(text) }
                 }, onAudio: { [weak owner] pcm in
                     let value = owner
-                    Task { @MainActor in value?.voice.playPCM16(pcm) }
+                    Task { @MainActor in value?.notePulseAudio(); value?.voice.playPCM16(pcm) }
                 }, onBargeIn: { [weak owner] in
                     let value = owner
                     Task { @MainActor in value?.voice.flushPlayback() }
@@ -266,10 +275,34 @@ public final class PulseGuardianCoordinator {
                 guard self.isRunning else { await opened.end(); return }
                 self.call = opened
                 self.isOpeningRealtime = false
+                // BUG 2: don't stream audio until the session is actually ready to
+                // receive it, then flush everything the owner said during warmup so
+                // the phrase started right after "Pulse" is not lost.
+                await opened.awaitSessionReady()
+                guard self.isRunning, self.call != nil else { return }
+                self.flushWarmupBuffer()
+                self.logActivation("socket ready")
+                self.signalListeningReady()
                 self.processQueue()
             } catch {
                 self.isOpeningRealtime = false
+                self.bufferingOwnerSpeech = false
+                self.warmupBuffer.removeAll()
                 self.state = .failed
+            }
+        }
+    }
+
+    private func flushWarmupBuffer() {
+        bufferingOwnerSpeech = false
+        guard let call, !warmupBuffer.isEmpty else { warmupBuffer.removeAll(); return }
+        let buffered = warmupBuffer
+        warmupBuffer.removeAll()
+        logActivation("first owner audio sent (\(buffered.count) buffered frames)")
+        Task { [weak self] in
+            for frame in buffered {
+                do { try await call.appendPCM16(frame) }
+                catch { await MainActor.run { self?.realtimeFailed() }; return }
             }
         }
     }
@@ -316,7 +349,16 @@ public final class PulseGuardianCoordinator {
         guard isRunning, state != .inactive else { return }
         wakeWord.stop()
         closeTask?.cancel(); closeTask = nil
-        if call == nil { openRealtimeForActivation() } else { state = .listening }
+        if call == nil {
+            // Start capturing the owner's opening words immediately; the socket
+            // is still ~1.5-3s away and this audio would otherwise be discarded.
+            bufferingOwnerSpeech = true
+            warmupBuffer.removeAll()
+            logActivation("wake fired")
+            openRealtimeForActivation()
+        } else {
+            state = .listening
+        }
     }
 
     /// Re-arms on-device wake detection after the Realtime socket closes. Without
@@ -329,9 +371,42 @@ public final class PulseGuardianCoordinator {
         }
     }
 
+    // Minimal per-activation timeline (wake -> socket ready -> first owner audio
+    // -> first Pulse audio). Concise on purpose: enough to diagnose latency on
+    // device without guessing.
+    private func logActivation(_ event: String) {
+        if activationStart == nil { activationStart = Date() }
+        let elapsed = Date().timeIntervalSince(activationStart ?? Date())
+        log.info("guardian activation +\(String(format: "%.2f", elapsed), privacy: .public)s: \(event, privacy: .public)")
+    }
+
+    private func notePulseAudio() {
+        guard activationStart != nil else { return }
+        logActivation("first Pulse audio")
+        activationStart = nil
+    }
+
+    /// The "te escucho" moment: the socket is ready and listening for the owner.
+    /// Only meaningful for owner activations (no pending narration to speak).
+    private func signalListeningReady() {
+        guard isRunning, state != .inactive, queue.isEmpty, !isNarrating else { return }
+        state = .listening
+        // TODO(ui): play a short earcon/tone here so the owner hears when to
+        // speak. Sound synthesis belongs in the redesign UI branch; the explicit
+        // .listening transition is the reliable signal in the meantime.
+    }
+
     private func receivePCM(_ pcm: Data) {
         guard isRunning else { return }
         wakeWord.appendPCM16(pcm)
+        // BUG 2: between activation and socket-ready there is no call yet. Instead
+        // of discarding the owner's opening words, capture them in a bounded
+        // buffer that is flushed once the session is ready.
+        if bufferingOwnerSpeech {
+            if warmupBuffer.count == warmupCapacity { warmupBuffer.removeFirst() }
+            warmupBuffer.append(pcm)
+            return
+        }
         guard let call else { return }
         // Raw PCM must NOT extend the hot window: capture is continuous, so keying
         // off it would keep the expensive socket open forever. Only server-VAD
@@ -365,6 +440,7 @@ public final class PulseGuardianCoordinator {
     private func closeRealtime() {
         closeTask?.cancel(); closeTask = nil
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; ownerSpeaking = false; activeAcknowledgement = nil
+        bufferingOwnerSpeech = false; warmupBuffer.removeAll()
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil
         Task { await old?.end() }
     }

@@ -89,6 +89,35 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .guardianStandby)
     }
 
+    // BUG 2: PCM captured between activation and socket-ready must be buffered
+    // and then flushed, in order, once the session is ready — never discarded.
+    func testOwnerSpeechDuringWarmupIsBufferedAndFlushedInOrder() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime(startsReady: false)
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await settle()
+
+        // Owner starts talking while the socket is still warming up.
+        let frames = [Data([1, 1]), Data([2, 2]), Data([3, 3])]
+        for frame in frames { voice.emitPCM(frame) }
+        await settle()
+        // Nothing forwarded yet: the call is not ready.
+        let beforeReady = await realtime.currentCall()?.appendedCount()
+        XCTAssertEqual(beforeReady, 0)
+
+        // Session becomes ready -> buffered frames flush in order.
+        await realtime.currentCall()?.markReady()
+        try await waitFor { (await realtime.currentCall()?.appendedCount() ?? 0) >= frames.count }
+        let appended = await realtime.currentCall()?.allAppended()
+        XCTAssertEqual(appended, frames)
+    }
+
     private func settle() async { for _ in 0..<40 { await Task.yield() } }
     private func waitFor(_ condition: @escaping () async -> Bool, timeout: TimeInterval = 3) async throws {
         let deadline = Date().addingTimeInterval(timeout)

@@ -456,6 +456,7 @@ public final class PulseGuardianCoordinator {
                 self.rearmWakeWord()
             }
         }
+    }
 
     private func disarmWakeWord() {
         wakeWordGeneration &+= 1

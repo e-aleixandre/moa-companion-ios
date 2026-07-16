@@ -289,12 +289,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4H47VQ3UP4;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MoaCompanion/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Moa Pulse";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Pulse usa la cámara solo para escanear el QR de emparejamiento de Moa.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Pulse usa el micrófono durante una llamada continua con Moa.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Pulse reconoce «Pulse» en el dispositivo para activar la voz sin enviar audio a OpenAI.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -327,12 +327,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4H47VQ3UP4;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MoaCompanion/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Moa Pulse";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Pulse usa la cámara solo para escanear el QR de emparejamiento de Moa.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Pulse usa el micrófono durante una llamada continua con Moa.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Pulse reconoce «Pulse» en el dispositivo para activar la voz sin enviar audio a OpenAI.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

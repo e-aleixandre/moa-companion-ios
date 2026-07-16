@@ -45,6 +45,9 @@ jobs:
           cp "$PROFILE" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID".mobileprovision
           echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
 
+      - name: Compute build number
+        run: echo "BUILD_NUMBER=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_ENV"
+
       - name: Archive
         run: >-
           xcodebuild archive
@@ -58,7 +61,7 @@ jobs:
           CODE_SIGN_IDENTITY="Apple Distribution"
           DEVELOPMENT_TEAM=4H47VQ3UP4
           PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
-          CURRENT_PROJECT_VERSION=${{ github.run_number }}
+          CURRENT_PROJECT_VERSION=$BUILD_NUMBER
 
       - name: Export IPA
         run: |

@@ -2,10 +2,11 @@ import Foundation
 
 /// Wire DTOs for `/api/pulse/guardian/ws` protocol v1. `init` is an
 /// authoritative snapshot: callers must replace, rather than merge, state.
-public enum PulseAttentionPriority: String, Codable, Equatable, Sendable {
-    case p0 = "P0"
-    case p1 = "P1"
-    case p2 = "P2"
+public enum PulseAttentionPriority: Int, Codable, Equatable, Sendable {
+    case p0 = 0
+    case p1 = 1
+    case p2 = 2
+    case p3 = 3
 }
 
 public enum PulseAttentionKind: String, Codable, Equatable, Sendable {
@@ -25,10 +26,10 @@ public struct PulseAttentionItem: Codable, Equatable, Sendable, Identifiable {
     public let spoken: String
     public let state: String
     public let createdAt: Date
-    public let refID: String
-    public let riskLevel: String
-    public let riskFlags: [String]
-    public let verbatim: String
+    public let refID: String?
+    public let riskLevel: String?
+    public let riskFlags: [String]?
+    public let verbatim: String?
 
     enum CodingKeys: String, CodingKey {
         case id, priority, kind, alias, spoken, state, verbatim

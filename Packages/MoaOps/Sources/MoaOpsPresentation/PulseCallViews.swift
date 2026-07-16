@@ -192,7 +192,7 @@ public struct PulseCallSceneView: View {
                 PulseInlineNotice(message)
             }
 
-            transcript
+            Spacer(minLength: 0)
 
             controls
         }
@@ -219,31 +219,6 @@ public struct PulseCallSceneView: View {
             }
             .buttonStyle(PulseIconButtonStyle(diameter: 40))
             .accessibilityLabel("Ajustes")
-        }
-    }
-
-    @ViewBuilder
-    private var transcript: some View {
-        if model.captions.isEmpty {
-            Spacer(minLength: 0)
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: PulseSpacing.xs) {
-                    ForEach(model.captions) { caption in
-                        PulseCaptionBubble(text: caption.text, isOwner: caption.isOwner)
-                    }
-                }
-                .padding(PulseSpacing.sm)
-            }
-            .frame(maxHeight: 220)
-            .background(
-                RoundedRectangle(cornerRadius: PulseRadius.sheet, style: .continuous)
-                    .fill(PulseColor.backgroundBase.opacity(0.6))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: PulseRadius.sheet, style: .continuous)
-                    .strokeBorder(PulseColor.hairline, lineWidth: 1)
-            )
         }
     }
 
@@ -326,6 +301,20 @@ public struct PulseCallSettingsView: View {
                     Text("Guardián mantiene un canal ligero con Moa y abre voz solo al anunciar o al oír «Pulse».")
                         .font(PulseFont.footnote)
                         .foregroundStyle(PulseColor.textSecondary)
+
+                    PulseSectionHeader("Registro")
+                    if model.captions.isEmpty {
+                        Text("Sin actividad todavía. Aquí quedará lo último que Pulse ha dicho y hecho, por si algo va mal.")
+                            .font(PulseFont.footnote)
+                            .foregroundStyle(PulseColor.textSecondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: PulseSpacing.xs) {
+                            ForEach(model.captions.suffix(20)) { caption in
+                                PulseCaptionBubble(text: caption.text, isOwner: caption.isOwner)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
 
                     PulseSectionHeader("Peligro")
                     Button("Desconectar y borrar credencial") { showDisconnect = true }

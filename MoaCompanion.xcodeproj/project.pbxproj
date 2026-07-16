@@ -11,12 +11,42 @@
 		A10000000000000000000003 /* MoaOpsCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000004 /* MoaOpsCore */; };
 		A10000000000000000000005 /* MoaOpsPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000006 /* MoaOpsPresentation */; };
 		A10000000000000000000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* Assets.xcassets */; };
+		A20000000000000000000001 /* PulseWidgetLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* PulseWidgetLiveActivity.swift */; };
+		A20000000000000000000003 /* MoaOpsCore in Frameworks */ = {isa = PBXBuildFile; productRef = A20000000000000000000004 /* MoaOpsCore */; };
+		A20000000000000000000006 /* PulseWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* PulseWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A20000000000000000000011 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000010 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A2000000000000000000000A;
+			remoteInfo = PulseWidgetExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A20000000000000000000010 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A20000000000000000000006 /* PulseWidgetExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000002 /* MoaCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoaCompanionApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000007 /* Moa Pulse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Moa Pulse.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A20000000000000000000002 /* PulseWidgetLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulseWidgetLiveActivity.swift; sourceTree = "<group>"; };
+		A20000000000000000000005 /* PulseWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PulseWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -29,6 +59,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A20000000000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A20000000000000000000003 /* MoaOpsCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -36,6 +74,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000000A /* MoaCompanion */,
+				A20000000000000000000008 /* PulseWidget */,
 				A1000000000000000000000B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -53,8 +92,18 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000007 /* Moa Pulse.app */,
+				A20000000000000000000005 /* PulseWidgetExtension.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000008 /* PulseWidget */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000002 /* PulseWidgetLiveActivity.swift */,
+				A20000000000000000000009 /* Info.plist */,
+			);
+			path = PulseWidget;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -67,10 +116,12 @@
 				A1000000000000000000000E /* Sources */,
 				A10000000000000000000008 /* Frameworks */,
 				A1000000000000000000000F /* Resources */,
+				A20000000000000000000010 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A20000000000000000000012 /* PBXTargetDependency */,
 			);
 			name = MoaCompanion;
 			packageProductDependencies = (
@@ -80,6 +131,26 @@
 			productName = MoaCompanion;
 			productReference = A10000000000000000000007 /* Moa Pulse.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A2000000000000000000000A /* PulseWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A2000000000000000000000F /* Build configuration list for PBXNativeTarget "PulseWidgetExtension" */;
+			buildPhases = (
+				A2000000000000000000000B /* Sources */,
+				A20000000000000000000007 /* Frameworks */,
+				A2000000000000000000000C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PulseWidgetExtension;
+			packageProductDependencies = (
+				A20000000000000000000004 /* MoaOpsCore */,
+			);
+			productName = PulseWidgetExtension;
+			productReference = A20000000000000000000005 /* PulseWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -92,6 +163,11 @@
 				LastUpgradeCheck = 1540;
 				TargetAttributes = {
 					A1000000000000000000000C = {
+						CreatedOnToolsVersion = 15.4;
+						DevelopmentTeam = 4H47VQ3UP4;
+						ProvisioningStyle = Automatic;
+					};
+					A2000000000000000000000A = {
 						CreatedOnToolsVersion = 15.4;
 						DevelopmentTeam = 4H47VQ3UP4;
 						ProvisioningStyle = Automatic;
@@ -115,6 +191,7 @@
 			projectRoot = "";
 			targets = (
 				A1000000000000000000000C /* MoaCompanion */,
+				A2000000000000000000000A /* PulseWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -125,6 +202,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000017 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A2000000000000000000000C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -139,7 +223,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A2000000000000000000000B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A20000000000000000000001 /* PulseWidgetLiveActivity.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A20000000000000000000012 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A2000000000000000000000A /* PulseWidgetExtension */;
+			targetProxy = A20000000000000000000011 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A10000000000000000000013 /* Debug */ = {
@@ -193,6 +293,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Pulse usa la cámara solo para escanear el QR de emparejamiento de Moa.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Pulse usa el micrófono durante una llamada continua con Moa.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Pulse reconoce «Pulse» en el dispositivo para activar la voz sin enviar audio a OpenAI.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIBackgroundModes = audio;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -229,6 +330,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Pulse usa la cámara solo para escanear el QR de emparejamiento de Moa.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Pulse usa el micrófono durante una llamada continua con Moa.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Pulse reconoce «Pulse» en el dispositivo para activar la voz sin enviar audio a OpenAI.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIBackgroundModes = audio;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -244,6 +346,64 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.ealeixandre.moa.pulse;
 				PRODUCT_NAME = "Moa Pulse";
 				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A2000000000000000000000D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4H47VQ3UP4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PulseWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Pulse";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ealeixandre.moa.pulse.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A2000000000000000000000E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4H47VQ3UP4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PulseWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Pulse";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ealeixandre.moa.pulse.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -272,6 +432,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		A2000000000000000000000F /* Build configuration list for PBXNativeTarget "PulseWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A2000000000000000000000D /* Debug */,
+				A2000000000000000000000E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -291,6 +460,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A10000000000000000000012 /* XCLocalSwiftPackageReference "Packages/MoaOps" */;
 			productName = MoaOpsPresentation;
+		};
+		A20000000000000000000004 /* MoaOpsCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000012 /* XCLocalSwiftPackageReference "Packages/MoaOps" */;
+			productName = MoaOpsCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -10,7 +10,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
             #"{"type":"response.done"}"#,
         ])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "initial", onState: { _ in }, onText: { _ in }, onAudio: { _ in })
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "initial", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
         await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "response.create" } }
         let frames = await socket.sentJSON
         let session = try XCTUnwrap(frames.first { $0["type"] as? String == "session.update" })
@@ -40,12 +40,35 @@ final class PulseRealtimeTransportTests: XCTestCase {
     func testCancellationClosesSocketAndNeverNeedsASecondSocket() async throws {
         let socket = FixtureSocket(events: [])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in })
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
         await call.end()
         let cancelled = await socket.wasCancelled
         let resumes = await socket.resumeCount
         XCTAssertTrue(cancelled)
         XCTAssertEqual(resumes, 1)
+    }
+
+    func testSpeechStartedFlushesPlaybackAndDropsInterruptedAudio() async throws {
+        let firstAudio = Data([1, 2]).base64EncodedString()
+        let interruptedAudio = Data([3, 4]).base64EncodedString()
+        let nextAudio = Data([5, 6]).base64EncodedString()
+        let socket = FixtureSocket(events: [
+            #"{"type":"response.created"}"#,
+            #"{"type":"response.output_audio.delta","delta":"\#(firstAudio)"}"#,
+            #"{"type":"input_audio_buffer.speech_started"}"#,
+            #"{"type":"response.output_audio.delta","delta":"\#(interruptedAudio)"}"#,
+            #"{"type":"response.created"}"#,
+            #"{"type":"response.output_audio.delta","delta":"\#(nextAudio)"}"#,
+        ])
+        let recorder = BargeInRecorder()
+        let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { audio in Task { await recorder.append(audio) } }, onBargeIn: { Task { await recorder.recordBargeIn() } })
+        await waitUntil { await recorder.hasExpectedBargeIn() }
+        let bargeInCount = await recorder.bargeInCount
+        let audio = await recorder.audio
+        XCTAssertEqual(bargeInCount, 1)
+        XCTAssertEqual(audio, [Data([1, 2]), Data([5, 6])])
+        await call.end()
     }
 
     private func credential() throws -> PulseRealtimeClientCredential {
@@ -74,6 +97,14 @@ private actor FixtureSocket: PulseRealtimeSocket {
         return events.removeFirst()
     }
     func cancel() { wasCancelled = true }
+}
+
+private actor BargeInRecorder {
+    private(set) var bargeInCount = 0
+    private(set) var audio: [Data] = []
+    func recordBargeIn() { bargeInCount += 1 }
+    func append(_ value: Data) { audio.append(value) }
+    func hasExpectedBargeIn() -> Bool { bargeInCount == 1 && audio == [Data([1, 2]), Data([5, 6])] }
 }
 
 private struct FixtureSocketFactory: PulseRealtimeSocketFactory {

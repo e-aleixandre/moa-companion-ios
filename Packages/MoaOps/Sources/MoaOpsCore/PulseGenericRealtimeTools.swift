@@ -347,6 +347,14 @@ public actor PulseGenericToolExecutor {
                 return attention
             }
             if !items.isEmpty { result["attention"] = items }
+            if let sessionActivity = session.activity {
+                var activity: [String: Any] = ["kind": sessionActivity.kind]
+                if let detail = sessionActivity.detail, !detail.isEmpty { activity["detail"] = bounded(detail, PulseGenericToolBounds.transcriptText) }
+                if let tool = sessionActivity.tool, !tool.isEmpty { activity["tool"] = bounded(tool, 128) }
+                if let model = sessionActivity.model, !model.isEmpty { activity["model"] = bounded(model, 128) }
+                if let count = sessionActivity.count { activity["count"] = count }
+                result["activity"] = activity
+            }
             return result
         }
         return ["sessions": sessionResults]

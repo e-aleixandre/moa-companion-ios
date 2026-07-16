@@ -188,6 +188,18 @@ func encodeMoaServeMutationBody<Body: Encodable>(_ body: Body, maximumBytes: Int
     return data
 }
 
+public struct MoaServeSessionActivity: Codable, Equatable, Sendable {
+    public let kind: String
+    public let detail: String?
+    public let tool: String?
+    public let model: String?
+    public let count: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, detail, tool, model, count
+    }
+}
+
 /// The public session DTO returned by `GET /api/sessions`.
 public struct MoaServeSessionInfo: Codable, Equatable, Sendable, Identifiable {
     public let id: String
@@ -209,6 +221,7 @@ public struct MoaServeSessionInfo: Codable, Equatable, Sendable, Identifiable {
     public let costUSD: Double
     public let cacheExpiresAt: Date?
     public let runStartedAt: Date?
+    public let activity: MoaServeSessionActivity?
 
     enum CodingKeys: String, CodingKey {
         case id, title, archived, state, model, provider, thinking, cwd, created, updated, error
@@ -220,6 +233,7 @@ public struct MoaServeSessionInfo: Codable, Equatable, Sendable, Identifiable {
         case costUSD = "cost_usd"
         case cacheExpiresAt = "cache_expires_at"
         case runStartedAt = "run_started_at"
+        case activity
     }
 
     public init(from decoder: Decoder) throws {
@@ -243,6 +257,7 @@ public struct MoaServeSessionInfo: Codable, Equatable, Sendable, Identifiable {
         costUSD = try container.decode(Double.self, forKey: .costUSD)
         cacheExpiresAt = try container.decodeIfPresent(Date.self, forKey: .cacheExpiresAt)
         runStartedAt = try container.decodeIfPresent(Date.self, forKey: .runStartedAt)
+        activity = try container.decodeIfPresent(MoaServeSessionActivity.self, forKey: .activity)
     }
 }
 

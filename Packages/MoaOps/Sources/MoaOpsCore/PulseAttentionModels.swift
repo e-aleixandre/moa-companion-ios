@@ -51,6 +51,7 @@ public struct PulseSessionBrief: Codable, Equatable, Sendable, Identifiable {
     public let attempting: String?
     public let progress: String?
     public let updated: Date?
+    public let activity: MoaServeSessionActivity?
 
     public var id: String { sessionID }
     enum CodingKeys: String, CodingKey {
@@ -61,6 +62,7 @@ public struct PulseSessionBrief: Codable, Equatable, Sendable, Identifiable {
         case attempting = "brief_attempting"
         case progress = "brief_progress"
         case updated = "brief_updated"
+        case activity
     }
 }
 

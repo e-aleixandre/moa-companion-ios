@@ -299,6 +299,19 @@ public final class PulseGuardianCoordinator {
                 if let updated = session.updated { parts.append("brief actualizado: \(ISO8601DateFormatter.moaOps.string(from: updated))") }
                 if session.pendingAsks > 0 { parts.append("\(session.pendingAsks) preguntas") }
                 if session.pendingPerms > 0 { parts.append("\(session.pendingPerms) permisos") }
+                if let activity = session.activity {
+                    if activity.kind == "subagent" {
+                        var current = "ahora: subagente"
+                        if let model = activity.model, !model.isEmpty { current += " \(model)" }
+                        if let detail = activity.detail, !detail.isEmpty { current += " — \(detail)" }
+                        if let count = activity.count, count > 1 { current += " (\(count) activos)" }
+                        parts.append(current)
+                    } else if activity.kind == "tool" {
+                        var current = "ahora: \(activity.tool ?? "herramienta")"
+                        if let detail = activity.detail, !detail.isEmpty { current += " \(detail)" }
+                        parts.append(current)
+                    }
+                }
                 lines.append(parts.joined(separator: ", "))
             }
         }

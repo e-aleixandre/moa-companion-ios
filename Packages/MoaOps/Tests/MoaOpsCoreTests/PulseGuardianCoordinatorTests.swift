@@ -196,7 +196,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         var snapshot = PulseGuardianSnapshot()
         snapshot.sessions = [
             try decodeSession(#"{"session_id":"s1","alias":"la del token","title":"Arreglar validación del token","state":"waiting","pending_asks":1,"pending_perms":0,"brief_attempting":"validar el token","brief_progress":"ya aisló el fallo","brief_updated":"2026-07-16T13:01:00Z"}"#),
-            try decodeSession(#"{"session_id":"s2","alias":"la del bug","title":"Bug en el parser","state":"running","pending_asks":0,"pending_perms":2}"#),
+            try decodeSession(#"{"session_id":"s2","alias":"la del bug","title":"Bug en el parser","state":"running","pending_asks":0,"pending_perms":2,"activity":{"kind":"subagent","detail":"implement phase 2","model":"terra","count":2}}"#),
         ]
         snapshot.items = [
             try decodeItem(#"{"id":"i1","priority":0,"kind":"permission","session_id":"s2","alias":"la del bug","spoken":"pide borrar un fichero","state":"pending","created_at":"2026-07-16T13:00:00Z"}"#),
@@ -210,6 +210,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertTrue(context.contains("brief actualizado: 2026-07-16T13:01:00Z"))
         XCTAssertTrue(context.contains("1 preguntas"))
         XCTAssertTrue(context.contains("2 permisos"))
+        XCTAssertTrue(context.contains("ahora: subagente terra — implement phase 2 (2 activos)"))
         XCTAssertTrue(context.contains("[permission] la del bug: pide borrar un fichero"))
     }
 

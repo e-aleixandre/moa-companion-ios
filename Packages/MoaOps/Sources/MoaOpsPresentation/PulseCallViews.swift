@@ -169,20 +169,23 @@ public struct PulseCallSceneView: View {
 
             Spacer(minLength: 0)
 
-            PulseVoiceOrb(mode: model.state.orbMode)
+            PulseVoiceOrb(mode: model.isGuardianMode ? (model.isGuardianActive ? .listening : .idle) : model.state.orbMode)
 
             VStack(spacing: PulseSpacing.xs) {
                 PulseStatusPill(
-                    model.state.spanishLabel,
-                    tone: model.state.tone,
-                    pulses: model.state.isTransient
+                    model.isGuardianMode ? model.guardianState.spanishLabel : model.state.spanishLabel,
+                    tone: model.isGuardianMode && model.isGuardianActive ? .listening : model.state.tone,
+                    pulses: !model.isGuardianMode && model.state.isTransient
                 )
-                Text(model.isCallActive
-                    ? "Conversación continua · habla con normalidad"
-                    : "Inicia una llamada para hablar con tus sesiones.")
+                Text(statusDetail)
                     .font(PulseFont.footnote)
                     .foregroundStyle(PulseColor.textSecondary)
                     .multilineTextAlignment(.center)
+                if model.isGuardianMode {
+                    Text("\(model.guardianSnapshot.sessions.count) sesiones · \(model.guardianSnapshot.items.count) avisos pendientes")
+                        .font(PulseFont.monoSmall)
+                        .foregroundStyle(PulseColor.textSecondary)
+                }
             }
 
             if let message = model.userMessage {
@@ -254,7 +257,18 @@ public struct PulseCallSceneView: View {
             .buttonStyle(PulseIconButtonStyle(tone: model.isMuted ? .danger : .neutral, diameter: 56))
             .accessibilityLabel(model.isMuted ? "Activar micrófono" : "Silenciar micrófono")
 
-            if model.isCallActive || model.isConnectingOrReconnecting {
+            if model.isGuardianMode {
+                if model.isGuardianActive {
+                    Button("Hablar") { model.activateGuardianTalk() }
+                        .buttonStyle(PulseSecondaryButtonStyle())
+                    Button("Detener") { model.stopGuardian() }
+                        .buttonStyle(PulsePrimaryButtonStyle(tone: .danger))
+                } else {
+                    Button("Activar Guardián") { Task { await model.startGuardian() } }
+                        .buttonStyle(PulsePrimaryButtonStyle())
+                        .disabled(!model.hasPairedDevice)
+                }
+            } else if model.isCallActive || model.isConnectingOrReconnecting {
                 Button("Colgar") { model.endCall() }
                     .buttonStyle(PulsePrimaryButtonStyle(tone: .danger))
             } else {
@@ -264,6 +278,13 @@ public struct PulseCallSceneView: View {
                     .opacity(model.canStartCall ? 1 : 0.5)
             }
         }
+    }
+
+    private var statusDetail: String {
+        if model.isGuardianMode {
+            return model.isGuardianActive ? "Di «Pulse» para hablar. Los avisos se anuncian solos." : "Activa el Guardián para recibir avisos de Moa."
+        }
+        return model.isCallActive ? "Conversación continua · habla con normalidad" : "Inicia una llamada para hablar con tus sesiones."
     }
 }
 
@@ -298,6 +319,13 @@ public struct PulseCallSettingsView: View {
                         .padding(.vertical, PulseSpacing.sm)
                     }
                     .pulseCard()
+
+                    PulseSectionHeader("Modo")
+                    Toggle("Modo Guardián", isOn: $model.isGuardianMode)
+                        .tint(PulseColor.ember)
+                    Text("Guardián mantiene un canal ligero con Moa y abre voz solo al anunciar o al oír «Pulse».")
+                        .font(PulseFont.footnote)
+                        .foregroundStyle(PulseColor.textSecondary)
 
                     PulseSectionHeader("Peligro")
                     Button("Desconectar y borrar credencial") { showDisconnect = true }

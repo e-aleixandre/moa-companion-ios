@@ -62,12 +62,13 @@ final class PulseRealtimeTransportTests: XCTestCase {
         ])
         let recorder = BargeInRecorder()
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
-        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { audio in Task { await recorder.append(audio) } }, onBargeIn: { Task { await recorder.recordBargeIn() } })
-        await waitUntil { await recorder.hasExpectedBargeIn() }
-        let bargeInCount = await recorder.bargeInCount
-        let audio = await recorder.audio
-        XCTAssertEqual(bargeInCount, 1)
-        XCTAssertEqual(audio, [Data([1, 2]), Data([5, 6])])
+        // onAudio/onBargeIn fire synchronously from the read loop in wire order;
+        // recording synchronously keeps that order deterministic (an intervening
+        // Task per delta would interleave and make the assertion flaky).
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { recorder.append($0) }, onBargeIn: { recorder.recordBargeIn() })
+        await waitUntil { recorder.hasExpectedBargeIn() }
+        XCTAssertEqual(recorder.bargeInCount, 1)
+        XCTAssertEqual(recorder.audio, [Data([1, 2]), Data([5, 6])])
         await call.end()
     }
 
@@ -99,12 +100,15 @@ private actor FixtureSocket: PulseRealtimeSocket {
     func cancel() { wasCancelled = true }
 }
 
-private actor BargeInRecorder {
-    private(set) var bargeInCount = 0
-    private(set) var audio: [Data] = []
-    func recordBargeIn() { bargeInCount += 1 }
-    func append(_ value: Data) { audio.append(value) }
-    func hasExpectedBargeIn() -> Bool { bargeInCount == 1 && audio == [Data([1, 2]), Data([5, 6])] }
+private final class BargeInRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _bargeInCount = 0
+    private var _audio: [Data] = []
+    var bargeInCount: Int { lock.lock(); defer { lock.unlock() }; return _bargeInCount }
+    var audio: [Data] { lock.lock(); defer { lock.unlock() }; return _audio }
+    func recordBargeIn() { lock.lock(); _bargeInCount += 1; lock.unlock() }
+    func append(_ value: Data) { lock.lock(); _audio.append(value); lock.unlock() }
+    func hasExpectedBargeIn() -> Bool { lock.lock(); defer { lock.unlock() }; return _bargeInCount == 1 && _audio == [Data([1, 2]), Data([5, 6])] }
 }
 
 private struct FixtureSocketFactory: PulseRealtimeSocketFactory {

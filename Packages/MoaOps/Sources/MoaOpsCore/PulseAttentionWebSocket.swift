@@ -7,10 +7,20 @@ public enum PulseAttentionWebSocketError: Error, Equatable, Sendable {
     case decoding
 }
 
+/// Injection boundary for the guardian channel so the coordinator can be
+/// driven with an in-memory double in tests, never a real socket.
+public protocol PulseAttentionChanneling: Actor {
+    func start(onEvent: @escaping @Sendable (PulseAttentionServerMessage) -> Void, onState: @escaping @Sendable (PulseAttentionWebSocket.State) -> Void)
+    func stop()
+    func reclaim()
+    func ack(itemID: String) async
+    func ackTermination(terminationID: String) async
+}
+
 /// The inexpensive, device-authenticated guardian channel. It owns one socket
 /// generation at a time and repairs non-inactive failures with bounded jitter.
 /// The server sends an authoritative `init` after every successful connection.
-public actor PulseAttentionWebSocket {
+public actor PulseAttentionWebSocket: PulseAttentionChanneling {
     public typealias EventHandler = @Sendable (PulseAttentionServerMessage) -> Void
     public typealias StateHandler = @Sendable (State) -> Void
 

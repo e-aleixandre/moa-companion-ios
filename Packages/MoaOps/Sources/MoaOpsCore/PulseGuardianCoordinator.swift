@@ -82,7 +82,7 @@ public final class PulseGuardianCoordinator {
 
     private let service: any PulseCallServing
     private let realtime: any PulseRealtimeCalling
-    private let attention: PulseAttentionWebSocket
+    private let attention: any PulseAttentionChanneling
     private let voice: any PulseVoiceControlling
     private let wakeWord: any PulseWakeWordDetecting
     private let hotWindow: TimeInterval
@@ -101,7 +101,7 @@ public final class PulseGuardianCoordinator {
     private var privateRouteWasPresent = false
     private var announcementsPausedForRoute = false
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: PulseAttentionWebSocket, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 5) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
@@ -306,6 +306,16 @@ public final class PulseGuardianCoordinator {
         if call == nil { openRealtimeForActivation() } else { state = .listening }
     }
 
+    /// Re-arms on-device wake detection after the Realtime socket closes. Without
+    /// this the detector stays `didFire`/inactive and "Pulse" never wakes again.
+    private func rearmWakeWord() {
+        guard isRunning, wakeAvailable, state != .inactive else { return }
+        Task { [weak self] in
+            guard let self, self.isRunning else { return }
+            _ = await self.wakeWord.start()
+        }
+    }
+
     private func receivePCM(_ pcm: Data) {
         guard isRunning else { return }
         wakeWord.appendPCM16(pcm)
@@ -336,7 +346,7 @@ public final class PulseGuardianCoordinator {
             try? await Task.sleep(nanoseconds: UInt64(self.hotWindow * 1_000_000_000))
             guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating else { return }
             self.closeRealtime()
-            if self.isRunning && self.state != .inactive { self.state = .guardianStandby }
+            if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }
         }
     }
 
@@ -360,6 +370,7 @@ public final class PulseGuardianCoordinator {
             announcementsPausedForRoute = true
             closeRealtime()
             state = .guardianStandby
+            rearmWakeWord()
         } else if announcementsPausedForRoute && privateNow {
             announcementsPausedForRoute = false
             processQueue()
@@ -375,6 +386,6 @@ public final class PulseGuardianCoordinator {
 
     private func realtimeFailed() {
         closeRealtime()
-        if isRunning && state != .inactive { state = .guardianStandby; processQueue() }
+        if isRunning && state != .inactive { state = .guardianStandby; rearmWakeWord(); processQueue() }
     }
 }

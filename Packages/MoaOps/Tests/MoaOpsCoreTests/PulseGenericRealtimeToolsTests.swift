@@ -182,7 +182,7 @@ private actor Stub: PulseGenericToolService {
     // the server's newest_first paging so we can assert the newest survive.
     private func longNewestFirstPage() -> String {
         let items = (0..<25).reversed().map { "{\"id\":\"m\($0)\",\"role\":\"assistant\",\"text\":\"t\($0)\"}" }.joined(separator: ",")
-        return "{\"session_id\":\"s1\",\"title\":\"Test\",\"order\":\"newest_first\",\"messages\":[\(items)],\"has_more\":true}"
+        return "{\"session_id\":\"s1\",\"title\":\"Test\",\"branch\":{\"source\":\"active\"},\"order\":\"newest_first\",\"messages\":[\(items)],\"has_more\":true}"
     }
     private func decode<T: Decodable>(_ string: String) throws -> T { try JSONDecoder.moaOps.decode(T.self, from: Data(string.utf8)) }
 }

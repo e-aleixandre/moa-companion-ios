@@ -61,6 +61,7 @@ public final class PulseCallAppModel: ObservableObject {
     private var wantsCall = false
     private var registration: PulseDeviceRegistration?
     private var guardian: PulseGuardianCoordinator?
+    private let guardianLiveActivity = PulseGuardianLiveActivityController()
 
     public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
         self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
@@ -113,26 +114,45 @@ public final class PulseCallAppModel: ObservableObject {
         let attention = PulseAttentionWebSocket(registration: registration)
         let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: voice, wakeWord: PulseWakeWordDetector())
         coordinator.onState = { [weak self] state in
-            Task { @MainActor [weak self] in self?.guardianState = state }
+            let model = self
+            Task { @MainActor in
+                guard let model else { return }
+                model.guardianState = state
+                model.updateGuardianLiveActivity()
+            }
         }
         coordinator.onSnapshot = { [weak self] snapshot in
-            Task { @MainActor [weak self] in self?.guardianSnapshot = snapshot }
+            let model = self
+            Task { @MainActor in
+                guard let model else { return }
+                model.guardianSnapshot = snapshot
+                model.updateGuardianLiveActivity()
+            }
         }
         coordinator.onText = { [weak self] text in
-            Task { @MainActor [weak self] in
-                guard let self, !text.isEmpty else { return }
-                self.captions = Array((self.captions + [.init(text: text)]).suffix(20))
+            let model = self
+            Task { @MainActor in
+                guard let model, !text.isEmpty else { return }
+                model.captions = Array((model.captions + [.init(text: text)]).suffix(20))
             }
         }
         guardian = coordinator
         await coordinator.start()
         isGuardianActive = coordinator.state != .failed
-        if !isGuardianActive { userMessage = "No se pudo iniciar el micrófono del Guardián." }
+        if isGuardianActive {
+            guardianLiveActivity.start(
+                attributes: .init(startedAt: Date(), ownerName: nil),
+                contentState: PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot)
+            )
+        } else {
+            userMessage = "No se pudo iniciar el micrófono del Guardián."
+        }
     }
 
     public func stopGuardian() {
         guardian?.stop()
         guardian = nil
+        guardianLiveActivity.end()
         isGuardianActive = false
         guardianState = .idle
         guardianSnapshot = .init()
@@ -229,6 +249,10 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     private func owns(_ generation: UInt64) -> Bool { wantsCall && generation == callGeneration }
+
+    private func updateGuardianLiveActivity() {
+        guardianLiveActivity.update(PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot))
+    }
 
     private func configureVoice() {
         voice.onPCM16 = { [weak self] pcm in

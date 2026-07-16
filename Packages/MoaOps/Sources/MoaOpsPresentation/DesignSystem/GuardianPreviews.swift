@@ -12,7 +12,7 @@ import SwiftUI
 /// Estados que el motor del Guardián expondrá.
 /// // TODO: cuando exista el motor, mapear su enum real a estos casos
 /// // (o sustituir este enum por el del motor si vive en MoaOpsCore).
-public enum PulseGuardianMode: Equatable, Sendable, CaseIterable {
+public enum PulseGuardianMode: Hashable, Sendable, CaseIterable {
     case watching
     case listening
     case speaking
@@ -238,9 +238,13 @@ public struct PulseGuardianAlertCard: View {
                         .buttonStyle(PulseSecondaryButtonStyle(tone: .accent))
                     }
                     if let onDismiss {
-                        Button("Descartar") { onDismiss() }
-                            .font(PulseFont.footnote.weight(.semibold))
-                            .buttonStyle(PulseSecondaryButtonStyle())
+                        Button {
+                            onDismiss()
+                        } label: {
+                            Text("Descartar")
+                                .font(PulseFont.footnote.weight(.semibold))
+                        }
+                        .buttonStyle(PulseSecondaryButtonStyle())
                     }
                 }
             }

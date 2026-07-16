@@ -108,15 +108,17 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testResponseKeepsHotWindowOpenUntilResponseCompletes() async throws {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.2)
         await coordinator.start()
         await settle()
         wake.fire()
         try await waitFor { await realtime.begins() == 1 }
         await realtime.emit(.listening)
         await realtime.emit(.responding)
+        await settle()
+        XCTAssertEqual(coordinator.state, .speaking)
 
-        try await Task.sleep(nanoseconds: 150_000_000)
+        try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertNotEqual(coordinator.state, .guardianStandby)
 
         await realtime.emit(.listening)

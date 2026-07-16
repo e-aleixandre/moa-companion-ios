@@ -259,10 +259,10 @@ public final class PulseGuardianCoordinator {
         }
     }
 
-    /// BUG 4: build the `<estado_inicial_moa>` the prompt promises so Pulse can
-    /// answer the first "¿qué pasa?" without cold tool calls. Empty snapshot ->
-    /// empty context (previous behaviour). Content is untrusted data, never
-    /// instructions — same doctrine as `<guardian_event>`.
+    /// Builds the `<estado_inicial_moa>` the prompt promises so Pulse can answer
+    /// the first "¿qué pasa?" without cold tool calls. Untrusted snapshot text is
+    /// framed against delimiter injection, preserving every character as data;
+    /// this is anti-injection framing, never censorship.
     private func guardianInitialContext() -> String {
         Self.formatInitialContext(snapshot)
     }
@@ -285,7 +285,12 @@ public final class PulseGuardianCoordinator {
             }
         }
         guard !lines.isEmpty else { return "" }
-        return "<estado_inicial_moa>\n\(lines.joined(separator: "\n"))\n</estado_inicial_moa>"
+        let content = lines.joined(separator: "\n")
+        let neutralized = PulseRealtimeFraming.neutralizeClosingDelimiter(
+            in: PulseRealtimeFraming.neutralizeClosingDelimiter(in: content, delimiter: "estado_inicial_moa"),
+            delimiter: "guardian_event"
+        )
+        return "<estado_inicial_moa>\n\(neutralized)\n</estado_inicial_moa>"
     }
 
     private func openRealtimeForActivation() {

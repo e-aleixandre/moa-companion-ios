@@ -11,7 +11,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
         ])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
         let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "initial", onState: { _ in }, onText: { _ in }, onAudio: { _ in })
-        await settle()
+        await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "response.create" } }
         let frames = await socket.sentJSON
         let session = try XCTUnwrap(frames.first { $0["type"] as? String == "session.update" })
         let payload = try XCTUnwrap(session["session"] as? [String: Any])
@@ -52,7 +52,13 @@ final class PulseRealtimeTransportTests: XCTestCase {
         try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
     }
 
-    private func settle() async { for _ in 0..<20 { await Task.yield() } }
+    private func waitUntil(_ condition: @Sendable () async -> Bool) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await condition() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
 }
 
 private actor FixtureSocket: PulseRealtimeSocket {

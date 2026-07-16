@@ -240,6 +240,51 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertTrue(context.contains("la del token"))
     }
 
+    // On (re)connect, the backlog of finished runs must NOT be narrated. They
+    // are informational; the owner asks for a catch-up when they want one. The
+    // terminations are acked silently so the server stops resending them.
+    func testInitialTerminationsAreAckedSilentlyNotNarrated() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+        let initMessage = try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó hace rato","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#)
+        await attention.emit(initMessage)
+        await settle()
+
+        XCTAssertEqual(await realtime.begins(), 0, "a stale termination backlog must not open a call to narrate")
+        XCTAssertEqual(await attention.ackedTerminationList(), ["run_1"], "the stale termination must be acked silently")
+        XCTAssertEqual(coordinator.state, .guardianStandby)
+    }
+
+    // A pending ask/permission blocks a worker, so on (re)connect it IS
+    // announced — but only once. A second init (a mere reconnection) with the
+    // same pending item must not repeat it.
+    func testInitialPendingAskIsAnnouncedOnceAcrossReconnects() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+        let initJSON = #"{"type":"init","sessions":[],"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}]}"#
+        await attention.emit(try decodeMessage(initJSON))
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.currentCall()?.markReady()
+        try await waitFor { (await realtime.currentCall()?.recordedNarrations().count ?? 0) == 1 }
+        let firstNarrations = await realtime.currentCall()?.recordedNarrations() ?? []
+        XCTAssertEqual(firstNarrations.count, 1)
+        XCTAssertTrue(firstNarrations[0].contains("pide borrar tmp"))
+
+        // Reconnection: the same pending item arrives again in a fresh init.
+        await attention.emit(try decodeMessage(initJSON))
+        await settle()
+        let afterReconnect = await realtime.currentCall()?.recordedNarrations().count ?? 0
+        XCTAssertEqual(afterReconnect, 1, "a reconnection must not re-announce an ask the owner already heard")
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }
     private func decodeMessage(_ json: String) throws -> PulseAttentionServerMessage { try JSONDecoder.moaOps.decode(PulseAttentionServerMessage.self, from: Data(json.utf8)) }

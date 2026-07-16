@@ -69,6 +69,8 @@ actor MockAttentionChannel: PulseAttentionChanneling {
 
     func emit(_ message: PulseAttentionServerMessage) { eventHandler?(message) }
     func emitState(_ state: PulseAttentionWebSocket.State) { stateHandler?(state) }
+    func ackedTerminationList() -> [String] { ackedTerminations }
+    func ackedItemList() -> [String] { ackedItems }
 }
 
 actor MockRealtimeCall: PulseRealtimeCallControlling {

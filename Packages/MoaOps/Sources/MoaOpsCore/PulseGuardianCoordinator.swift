@@ -91,6 +91,10 @@ public final class PulseGuardianCoordinator {
     private var queue: [Pending] = []
     private var queuedIDs = Set<String>()
     private var spokenTerminationIDs = Set<String>()
+    // Items (asks/permissions) already announced to the owner. Survives socket
+    // reconnects so a blocking ask that arrived while away is announced once,
+    // but a mere reconnection never re-reads the whole pending backlog.
+    private var announcedItemIDs = Set<String>()
     private var activeAcknowledgement: PulseGuardianAcknowledgement?
     private var pcmQueue: [Data] = []
     // Larger than the previous 8 (~300 ms): tolerate brief network hiccups
@@ -206,22 +210,37 @@ public final class PulseGuardianCoordinator {
             snapshot.items = message.items ?? []
             snapshot.sessions = message.sessions ?? []
             snapshot.terminations = message.terminations ?? []
+            // A (re)connection must not narrate the whole backlog that piled up
+            // while away. Terminations are informational, so on connect we mark
+            // them seen silently — the owner asks for a catch-up when they want
+            // one. Only asks/permissions block a worker, so those are announced,
+            // and only the first time (announcedItemIDs) so a mere reconnection
+            // never repeats one the owner already heard.
             for termination in snapshot.terminations {
-                if spokenTerminationIDs.contains(termination.id) {
-                    Task { await attention.ackTermination(terminationID: termination.id) }
-                } else { enqueue(.termination(termination)) }
+                if !spokenTerminationIDs.contains(termination.id) {
+                    spokenTerminationIDs.insert(termination.id)
+                }
+                Task { await attention.ackTermination(terminationID: termination.id) }
             }
-            for item in snapshot.items { enqueue(.item(item)) }
+            for item in snapshot.items where !announcedItemIDs.contains(item.id) {
+                announcedItemIDs.insert(item.id)
+                enqueue(.item(item))
+            }
         case .attention:
             if let item = message.item {
                 snapshot.items.removeAll { $0.id == item.id }
                 snapshot.items.append(item)
+                // A live ask/permission is a genuinely new event: announce it and
+                // remember it so a later reconnection's initial snapshot doesn't
+                // repeat it.
+                announcedItemIDs.insert(item.id)
                 enqueue(.item(item))
             }
         case .itemUpdate:
             if let item = message.item {
                 snapshot.items.removeAll { $0.id == item.id }
                 if item.state != "resolved" { snapshot.items.append(item) }
+                else { announcedItemIDs.remove(item.id) }
             }
         case .briefing:
             if let briefing = message.briefing {

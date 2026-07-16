@@ -152,7 +152,12 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         guard granted else { return false }
 
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+            // .mixWithOthers (not .duckOthers): the keep-alive output plays
+            // continuously through standby, so ducking would attenuate the
+            // owner's music/podcast the whole time the guardian is up, not just
+            // while Pulse speaks. Mixing lets external audio keep its volume and
+            // Pulse's voice layer on top only when it actually speaks.
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
             try session.setActive(true)
             try startEngineWithCurrentInputFormat()
             capturing = true
@@ -167,6 +172,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private func startEngineWithCurrentInputFormat() throws {
         // Enabling VPIO is an I/O-unit reconfiguration. AVAudioEngine requires
         // it to happen while stopped, before a tap reads the new input format.
+        stopKeepAlive()
         engine.stop()
         let input = engine.inputNode
         input.removeTap(onBus: 0)
@@ -183,7 +189,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     // ~50s in the background on recent releases. Idempotent and safe to call
     // after every engine (re)start, since engine.stop() also stops this node.
     private func startKeepAlive() {
-        guard engine.isRunning else { return }
+        guard engine.isRunning, !keepAliveRunning else { return }
         let frames = AVAudioFrameCount(format.sampleRate / 10) // 100 ms of silence
         guard frames > 0, let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return }
         silence.frameLength = frames // zero-filled: silent
@@ -320,6 +326,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         captureRebuildTask = nil
         captureRebuildScheduled = false
         capturedPCM.removeAll()
+        stopKeepAlive()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         onInterruption?()

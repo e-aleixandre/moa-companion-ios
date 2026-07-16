@@ -36,11 +36,16 @@ jobs:
           build
       - name: Inspect compiled Info.plist (UIBackgroundModes)
         run: |
+          set -euo pipefail
           APP=$(find "$RUNNER_TEMP/dd/Build/Products" -maxdepth 2 -name '*.app' -type d | head -1)
           echo "app bundle: $APP"
+          test -n "$APP" && test -d "$APP"
           PLIST="$APP/Info.plist"
-          echo "=== plutil dump of UIBackgroundModes ==="
-          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$PLIST" || echo "UIBackgroundModes KEY MISSING"
-          echo "=== raw type check ==="
-          plutil -extract UIBackgroundModes raw -expect array "$PLIST" || echo "NOT AN ARRAY (iOS ignores it)"
+          test -f "$PLIST"
+          echo "=== UIBackgroundModes ==="
+          plutil -extract UIBackgroundModes raw -expect array "$PLIST"
+          MODE=$(plutil -extract UIBackgroundModes.0 raw "$PLIST")
+          echo "first mode: $MODE"
+          test "$MODE" = "audio"
+
 

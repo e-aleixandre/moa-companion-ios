@@ -68,6 +68,23 @@ final class PulseGenericRealtimeToolsTests: XCTestCase {
         }
     }
 
+    func testTranscriptKeepsNewestPageWhenServerReturnsMoreThanLimit() async throws {
+        // Regression: with >20 newest-first messages, the tool must keep the
+        // NEWEST ones (m24 last) and never the oldest. The old prefix(20) bug
+        // returned m0..m19 and dropped the latest, so "read me the last message"
+        // could never reach it.
+        let executor = PulseGenericToolExecutor(service: Stub(longNewestFirst: true))
+        let result = await executor.execute(.init(id: "session", name: "read_session", arguments: Data(#"{"session_id":"s1"}"#.utf8)))
+        XCTAssertFalse(result.isError)
+        let object = try transcriptObject(result.output)
+        let ids = try XCTUnwrap((object["items"] as? [[String: Any]])?.compactMap { $0["id"] as? String })
+        XCTAssertEqual(ids.count, 20)
+        XCTAssertEqual(ids.last, "m24", "the last item must be the newest message")
+        XCTAssertEqual(ids.first, "m5", "the page must be the 20 newest, chronologically")
+        XCTAssertFalse(ids.contains("m0"), "oldest messages must be dropped, not the newest")
+        XCTAssertEqual(object["has_more"] as? Bool, true)
+    }
+
     func testReadSubagentWithoutJobIDListsDiscoverableTasks() async throws {
         let executor = PulseGenericToolExecutor(service: Stub())
         let result = await executor.execute(.init(id: "subagents", name: "read_subagent", arguments: Data(#"{"session_id":"s1"}"#.utf8)))
@@ -130,10 +147,11 @@ private actor Stub: PulseGenericToolService {
     private let actionStatusCode: Int?
     private let singleLargeItem: Bool
     private let orderedTranscript: Bool
-    init(failSend: Bool = false, actionStatusCode: Int? = nil, singleLargeItem: Bool = false, orderedTranscript: Bool = false) { self.failSend = failSend; self.actionStatusCode = actionStatusCode; self.singleLargeItem = singleLargeItem; self.orderedTranscript = orderedTranscript }
+    private let longNewestFirst: Bool
+    init(failSend: Bool = false, actionStatusCode: Int? = nil, singleLargeItem: Bool = false, orderedTranscript: Bool = false, longNewestFirst: Bool = false) { self.failSend = failSend; self.actionStatusCode = actionStatusCode; self.singleLargeItem = singleLargeItem; self.orderedTranscript = orderedTranscript; self.longNewestFirst = longNewestFirst }
     func listSessions() async throws -> [MoaServeSessionInfo] { [try session()] }
     func attention() async throws -> MoaServeAttentionResponse { try decode(#"{"items":[{"id":"a","priority":0,"kind":"permission","session_id":"s1","alias":"alias-secret","spoken":"spoken-secret","verbatim":"verbatim-secret","state":"pending","created_at":"2026-01-01T00:00:00Z","ref_id":"p1","risk_level":"high","risk_flags":["shell","write"]},{"id":"b","priority":1,"kind":"ask","session_id":"s1","alias":"empty-risk","spoken":"empty-risk","state":"pending","created_at":"2026-01-01T00:00:00Z","risk_level":"","risk_flags":[]}]}"#) }
-    func readSession(sessionID: String, limit: Int, cursor: String?) async throws -> MoaServeConversationPage { try decode(orderedTranscript ? orderedSessionPage() : page()) }
+    func readSession(sessionID: String, limit: Int, cursor: String?) async throws -> MoaServeConversationPage { try decode(longNewestFirst ? longNewestFirstPage() : (orderedTranscript ? orderedSessionPage() : page())) }
     func readToolDetail(sessionID: String, itemID: String) async throws -> MoaServeToolDetail { try decode(#"{"output":"explicit-detail","truncated":false}"#) }
     func listSubagents(sessionID: String) async throws -> MoaServeSubagentListResponse { try decode(#"{"session_id":"s1","subagents":[{"job_id":"job1","task":"restored task","model":"gpt-5","status":"running","async":true,"started_at":"2026-01-01T00:00:00Z","source":"active"}]}"#) }
     func readSubagent(sessionID: String, jobID: String, limit: Int, cursor: String?) async throws -> MoaServeSubagentPage { try decode(orderedTranscript ? orderedSubagentPage() : #"{"session_id":"s1","job_id":"job1","order":"newest_first","messages":[{"id":"t","role":"tool","text":"tool-output-detail","tool":"bash","status":"ok"}],"has_more":false}"#) }
@@ -159,6 +177,12 @@ private actor Stub: PulseGenericToolService {
     }
     private func orderedSubagentPage() -> String {
         #"{"session_id":"s1","job_id":"job1","order":"newest_first","messages":[{"id":"sub-newest","role":"assistant","text":"newest"},{"id":"sub-oldest","role":"user","text":"oldest"}],"has_more":false}"#
+    }
+    // 25 messages, newest first (id "m24" is newest, "m0" is oldest), mirroring
+    // the server's newest_first paging so we can assert the newest survive.
+    private func longNewestFirstPage() -> String {
+        let items = (0..<25).reversed().map { "{\"id\":\"m\($0)\",\"role\":\"assistant\",\"text\":\"t\($0)\"}" }.joined(separator: ",")
+        return "{\"session_id\":\"s1\",\"title\":\"Test\",\"order\":\"newest_first\",\"messages\":[\(items)],\"has_more\":true}"
     }
     private func decode<T: Decodable>(_ string: String) throws -> T { try JSONDecoder.moaOps.decode(T.self, from: Data(string.utf8)) }
 }

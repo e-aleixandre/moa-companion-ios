@@ -377,8 +377,14 @@ public actor PulseGenericToolExecutor {
     }
 
     private func transcriptResult(sessionID: String, title: String?, jobID: String?, order: String, messages source: [MoaServeConversationItem], nextCursor: String?, hasMore: Bool) -> [String: Any] {
-        let chronological = order == "newest_first" ? Array(source.reversed()) : source
-        let messages: [[String: Any]] = chronological.prefix(20).map { item in
+        // The server pages newest-first. Keep the most recent page-worth and
+        // present it chronologically so the last item is genuinely the newest.
+        // Taking prefix(20) of the chronological list would drop the newest
+        // messages — that was the "reads an older message, never the latest" bug.
+        let ordered: [MoaServeConversationItem] = order == "newest_first"
+            ? Array(source.prefix(20).reversed())
+            : Array(source.suffix(20))
+        let messages: [[String: Any]] = ordered.map { item in
             var result: [String: Any] = ["id": item.id, "role": item.role.rawValue]
             if let timestamp = item.timestamp { result["at"] = ISO8601DateFormatter.moaOps.string(from: timestamp) }
             if item.role != .tool, let text = item.text { result["text"] = bounded(text, PulseGenericToolBounds.transcriptText) }
@@ -392,7 +398,7 @@ public actor PulseGenericToolExecutor {
             if item.truncated { result["truncated"] = true }
             return result
         }
-        var result: [String: Any] = ["session_id": sessionID, "order": "chronological", "items": messages, "has_more": hasMore || chronological.count > messages.count]
+        var result: [String: Any] = ["session_id": sessionID, "order": "chronological", "items": messages, "has_more": hasMore || source.count > ordered.count]
         if let title { result["title"] = bounded(title, PulseGenericToolBounds.title) }
         if let jobID { result["job_id"] = jobID }
         if let cursor = nextCursor { result["next_cursor"] = bounded(cursor, PulseGenericToolBounds.cursor) }

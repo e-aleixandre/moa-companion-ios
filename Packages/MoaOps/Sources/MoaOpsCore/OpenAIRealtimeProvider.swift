@@ -62,7 +62,7 @@ public enum OpenAIRealtimePCM16 {
     }
 }
 
-public enum PulseRealtimeCallState: Equatable, Sendable { case connecting, listening, responding, ended, failed }
+public enum PulseRealtimeCallState: Equatable, Sendable { case connecting, listening, responding, speechStarted, speechStopped, ended, failed }
 
 /// Narrow WebSocket boundary so the Realtime wire protocol is fixture-testable
 /// without opening a network connection.
@@ -106,11 +106,13 @@ public struct URLSessionPulseRealtimeSocketFactory: PulseRealtimeSocketFactory, 
 public protocol PulseRealtimeCallControlling: Sendable {
     func appendPCM16(_ pcm: Data) async throws
     func requestGuardianNarration(_ event: String) async throws
+    func awaitSessionReady() async
     func end() async
 }
 
 public extension PulseRealtimeCallControlling {
     func requestGuardianNarration(_: String) async throws { throw OpenAIRealtimeClientError.invalidResponse }
+    func awaitSessionReady() async {}
 }
 
 public protocol PulseRealtimeCalling: Sendable {
@@ -130,6 +132,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private var hasFunctionCallOutputsForCurrentResponse = false
     private var discardingInterruptedAudio = false
     private var closed = false
+    private var currentAudioItemID: String?
+    private var playedAudioBytes = 0
+    private var sessionReady = false
+    private var sessionReadyWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) {
         self.socket = socket; self.executor = executor; self.onState = onState; self.onText = onText; self.onAudio = onAudio; self.onBargeIn = onBargeIn
@@ -140,13 +146,30 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
         try await send(["type": "session.update", "session": [
             "type": "realtime", "instructions": PulseRealtimePrompt.system,
             "output_modalities": ["audio"], "tools": try toolJSONArray(), "tool_choice": "auto",
-            "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": ["type": "semantic_vad"]], "output": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "voice": "marin"]],
+            "audio": ["input": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "turn_detection": ["type": "semantic_vad"], "transcription": ["model": "gpt-4o-mini-transcribe"]], "output": ["format": ["type": "audio/pcm", "rate": OpenAIRealtimePCM16.sampleRate], "voice": "marin"]],
         ]])
         if !initialContext.isEmpty {
             try await send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": initialContext]]]])
         }
         onState(.listening)
+        markSessionReady()
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
+    }
+
+    public func awaitSessionReady() async {
+        if sessionReady || closed { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            if sessionReady || closed { continuation.resume(); return }
+            sessionReadyWaiters.append(continuation)
+        }
+    }
+
+    private func markSessionReady() {
+        guard !sessionReady else { return }
+        sessionReady = true
+        let waiters = sessionReadyWaiters
+        sessionReadyWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     public func appendPCM16(_ pcm: Data) async throws {
@@ -165,6 +188,7 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     public func end() async {
         guard !closed else { return }
         closed = true
+        markSessionReady()
         receiveTask?.cancel()
         await socket.cancel()
         onState(.ended)
@@ -177,9 +201,18 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 let data = Data(text.utf8)
                 guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { throw OpenAIRealtimeClientError.decoding }
                 switch type {
+                case "session.created", "session.updated":
+                    markSessionReady()
                 case "response.output_audio.delta":
-                    if !discardingInterruptedAudio, let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) { onAudio(audio) }
+                    if let itemID = event["item_id"] as? String { currentAudioItemID = itemID }
+                    if !discardingInterruptedAudio, let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) {
+                        playedAudioBytes += audio.count
+                        onAudio(audio)
+                    }
                 case "response.output_audio_transcript.delta", "response.output_text.delta": if let delta = event["delta"] as? String { onText(delta) }
+                case "conversation.item.input_audio_transcription.delta", "conversation.item.input_audio_transcription.completed":
+                    // Owner-side transcription for the caption log / diagnostics.
+                    if let transcript = (event["transcript"] as? String) ?? (event["delta"] as? String), !transcript.isEmpty { onText(transcript) }
                 case "response.function_call_arguments.done":
                     guard let callID = event["call_id"] as? String, let name = event["name"] as? String else { throw OpenAIRealtimeClientError.decoding }
                     let arguments = Data((event["arguments"] as? String ?? "{}").utf8)
@@ -188,11 +221,20 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                     hasFunctionCallOutputsForCurrentResponse = true
                 case "input_audio_buffer.speech_started":
                     discardingInterruptedAudio = true
+                    // BUG 5: tell the server how much of the in-progress audio the
+                    // owner actually heard so it never assumes the rest was spoken.
+                    await truncateCurrentAudioResponse()
                     onBargeIn()
+                    onState(.speechStarted)
+                case "input_audio_buffer.speech_stopped":
+                    onState(.speechStopped)
                 case "response.created":
                     discardingInterruptedAudio = false
+                    playedAudioBytes = 0
                     onState(.responding)
                 case "response.done":
+                    currentAudioItemID = nil
+                    playedAudioBytes = 0
                     if hasFunctionCallOutputsForCurrentResponse {
                         hasFunctionCallOutputsForCurrentResponse = false
                         try await send(["type": "response.create", "response": ["output_modalities": ["audio"]]])
@@ -206,6 +248,19 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 return
             }
         }
+    }
+
+    private func truncateCurrentAudioResponse() async {
+        guard let itemID = currentAudioItemID else { return }
+        // audio_end_ms must reflect what the owner actually heard. We approximate
+        // it from the PCM bytes handed to playback (24 kHz mono, 16-bit = 48 B/ms).
+        // TODO: use the real playhead once the audio engine exposes drained ms;
+        // this over-counts by whatever is still buffered but not yet audible.
+        let bytesPerMillisecond = OpenAIRealtimePCM16.sampleRate * 2 / 1_000
+        let audioEndMs = bytesPerMillisecond > 0 ? playedAudioBytes / bytesPerMillisecond : 0
+        currentAudioItemID = nil
+        playedAudioBytes = 0
+        try? await send(["type": "conversation.item.truncate", "item_id": itemID, "content_index": 0, "audio_end_ms": audioEndMs])
     }
 
     private func send(_ object: [String: Any]) async throws {

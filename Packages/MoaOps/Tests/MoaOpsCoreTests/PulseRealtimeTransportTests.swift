@@ -72,6 +72,37 @@ final class PulseRealtimeTransportTests: XCTestCase {
         await call.end()
     }
 
+    func testSpeechStartedTruncatesInProgressAudioResponse() async throws {
+        let audio = Data([1, 2, 3, 4]).base64EncodedString()
+        let socket = FixtureSocket(events: [
+            #"{"type":"response.created"}"#,
+            #"{"type":"response.output_audio.delta","item_id":"item-audio-1","delta":"\#(audio)"}"#,
+            #"{"type":"input_audio_buffer.speech_started"}"#,
+        ])
+        let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
+        await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "conversation.item.truncate" } }
+        let frames = await socket.sentJSON
+        let truncate = try XCTUnwrap(frames.first { $0["type"] as? String == "conversation.item.truncate" })
+        XCTAssertEqual(truncate["item_id"] as? String, "item-audio-1")
+        XCTAssertEqual(truncate["content_index"] as? Int, 0)
+        XCTAssertNotNil(truncate["audio_end_ms"])
+        await call.end()
+    }
+
+    func testSessionEnablesInputAudioTranscription() async throws {
+        let socket = FixtureSocket(events: [])
+        let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _ in }, onBargeIn: {})
+        await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "session.update" } }
+        let frames = await socket.sentJSON
+        let session = try XCTUnwrap(frames.first { $0["type"] as? String == "session.update" })
+        let payload = try XCTUnwrap(session["session"] as? [String: Any])
+        let input = try XCTUnwrap((payload["audio"] as? [String: Any])?["input"] as? [String: Any])
+        XCTAssertNotNil(input["transcription"])
+        await call.end()
+    }
+
     private func credential() throws -> PulseRealtimeClientCredential {
         try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini","model":"gpt-realtime-2.1-mini"}"#.utf8))
     }

@@ -92,11 +92,15 @@ public final class PulseGuardianCoordinator {
     private var spokenTerminationIDs = Set<String>()
     private var activeAcknowledgement: PulseGuardianAcknowledgement?
     private var pcmQueue: [Data] = []
+    // Larger than the previous 8 (~300 ms): tolerate brief network hiccups
+    // during warmup/flush without dropping the owner's opening words.
+    private let pcmQueueCapacity = 40
     private var pcmTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
     private var isRunning = false
     private var isOpeningRealtime = false
     private var isNarrating = false
+    private var ownerSpeaking = false
     private var wakeAvailable = false
     private var privateRouteWasPresent = false
     private var announcementsPausedForRoute = false
@@ -278,6 +282,15 @@ public final class PulseGuardianCoordinator {
         case .listening:
             if isNarrating { state = .draining }
             else { state = .listening; scheduleCloseAfterHotWindow() }
+        case .speechStarted:
+            // Real owner voice (server VAD): keep the call open through the turn.
+            ownerSpeaking = true
+            closeTask?.cancel(); closeTask = nil
+            if !isNarrating { state = .listening }
+        case .speechStopped:
+            // Only genuine silence after real speech may start the close timer.
+            ownerSpeaking = false
+            if !isNarrating, queue.isEmpty { scheduleCloseAfterHotWindow() }
         case .ended, .failed: realtimeFailed()
         }
     }
@@ -320,11 +333,10 @@ public final class PulseGuardianCoordinator {
         guard isRunning else { return }
         wakeWord.appendPCM16(pcm)
         guard let call else { return }
-        // Any owner speech extends the hot window; never tear down a socket in
-        // the middle of a turn merely because the previous response was quiet.
-        closeTask?.cancel()
-        closeTask = nil
-        if pcmQueue.count == 8 { pcmQueue.removeFirst() }
+        // Raw PCM must NOT extend the hot window: capture is continuous, so keying
+        // off it would keep the expensive socket open forever. Only server-VAD
+        // speech (speechStarted/speechStopped) governs the call lifetime.
+        if pcmQueue.count == pcmQueueCapacity { pcmQueue.removeFirst() }
         pcmQueue.append(pcm)
         guard pcmTask == nil else { return }
         pcmTask = Task { [weak self] in
@@ -339,12 +351,12 @@ public final class PulseGuardianCoordinator {
     }
 
     private func scheduleCloseAfterHotWindow() {
-        guard call != nil, !isNarrating else { return }
+        guard call != nil, !isNarrating, !ownerSpeaking else { return }
         closeTask?.cancel()
         closeTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(self.hotWindow * 1_000_000_000))
-            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating else { return }
+            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.ownerSpeaking else { return }
             self.closeRealtime()
             if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }
         }
@@ -352,7 +364,7 @@ public final class PulseGuardianCoordinator {
 
     private func closeRealtime() {
         closeTask?.cancel(); closeTask = nil
-        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; activeAcknowledgement = nil
+        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; ownerSpeaking = false; activeAcknowledgement = nil
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil
         Task { await old?.end() }
     }

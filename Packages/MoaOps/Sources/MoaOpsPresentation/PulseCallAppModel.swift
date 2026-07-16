@@ -213,6 +213,10 @@ public final class PulseCallAppModel: ObservableObject {
         case .connecting: state = .connecting
         case .listening: state = .listening
         case .responding: state = .responding
+        case .speechStarted, .speechStopped:
+            // Conversation mode already streams continuously; owner-speech
+            // boundaries only matter for the Guardián hot window.
+            break
         case .ended, .failed:
             // Retire this socket generation before ending it: `end()` emits an
             // ended callback and must not schedule a duplicate reconnect.

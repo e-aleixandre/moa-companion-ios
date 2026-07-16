@@ -5,169 +5,51 @@ import AVFoundation
 import UIKit
 #endif
 
-/// The app host selects only pairing or the Call Moa scene. Legacy dashboard
-/// views remain internal implementation history and are not part of this root.
 public struct PulseCallRootView: View {
     @ObservedObject private var model: PulseCallAppModel
-    @Environment(\.scenePhase) private var scenePhase
-
     public init(model: PulseCallAppModel) { self.model = model }
-
     public var body: some View {
-        Group {
-            switch model.rootDestination {
-            case .pairing:
-                PulsePairingView(model: model)
-            case .call:
-                PulseCallSceneView(model: model)
-            }
-        }
-        .task { await model.start() }
-        .onChange(of: scenePhase) { phase in
-            model.setForegroundActive(phase == .active)
-        }
+        Group { model.rootDestination == .pairing ? AnyView(PulsePairingView(model: model)) : AnyView(PulseCallSceneView(model: model)) }
+            .task { await model.start() }
     }
 }
 
 public struct PulsePairingView: View {
     @ObservedObject var model: PulseCallAppModel
-    @State private var scannedQRCode: String?
-    @State private var scannedHost = ""
-    @State private var scannerMessage: String?
-    @State private var qrDeviceLabel = "iPhone Pulse"
-    @State private var manualBaseURL = ""
-    @State private var manualPairingPayload = ""
-    @State private var manualDeviceLabel = "iPhone Pulse"
+    @State private var baseURL = ""
+    @State private var payload = ""
+    @State private var label = "iPhone Pulse"
     @State private var showingScanner = false
-
+    @State private var scannerMessage: String?
     public init(model: PulseCallAppModel) { self.model = model }
-
     public var body: some View {
-        ZStack {
-            LinearGradient(colors: [.indigo.opacity(0.92), .teal.opacity(0.68), .black.opacity(0.92)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                .ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    Spacer(minLength: 36)
-                    Image(systemName: "waveform.circle.fill")
-                        .font(.system(size: 62))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.white)
-                    Text("Llamar a Moa")
-                        .font(.system(.largeTitle, design: .rounded).bold())
-                        .foregroundStyle(.white)
-                    Text("Pulse es tu terminal de voz. Escanea el QR de emparejamiento que muestra Moa.")
-                        .foregroundStyle(.white.opacity(0.78))
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text("Emparejar este dispositivo")
-                            .font(.headline)
-#if os(iOS)
-                        Button("Escanear QR de Moa", systemImage: "qrcode.viewfinder") {
-                            scannerMessage = nil
-                            showingScanner = true
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .frame(maxWidth: .infinity)
-#else
-                        Text("El escáner QR está disponible en iPhone.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            Spacer(); Image(systemName: "waveform.circle.fill").font(.system(size: 64)).foregroundStyle(.tint)
+            Text("Llamar a Moa").font(.largeTitle.bold())
+            Text("Escanea el QR de Moa o introduce el código temporal manualmente.")
+#if os(iOS) && canImport(AVFoundation)
+            Button("Escanear QR de Moa", systemImage: "qrcode.viewfinder") { scannerMessage = nil; showingScanner = true }
+                .buttonStyle(.borderedProminent).controlSize(.large)
 #endif
-                        if let scannedQRCode {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Label("QR leído", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                Text("Moa en \(scannedHost)")
-                                    .font(.subheadline.weight(.semibold))
-                                TextField("Nombre de este iPhone", text: $qrDeviceLabel)
-                                    .textFieldStyle(.roundedBorder)
-                                    .autocorrectionDisabled()
-                                Button(model.isPairing ? "Emparejando…" : "Confirmar emparejamiento") {
-                                    Task {
-                                        await model.claimQRCode(scannedQRCode, deviceLabel: qrDeviceLabel)
-                                        self.scannedQRCode = nil
-                                        scannedHost = ""
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.large)
-                                .frame(maxWidth: .infinity)
-                                .disabled(model.isPairing || qrDeviceLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            }
-                            .padding(14)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        }
-
-                        if let scannerMessage {
-                            Text(scannerMessage)
-                                .font(.footnote)
-                                .foregroundStyle(.orange)
-                        }
-
-                        DisclosureGroup("Introducir datos manualmente") {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("No necesitas un token de Serve. Este método usa la URL de Moa y un código temporal de un solo uso generado por el panel Pair Pulse de Serve.")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                TextField("https://moa.example", text: $manualBaseURL)
-                                    .textFieldStyle(.roundedBorder)
-                                    .autocorrectionDisabled()
-#if os(iOS)
-                                    .textInputAutocapitalization(.never)
-                                    .keyboardType(.URL)
-#endif
-                                TextField("Código temporal de emparejamiento (moa-pair-v1:…)", text: $manualPairingPayload, axis: .vertical)
-                                    .textFieldStyle(.roundedBorder)
-                                    .lineLimit(1...3)
-                                    .autocorrectionDisabled()
-#if os(iOS)
-                                    .textInputAutocapitalization(.never)
-#endif
-                                if manualPairingPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    Text("En Serve: abre Pair Pulse, crea un emparejamiento y despliega «Introducir manualmente» para copiar este código. No pegues un token de Serve aquí.")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
-                                TextField("Nombre de este iPhone", text: $manualDeviceLabel)
-                                    .textFieldStyle(.roundedBorder)
-                                    .autocorrectionDisabled()
-                                Button(model.isPairing ? "Emparejando…" : "Emparejar con código temporal") {
-                                    Task {
-                                        await model.claim(baseURLText: manualBaseURL, pairingPayloadText: manualPairingPayload, deviceLabel: manualDeviceLabel)
-                                        manualPairingPayload = ""
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .frame(maxWidth: .infinity)
-                                .disabled(model.isPairing || manualBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manualPairingPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manualDeviceLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            }
-                        }
-                        Text("Pulse exige HTTPS salvo para localhost o 127.x directo. La credencial del dispositivo se guarda solo en el Llavero; no usamos tokens en URL ni cookies de Serve.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(20)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-                    if let message = model.userMessage { PulseCallNotice(message: message) }
-                }
-                .padding(24)
-                .frame(maxWidth: 620, alignment: .leading)
+            if let scannerMessage { Text(scannerMessage).foregroundStyle(.red).font(.footnote) }
+            DisclosureGroup("Introducir datos manualmente") {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("https://moa.example", text: $baseURL).textFieldStyle(.roundedBorder).autocorrectionDisabled()
+                    TextField("Código moa-pair-v1:…", text: $payload).textFieldStyle(.roundedBorder).autocorrectionDisabled()
+                    TextField("Nombre del dispositivo", text: $label).textFieldStyle(.roundedBorder)
+                    Button(model.isPairing ? "Emparejando…" : "Emparejar") { Task { await model.claim(baseURLText: baseURL, pairingPayloadText: payload, deviceLabel: label); payload = "" } }
+                        .buttonStyle(.bordered).disabled(model.isPairing || baseURL.isEmpty || payload.isEmpty || label.isEmpty)
+                }.padding(.top, 8)
             }
+            if let message = model.userMessage { Text(message).foregroundStyle(.red).font(.footnote) }
+            Spacer()
         }
+        .padding().frame(maxWidth: 560, alignment: .leading)
 #if os(iOS) && canImport(AVFoundation)
         .sheet(isPresented: $showingScanner) {
             PulseQRScannerView { value in
-                do {
-                    let envelope = try PulsePairingEnvelope(parsing: value)
-                    scannedQRCode = value
-                    scannedHost = envelope.configuration.baseURL.host ?? "Moa"
-                    scannerMessage = nil
-                } catch {
-                    scannedQRCode = nil
-                    scannedHost = ""
-                    scannerMessage = "El QR no es un emparejamiento de Pulse válido. Escanea el QR mostrado por Moa."
-                }
+                do { _ = try PulsePairingEnvelope(parsing: value); Task { await model.claimQRCode(value, deviceLabel: label) } }
+                catch { scannerMessage = "El QR no es un emparejamiento de Pulse válido." }
                 showingScanner = false
             }
         }
@@ -177,402 +59,64 @@ public struct PulsePairingView: View {
 
 public struct PulseCallSceneView: View {
     @ObservedObject var model: PulseCallAppModel
-    @State private var captionsExpanded = false
-    @State private var showingTextEntry = false
-    @State private var textEntry = ""
-    @State private var showingProvider = false
-    @State private var showingDisconnect = false
-
+    @State private var showDisconnect = false
     public init(model: PulseCallAppModel) { self.model = model }
-
     public var body: some View {
-        ZStack {
-            LinearGradient(colors: backgroundColors, startPoint: .topLeading, endPoint: .bottomTrailing)
-                .ignoresSafeArea()
-            VStack(spacing: 18) {
-                header
-                Spacer(minLength: 4)
-                PulsePresenceOrb(state: model.state)
-                    .accessibilityLabel("Presencia de Pulse: \(model.state.spanishLabel)")
-                Text(model.state.spanishLabel)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-                if model.voiceUnavailable {
-                    Label("La voz no está disponible aquí. Usa el campo de texto.", systemImage: "mic.slash")
-                        .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.82))
-                        .multilineTextAlignment(.center)
+        VStack(spacing: 20) {
+            HStack { VStack(alignment: .leading) { Text("Pulse").font(.title.bold()); Text(model.serverName).foregroundStyle(.secondary) }; Spacer(); Button("Desconectar", role: .destructive) { showDisconnect = true } }
+            Spacer()
+            Image(systemName: symbol).font(.system(size: 80)).foregroundStyle(model.isCallActive ? .green : .tint)
+            Text(model.state.spanishLabel).font(.title2.weight(.semibold))
+            Text(model.isCallActive ? "Conversación continua · habla con normalidad" : "Inicia una llamada para hablar con tus sesiones.").foregroundStyle(.secondary)
+            if let message = model.userMessage { Text(message).font(.footnote).foregroundStyle(.red) }
+            ScrollView { LazyVStack(alignment: .leading, spacing: 8) { ForEach(model.captions) { caption in Text(caption.text).frame(maxWidth: .infinity, alignment: caption.isOwner ? .trailing : .leading).padding(10).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12)) } } }.frame(maxHeight: 220)
+            HStack(spacing: 18) {
+                Button { model.isMuted.toggle() } label: { Image(systemName: model.isMuted ? "mic.slash.fill" : "mic.fill").frame(width: 52, height: 52) }
+                    .accessibilityLabel(model.isMuted ? "Activar micrófono" : "Silenciar micrófono")
+                    .buttonStyle(.bordered)
+                if model.isCallActive || model.isConnectingOrReconnecting {
+                    Button("Colgar") { model.endCall() }.buttonStyle(.borderedProminent).controlSize(.large)
+                } else {
+                    Button("Llamar a Pulse") { model.startCall() }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canStartCall)
                 }
-                if let review = model.pendingReview { reviewCard(review) }
-                if let message = model.userMessage { PulseCallNotice(message: message) }
-                Spacer(minLength: 4)
-                captions
-                controls
-            }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 16)
-            .frame(maxWidth: 680)
-        }
-        .sheet(isPresented: $showingProvider) { PulseProviderConfigurationView(model: model) }
-        .alert("Desconectar Pulse", isPresented: $showingDisconnect) {
-            Button("Borrar credencial local", role: .destructive) { model.disconnectAndClearLocalCredential() }
-            Button("Cancelar", role: .cancel) {}
-        } message: {
-            Text("Esto borra la credencial de este iPhone del Llavero. Para revocar el dispositivo en Serve, usa Moa como propietario.")
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Pulse")
-                    .font(.title2.bold())
-                    .foregroundStyle(.white)
-                Text("Moa · \(model.serverName) · \(model.freshnessLabel)")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
             }
             Spacer()
-            Menu {
-                Button("Actualizar", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
-                Button("Acceso de proveedor", systemImage: "waveform.badge.magnifyingglass") { showingProvider = true }
-                Menu("Modo \(model.privacyMode.spanishLabel)") {
-                    ForEach(PulsePrivacyMode.allCases, id: \.self) { mode in
-                        Button(mode.spanishLabel) { model.setPrivacyMode(mode) }
-                    }
-                }
-                Button("Desconectar este iPhone", systemImage: "iphone.slash", role: .destructive) { showingDisconnect = true }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.title2)
-                    .foregroundStyle(.white)
-                    .padding(8)
-            }
-            .accessibilityLabel("Opciones de Pulse")
-        }
+        }.padding().alert("Desconectar Pulse", isPresented: $showDisconnect) { Button("Borrar credencial local", role: .destructive) { model.disconnectAndClearLocalCredential() }; Button("Cancelar", role: .cancel) {} } message: { Text("Para usar Pulse otra vez tendrás que emparejar este iPhone.") }
     }
-
-    private var captions: some View {
-        DisclosureGroup(isExpanded: $captionsExpanded) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(model.captions) { caption in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(caption.isOwner ? "Tú" : caption.provenance.spanishLabel)
-                                .font(.caption.bold())
-                                .foregroundStyle(caption.isOwner ? .teal : .white.opacity(0.72))
-                            Text(caption.text)
-                                .font(.subheadline)
-                                .foregroundStyle(.white)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                        .background(.white.opacity(caption.isOwner ? 0.13 : 0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                }
-            }
-            .frame(maxHeight: 180)
-            .padding(.top, 8)
-        } label: {
-            HStack {
-                Label("Subtítulos", systemImage: "captions.bubble")
-                Spacer()
-                Text(model.captions.isEmpty ? "Sin turnos" : "\(model.captions.count) turnos")
-                    .font(.caption)
-            }
-            .foregroundStyle(.white.opacity(0.9))
-        }
-        .padding(12)
-        .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .accessibilityElement(children: .contain)
-    }
-
-    private var controls: some View {
-        VStack(spacing: 11) {
-            if showingTextEntry {
-                HStack(alignment: .bottom) {
-                    TextField("Pregunta o instrucción para Pulse", text: $textEntry, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...3)
-                    Button("Enviar") {
-                        let submitted = textEntry
-                        textEntry = ""
-                        showingTextEntry = false
-                        Task { await model.submitText(submitted) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(textEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            HStack(spacing: 14) {
-                Button {
-                    showingTextEntry.toggle()
-                } label: {
-                    Image(systemName: "keyboard")
-                        .frame(width: 48, height: 48)
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
-                .foregroundStyle(.white)
-                .accessibilityLabel("Escribir a Pulse")
-
-                PulsePTTButton(isListening: model.isPTTListening, disabled: !model.canUsePushToTalk) {
-                    model.beginPushToTalk()
-                } onRelease: {
-                    model.endPushToTalk()
-                }
-
-                Button {
-                    model.isMuted.toggle()
-                } label: {
-                    Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .frame(width: 48, height: 48)
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
-                .foregroundStyle(.white)
-                .accessibilityLabel(model.isMuted ? "Activar voz" : "Silenciar voz")
-
-                Button {
-                    model.stop()
-                } label: {
-                    Image(systemName: "stop.fill")
-                        .frame(width: 48, height: 48)
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
-                .foregroundStyle(.white)
-                .accessibilityLabel("Detener escucha y respuesta")
-            }
-        }
-    }
-
-    private func reviewCard(_ review: PulsePendingReview) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Revisión inmutable de Moa", systemImage: "checkmark.shield")
-                .font(.headline)
-            Text("Destino: \(review.review.target.title ?? review.review.target.id)")
-            if let scope = review.review.scope { Text("Alcance: \(scope)") }
-            if let text = review.review.text { Text("Texto: \(text)") }
-            if let tool = review.review.tool { Text("Herramienta: \(tool)") }
-            Text(review.review.consequence)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            HStack {
-                Button("Cancelar", role: .cancel) { model.cancelReview() }
-                    .buttonStyle(.bordered)
-                Button("Confirmar") { Task { await model.confirmCurrentReview() } }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canConfirmCurrentReview)
-            }
-            Text(model.canConfirmCurrentReview
-                ? "La confirmación solo envía {} a Moa para esta revisión. Nunca confirma que el trabajo posterior haya terminado."
-                : "Moa no está actualizado. Esta revisión permanece visible, pero Pulse no puede confirmarla hasta actualizar.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .accessibilityElement(children: .contain)
-    }
-
-    private var backgroundColors: [Color] {
-        switch model.state {
-        case .listening: [.teal.opacity(0.9), .blue.opacity(0.85), .black]
-        case .consulting, .thinking: [.indigo.opacity(0.95), .purple.opacity(0.8), .black]
-        case .speaking: [.orange.opacity(0.78), .indigo.opacity(0.85), .black]
-        case .review: [.orange.opacity(0.82), .indigo.opacity(0.88), .black]
-        case .offline, .stale, .error: [.gray.opacity(0.9), .indigo.opacity(0.75), .black]
-        default: [.indigo.opacity(0.92), .teal.opacity(0.72), .black]
-        }
-    }
-}
-
-private struct PulsePresenceOrb: View {
-    let state: PulseCallState
-    @State private var breathing = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(.white.opacity(0.10))
-                .frame(width: 210, height: 210)
-                .scaleEffect(breathing ? 1.14 : 0.9)
-            Circle()
-                .fill(LinearGradient(colors: [.white.opacity(0.94), .teal.opacity(0.78), .indigo.opacity(0.85)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 142, height: 142)
-                .shadow(color: .teal.opacity(0.7), radius: 24)
-                .overlay(Image(systemName: symbol).font(.system(size: 42, weight: .medium)).foregroundStyle(.white))
-                .scaleEffect(breathing ? 1.04 : 0.96)
-        }
-        .onAppear { breathing = true }
-        .animation(.easeInOut(duration: duration).repeatForever(autoreverses: true), value: breathing)
-    }
-
-    private var symbol: String {
-        switch state {
-        case .listening: "mic.fill"
-        case .consulting: "magnifyingglass"
-        case .thinking: "sparkles"
-        case .speaking: "waveform"
-        case .review: "checkmark.shield.fill"
-        case .offline, .stale, .error: "cloud.slash.fill"
-        case .disconnected: "link.badge.plus"
-        case .ready: "circle.hexagongrid.fill"
-        }
-    }
-
-    private var duration: Double { state == .listening ? 0.55 : state == .thinking ? 0.85 : 2.1 }
-}
-
-struct PulsePTTGestureState: Equatable {
-    private(set) var isActive = false
-
-    mutating func begin(disabled: Bool) -> Bool {
-        guard !isActive, !disabled else { return false }
-        isActive = true
-        return true
-    }
-
-    mutating func end() -> Bool {
-        guard isActive else { return false }
-        isActive = false
-        return true
-    }
-
-    func acceptsHitTesting(disabled: Bool) -> Bool { !disabled || isActive }
-}
-
-private struct PulsePTTButton: View {
-    let isListening: Bool
-    let disabled: Bool
-    let onPress: () -> Void
-    let onRelease: () -> Void
-    @State private var gestureState = PulsePTTGestureState()
-
-    var body: some View {
-        VStack(spacing: 5) {
-            Image(systemName: isListening || gestureState.isActive ? "mic.fill" : "mic")
-                .font(.title2)
-            Text(isListening || gestureState.isActive ? "Escuchando" : "Mantén para hablar")
-                .font(.caption.bold())
-        }
-        .foregroundStyle(.indigo)
-        .frame(width: 132, height: 68)
-        .background(.white, in: Capsule())
-        .contentShape(Capsule())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if gestureState.begin(disabled: disabled) { onPress() }
-                }
-                .onEnded { _ in
-                    if gestureState.end() { onRelease() }
-                }
-        )
-        .opacity(disabled && !gestureState.isActive ? 0.45 : 1)
-        .allowsHitTesting(gestureState.acceptsHitTesting(disabled: disabled))
-        .accessibilityLabel(isListening || gestureState.isActive ? "Escuchando; suelta para terminar" : "Mantén pulsado para hablar")
-    }
-}
-
-public struct PulseProviderConfigurationView: View {
-    @ObservedObject var model: PulseCallAppModel
-    @Environment(\.dismiss) private var dismiss
-    public init(model: PulseCallAppModel) { self.model = model }
-
-    public var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                Image(systemName: "waveform.badge.magnifyingglass")
-                    .font(.title)
-                    .foregroundStyle(.tint)
-                Text("Acceso de proveedor")
-                    .font(.title2.bold())
-                Text("El dispositivo emparejado solicita una credencial efímera justo antes de una conexión directa con el proveedor. No hay clave API que configurar o guardar en este iPhone.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text("La reserva local es una guarda de admisión por sesión y día, incluidas reservas pendientes. No garantiza un coste máximo: los límites y la facturación de la cuenta del proveedor siguen siendo autoritativos.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text(model.providerAvailabilityLabel)
-                    .font(.footnote)
-                    .foregroundStyle(model.providerConfigured ? .green : .secondary)
-                Spacer()
-            }
-            .padding()
-            .navigationTitle("OpenAI Realtime")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
-        }
-        .presentationDetents([.medium])
-    }
-}
-
-private struct PulseCallNotice: View {
-    let message: String
-    var body: some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.footnote)
-            .foregroundStyle(.orange)
-            .padding(12)
-            .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
+    private var symbol: String { model.isCallActive ? "waveform" : "phone.fill" }
 }
 
 #if os(iOS) && canImport(AVFoundation)
 private struct PulseQRScannerView: UIViewControllerRepresentable {
     let onCode: (String) -> Void
-
-    func makeUIViewController(context: Context) -> ScannerController {
-        let controller = ScannerController()
-        controller.onCode = onCode
-        return controller
-    }
-
+    func makeUIViewController(context: Context) -> ScannerController { let controller = ScannerController(); controller.onCode = onCode; return controller }
     func updateUIViewController(_: ScannerController, context _: Context) {}
-
     final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
         var onCode: ((String) -> Void)?
         private let session = AVCaptureSession()
-        private var didDeliver = false
-
+        private var delivered = false
         override func viewDidLoad() {
             super.viewDidLoad()
-            guard AVCaptureDevice.authorizationStatus(for: .video) != .denied,
-                  let device = AVCaptureDevice.default(for: .video),
-                  let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else { return }
-            if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
+            switch AVCaptureDevice.authorizationStatus(for: .video) {
+            case .authorized: configure()
+            case .notDetermined:
                 AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                    if granted { DispatchQueue.main.async { self?.configure(input) } }
+                    guard granted else { return }
+                    DispatchQueue.main.async { self?.configure() }
                 }
-            } else {
-                configure(input)
+            default: break
             }
         }
-
-        private func configure(_ input: AVCaptureDeviceInput) {
-            guard session.inputs.isEmpty, session.canAddInput(input) else { return }
-            session.addInput(input)
-            let output = AVCaptureMetadataOutput()
-            guard session.canAddOutput(output) else { return }
-            session.addOutput(output)
-            output.setMetadataObjectsDelegate(self, queue: .main)
-            output.metadataObjectTypes = [.qr]
-            let preview = AVCaptureVideoPreviewLayer(session: session)
-            preview.frame = view.bounds
-            preview.videoGravity = .resizeAspectFill
-            view.layer.addSublayer(preview)
+        private func configure() {
+            guard let device = AVCaptureDevice.default(for: .video), let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else { return }
+            session.addInput(input); let output = AVCaptureMetadataOutput(); guard session.canAddOutput(output) else { return }; session.addOutput(output)
+            output.setMetadataObjectsDelegate(self, queue: .main); output.metadataObjectTypes = [.qr]
+            let preview = AVCaptureVideoPreviewLayer(session: session); preview.frame = view.bounds; preview.videoGravity = .resizeAspectFill; view.layer.addSublayer(preview)
             session.startRunning()
         }
-
         func metadataOutput(_: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from _: AVCaptureConnection) {
-            guard !didDeliver,
-                  let code = metadataObjects.compactMap({ $0 as? AVMetadataMachineReadableCodeObject }).first?.stringValue else { return }
-            didDeliver = true
-            session.stopRunning()
-            onCode?(code)
+            guard !delivered, let value = metadataObjects.compactMap({ $0 as? AVMetadataMachineReadableCodeObject }).first?.stringValue else { return }
+            delivered = true; session.stopRunning(); onCode?(value)
         }
     }
 }

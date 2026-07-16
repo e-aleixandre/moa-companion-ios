@@ -162,7 +162,7 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 let data = Data(text.utf8)
                 guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { throw OpenAIRealtimeClientError.decoding }
                 switch type {
-                case "response.output_audio.delta": if let audio = (event["delta"] as? String).flatMap(Data.init(base64Encoded:)) { onAudio(audio) }
+                case "response.output_audio.delta": if let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) { onAudio(audio) }
                 case "response.output_audio_transcript.delta", "response.output_text.delta": if let delta = event["delta"] as? String { onText(delta) }
                 case "response.function_call_arguments.done":
                     guard let callID = event["call_id"] as? String, let name = event["name"] as? String else { throw OpenAIRealtimeClientError.decoding }

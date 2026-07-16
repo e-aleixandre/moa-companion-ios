@@ -48,6 +48,9 @@ public struct PulseSessionBrief: Codable, Equatable, Sendable, Identifiable {
     public let state: String
     public let pendingAsks: Int
     public let pendingPerms: Int
+    public let attempting: String?
+    public let progress: String?
+    public let updated: Date?
 
     public var id: String { sessionID }
     enum CodingKeys: String, CodingKey {
@@ -55,6 +58,9 @@ public struct PulseSessionBrief: Codable, Equatable, Sendable, Identifiable {
         case sessionID = "session_id"
         case pendingAsks = "pending_asks"
         case pendingPerms = "pending_perms"
+        case attempting = "brief_attempting"
+        case progress = "brief_progress"
+        case updated = "brief_updated"
     }
 }
 

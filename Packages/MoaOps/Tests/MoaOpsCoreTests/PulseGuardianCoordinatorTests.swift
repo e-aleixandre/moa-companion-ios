@@ -195,7 +195,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testInitialContextSummarizesSessionsAndItems() throws {
         var snapshot = PulseGuardianSnapshot()
         snapshot.sessions = [
-            try decodeSession(#"{"session_id":"s1","alias":"la del token","title":"Arreglar validación del token","state":"waiting","pending_asks":1,"pending_perms":0}"#),
+            try decodeSession(#"{"session_id":"s1","alias":"la del token","title":"Arreglar validación del token","state":"waiting","pending_asks":1,"pending_perms":0,"brief_attempting":"validar el token","brief_progress":"ya aisló el fallo","brief_updated":"2026-07-16T13:01:00Z"}"#),
             try decodeSession(#"{"session_id":"s2","alias":"la del bug","title":"Bug en el parser","state":"running","pending_asks":0,"pending_perms":2}"#),
         ]
         snapshot.items = [
@@ -205,6 +205,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertTrue(context.hasPrefix("<estado_inicial_moa>"))
         XCTAssertTrue(context.hasSuffix("</estado_inicial_moa>"))
         XCTAssertTrue(context.contains("la del token"))
+        XCTAssertTrue(context.contains("intenta: validar el token"))
+        XCTAssertTrue(context.contains("va: ya aisló el fallo"))
+        XCTAssertTrue(context.contains("brief actualizado: 2026-07-16T13:01:00Z"))
         XCTAssertTrue(context.contains("1 preguntas"))
         XCTAssertTrue(context.contains("2 permisos"))
         XCTAssertTrue(context.contains("[permission] la del bug: pide borrar un fichero"))

@@ -323,16 +323,30 @@ public final class PulseGuardianCoordinator {
     }
 
     private func flushWarmupBuffer() {
+        guard call != nil else { bufferingOwnerSpeech = false; warmupBuffer.removeAll(); return }
+        // Prepend the buffered frames to the single serialized send queue and stop
+        // buffering, so warmup audio and freshly captured audio drain in one FIFO
+        // and never interleave/reorder.
+        if !warmupBuffer.isEmpty {
+            logActivation("first owner audio sent (\(warmupBuffer.count) buffered frames)")
+            pcmQueue.insert(contentsOf: warmupBuffer, at: 0)
+            warmupBuffer.removeAll()
+        }
         bufferingOwnerSpeech = false
-        guard let call, !warmupBuffer.isEmpty else { warmupBuffer.removeAll(); return }
-        let buffered = warmupBuffer
-        warmupBuffer.removeAll()
-        logActivation("first owner audio sent (\(buffered.count) buffered frames)")
-        Task { [weak self] in
-            for frame in buffered {
-                do { try await call.appendPCM16(frame) }
-                catch { await MainActor.run { self?.realtimeFailed() }; return }
+        pumpPCMQueue()
+    }
+
+    private func pumpPCMQueue() {
+        guard let call, pcmTask == nil, !pcmQueue.isEmpty else { return }
+        pcmTask = Task { [weak self] in
+            guard let self else { return }
+            while true {
+                guard self.isRunning, !self.pcmQueue.isEmpty else { break }
+                let next = self.pcmQueue.removeFirst()
+                do { try await call.appendPCM16(next) }
+                catch { self.realtimeFailed(); break }
             }
+            self.pcmTask = nil
         }
     }
 
@@ -436,22 +450,13 @@ public final class PulseGuardianCoordinator {
             warmupBuffer.append(pcm)
             return
         }
-        guard let call else { return }
+        guard call != nil else { return }
         // Raw PCM must NOT extend the hot window: capture is continuous, so keying
         // off it would keep the expensive socket open forever. Only server-VAD
         // speech (speechStarted/speechStopped) governs the call lifetime.
         if pcmQueue.count == pcmQueueCapacity { pcmQueue.removeFirst() }
         pcmQueue.append(pcm)
-        guard pcmTask == nil else { return }
-        pcmTask = Task { [weak self] in
-            guard let self else { return }
-            while !self.pcmQueue.isEmpty, self.isRunning {
-                let next = self.pcmQueue.removeFirst()
-                do { try await call.appendPCM16(next) }
-                catch { self.realtimeFailed(); break }
-            }
-            self.pcmTask = nil
-        }
+        pumpPCMQueue()
     }
 
     private func scheduleCloseAfterHotWindow() {

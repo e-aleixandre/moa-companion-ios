@@ -23,7 +23,23 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         await realtime.emit(.listening)
         try await waitFor { wake.startCount >= 2 }
-        XCTAssertGreaterThanOrEqual(wake.startCount, 2)
+        XCTAssertEqual(wake.startCount, 2)
+        XCTAssertEqual(coordinator.state, .guardianStandby)
+    }
+
+    func testWakeWordRearmsWhenTemporaryInterruptionCaptureResumes() async throws {
+        let wake = MockWakeWord()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: MockRealtime(), attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        await settle()
+
+        voice.interruptTemporarily()
+        XCTAssertEqual(coordinator.state, .interrupted)
+        voice.resumeCapture()
+        try await waitFor { wake.startCount == 2 }
         XCTAssertEqual(coordinator.state, .guardianStandby)
     }
 

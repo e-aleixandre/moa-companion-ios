@@ -24,6 +24,8 @@ final class MockVoice: PulseVoiceControlling {
     var onInterruption: (() -> Void)?
     var onPlaybackFailure: (() -> Void)?
     private var playbackDrained: (() -> Void)?
+    private var temporaryInterruption: (() -> Void)?
+    private var captureResumed: (() -> Void)?
     private(set) var flushCount = 0
     private(set) var played: [Data] = []
     private let captureStarts: Bool
@@ -37,12 +39,15 @@ final class MockVoice: PulseVoiceControlling {
     func stopAll() {}
     func setMuted(_: Bool) {}
     func setPlaybackDrainedHandler(_ handler: @escaping () -> Void) { playbackDrained = handler }
-    func setTemporaryInterruptionHandler(_: @escaping () -> Void) {}
+    func setTemporaryInterruptionHandler(_ handler: @escaping () -> Void) { temporaryInterruption = handler }
+    func setCaptureResumedHandler(_ handler: @escaping () -> Void) { captureResumed = handler }
     func setRouteChangedHandler(_: @escaping () -> Void) {}
     func hasPrivateOutputRoute() -> Bool { true }
 
     func emitPCM(_ pcm: Data) { onPCM16?(pcm) }
     func drainPlayback() { playbackDrained?() }
+    func interruptTemporarily() { temporaryInterruption?() }
+    func resumeCapture() { captureResumed?() }
 }
 
 actor MockAttentionChannel: PulseAttentionChanneling {

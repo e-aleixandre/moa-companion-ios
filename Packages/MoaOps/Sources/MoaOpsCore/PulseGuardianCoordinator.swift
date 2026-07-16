@@ -112,6 +112,11 @@ public final class PulseGuardianCoordinator {
     private var isNarrating = false
     private var ownerSpeaking = false
     private var wakeAvailable = false
+    private var wakeWordActive = false
+    private var wakeWordGeneration = 0
+    private var wakeRearmTask: Task<Void, Never>?
+    private var wakeRearmTaskGeneration: Int?
+    private var wakeRearmPending = false
     private var privateRouteWasPresent = false
     private var announcementsPausedForRoute = false
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
@@ -127,7 +132,7 @@ public final class PulseGuardianCoordinator {
         configureAudioCallbacks()
     }
 
-    deinit { pcmTask?.cancel(); closeTask?.cancel() }
+    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel() }
 
     public func start() async {
         guard !isRunning else { return }
@@ -139,6 +144,7 @@ public final class PulseGuardianCoordinator {
             Task { @MainActor [weak self] in self?.wakeFromOwner() }
         }
         wakeAvailable = await wakeWord.start()
+        wakeWordActive = wakeAvailable
         await attention.start(onEvent: { [weak self] message in
             Task { @MainActor [weak self] in self?.receive(message) }
         }, onState: { [weak self] socketState in
@@ -149,7 +155,7 @@ public final class PulseGuardianCoordinator {
 
     public func stop() {
         isRunning = false
-        wakeWord.stop()
+        disarmWakeWord()
         Task { await attention.stop() }
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
@@ -172,6 +178,7 @@ public final class PulseGuardianCoordinator {
         voice.onPlaybackFailure = { [weak self] in self?.audioFailed() }
         voice.setPlaybackDrainedHandler { [weak self] in self?.playbackDrained() }
         voice.setTemporaryInterruptionHandler { [weak self] in self?.temporarilyInterrupted() }
+        voice.setCaptureResumedHandler { [weak self] in self?.captureResumed() }
         voice.setRouteChangedHandler { [weak self] in self?.routeChanged() }
     }
 
@@ -182,7 +189,7 @@ public final class PulseGuardianCoordinator {
         case .connecting, .reconnecting: state = .attentionReconnecting
         case .inactive:
             closeRealtime()
-            wakeWord.stop()
+            disarmWakeWord()
             state = .inactive
         case .failed: state = .failed
         case .stopped: break
@@ -326,6 +333,7 @@ public final class PulseGuardianCoordinator {
                 self.bufferingOwnerSpeech = false
                 self.warmupBuffer.removeAll()
                 self.state = .failed
+                self.rearmWakeWord()
             }
         }
     }
@@ -403,7 +411,7 @@ public final class PulseGuardianCoordinator {
 
     private func wakeFromOwner() {
         guard isRunning, state != .inactive else { return }
-        wakeWord.stop()
+        disarmWakeWord()
         closeTask?.cancel(); closeTask = nil
         if call == nil {
             // Start capturing the owner's opening words immediately; the socket
@@ -420,11 +428,39 @@ public final class PulseGuardianCoordinator {
     /// Re-arms on-device wake detection after the Realtime socket closes. Without
     /// this the detector stays `didFire`/inactive and "Pulse" never wakes again.
     private func rearmWakeWord() {
-        guard isRunning, wakeAvailable, state != .inactive else { return }
-        Task { [weak self] in
-            guard let self, self.isRunning else { return }
-            _ = await self.wakeWord.start()
+        guard isRunning, wakeAvailable, !wakeWordActive, state != .inactive, state != .idle else { return }
+        if wakeRearmTask != nil {
+            if wakeRearmTaskGeneration != wakeWordGeneration { wakeRearmPending = true }
+            return
         }
+        let generation = wakeWordGeneration
+        wakeRearmTaskGeneration = generation
+        wakeRearmTask = Task { [weak self] in
+            guard let self else { return }
+            let started = await self.wakeWord.start()
+            guard self.wakeRearmTaskGeneration == generation else { return }
+            self.wakeRearmTask = nil
+            self.wakeRearmTaskGeneration = nil
+            guard self.isRunning, self.state != .inactive, self.state != .idle,
+                  self.wakeWordGeneration == generation else {
+                self.wakeWord.stop()
+                if self.wakeRearmPending {
+                    self.wakeRearmPending = false
+                    self.rearmWakeWord()
+                }
+                return
+            }
+            self.wakeWordActive = started
+            if self.wakeRearmPending {
+                self.wakeRearmPending = false
+                self.rearmWakeWord()
+            }
+        }
+
+    private func disarmWakeWord() {
+        wakeWordGeneration &+= 1
+        wakeWordActive = false
+        wakeWord.stop()
     }
 
     // Minimal per-activation timeline (wake -> socket ready -> first owner audio
@@ -467,7 +503,7 @@ public final class PulseGuardianCoordinator {
         // Raw PCM must NOT extend the hot window: capture is continuous, so keying
         // off it would keep the expensive socket open forever. Only server-VAD
         // speech (speechStarted/speechStopped) governs the call lifetime.
-        if pcmQueue.count == pcmQueueCapacity { pcmQueue.removeFirst() }
+        if pcmQueue.count >= pcmQueueCapacity { pcmQueue.removeFirst() }
         pcmQueue.append(pcm)
         pumpPCMQueue()
     }
@@ -499,6 +535,12 @@ public final class PulseGuardianCoordinator {
         closeRealtime()
     }
 
+    private func captureResumed() {
+        guard isRunning, state == .interrupted else { return }
+        state = .guardianStandby
+        rearmWakeWord()
+    }
+
     private func routeChanged() {
         let privateNow = voice.hasPrivateOutputRoute()
         if privateRouteWasPresent && !privateNow {
@@ -518,6 +560,7 @@ public final class PulseGuardianCoordinator {
         guard isRunning else { return }
         closeRealtime()
         state = .failed
+        rearmWakeWord()
     }
 
     private func realtimeFailed() {

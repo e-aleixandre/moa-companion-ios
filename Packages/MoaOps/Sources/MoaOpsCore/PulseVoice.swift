@@ -16,6 +16,7 @@ public protocol PulseVoiceControlling: AnyObject {
     func setMuted(_ muted: Bool)
     func setPlaybackDrainedHandler(_ handler: @escaping () -> Void)
     func setTemporaryInterruptionHandler(_ handler: @escaping () -> Void)
+    func setCaptureResumedHandler(_ handler: @escaping () -> Void)
     func setRouteChangedHandler(_ handler: @escaping () -> Void)
     func hasPrivateOutputRoute() -> Bool
 }
@@ -23,6 +24,7 @@ public protocol PulseVoiceControlling: AnyObject {
 public extension PulseVoiceControlling {
     func setPlaybackDrainedHandler(_: @escaping () -> Void) {}
     func setTemporaryInterruptionHandler(_: @escaping () -> Void) {}
+    func setCaptureResumedHandler(_: @escaping () -> Void) {}
     func setRouteChangedHandler(_: @escaping () -> Void) {}
     func hasPrivateOutputRoute() -> Bool { true }
 }
@@ -95,6 +97,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var engineConfigObserver: NSObjectProtocol?
     private var playbackDrainedHandler: (() -> Void)?
     private var temporaryInterruptionHandler: (() -> Void)?
+    private var captureResumedHandler: (() -> Void)?
     private var routeChangedHandler: (() -> Void)?
     private var queuedPlaybackBuffers = 0
     private var playbackGeneration: UInt64 = 0
@@ -224,6 +227,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         do {
             try startEngineWithCurrentInputFormat()
             captureRebuildAttempts = 0
+            captureResumedHandler?()
         } catch PulseCaptureSetupError.unavailableInputFormat {
             captureRebuildAttempts += 1
             if captureRebuildAttempts < 5 {
@@ -337,6 +341,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
 
     public func setPlaybackDrainedHandler(_ handler: @escaping () -> Void) { playbackDrainedHandler = handler }
     public func setTemporaryInterruptionHandler(_ handler: @escaping () -> Void) { temporaryInterruptionHandler = handler }
+    public func setCaptureResumedHandler(_ handler: @escaping () -> Void) { captureResumedHandler = handler }
     public func setRouteChangedHandler(_ handler: @escaping () -> Void) { routeChangedHandler = handler }
     public func hasPrivateOutputRoute() -> Bool {
         AVAudioSession.sharedInstance().currentRoute.outputs.contains {

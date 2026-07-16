@@ -274,7 +274,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         engine.inputNode.removeTap(onBus: 0)
     }
 
-    public func setMuted(_ muted: Bool {
+    public func setMuted(_ muted: Bool) {
         self.muted = muted
         if muted { capturedPCM.removeAll() }
     }

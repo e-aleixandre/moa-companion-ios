@@ -124,7 +124,7 @@ public extension PulseRealtimeCallControlling {
 }
 
 public protocol PulseRealtimeCalling: Sendable {
-    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling
+    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling
 }
 
 /// Direct, persistent WebSocket for one hands-free call. Audio stays iPhone ↔
@@ -134,7 +134,7 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private let executor: PulseGenericToolExecutor
     private let onState: @Sendable (PulseRealtimeCallState) -> Void
     private let onText: @Sendable (String) -> Void
-    private let onAudio: @Sendable (Data) -> Void
+    private let onAudio: @Sendable (Data, @escaping @Sendable () -> Void) -> Void
     private let onBargeIn: @Sendable () -> Void
     private var receiveTask: Task<Void, Never>?
     private var hasFunctionCallOutputsForCurrentResponse = false
@@ -145,7 +145,7 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private var sessionReady = false
     private var sessionReadyWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) {
+    init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) {
         self.socket = socket; self.executor = executor; self.onState = onState; self.onText = onText; self.onAudio = onAudio; self.onBargeIn = onBargeIn
     }
 
@@ -215,8 +215,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 case "response.output_audio.delta":
                     if let itemID = event["item_id"] as? String { currentAudioItemID = itemID }
                     if !discardingInterruptedAudio, let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) {
-                        playedAudioBytes += audio.count
-                        onAudio(audio)
+                        let itemID = currentAudioItemID
+                        onAudio(audio) { [weak self] in
+                            Task { await self?.recordPlayedAudio(audio.count, itemID: itemID) }
+                        }
                     }
                 case "response.output_audio_transcript.delta", "response.output_text.delta": if let delta = event["delta"] as? String { onText(delta) }
                 case "conversation.item.input_audio_transcription.delta", "conversation.item.input_audio_transcription.completed":
@@ -261,15 +263,20 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
 
     private func truncateCurrentAudioResponse() async {
         guard let itemID = currentAudioItemID else { return }
-        // audio_end_ms must reflect what the owner actually heard. We approximate
-        // it from the PCM bytes handed to playback (24 kHz mono, 16-bit = 48 B/ms).
-        // TODO: use the real playhead once the audio engine exposes drained ms;
-        // this over-counts by whatever is still buffered but not yet audible.
+        // `playedAudioBytes` advances only from AVAudioPlayerNode's completion,
+        // after the corresponding buffer rendered. This deliberately undercounts
+        // a partially rendered buffer rather than truncating audio the owner did
+        // not hear.
         let bytesPerMillisecond = OpenAIRealtimePCM16.sampleRate * 2 / 1_000
         let audioEndMs = bytesPerMillisecond > 0 ? playedAudioBytes / bytesPerMillisecond : 0
         currentAudioItemID = nil
         playedAudioBytes = 0
         try? await send(["type": "conversation.item.truncate", "item_id": itemID, "content_index": 0, "audio_end_ms": audioEndMs])
+    }
+
+    private func recordPlayedAudio(_ byteCount: Int, itemID: String?) {
+        guard !discardingInterruptedAudio, currentAudioItemID == itemID else { return }
+        playedAudioBytes += byteCount
     }
 
     private func send(_ object: [String: Any]) async throws {
@@ -296,7 +303,7 @@ public actor OpenAIRealtimeClient: PulseRealtimeCalling {
         self.socketFactory = socketFactory
     }
 
-    public func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
+    public func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
         let credential = try credential.validated(configuration: configuration)
         var request = URLRequest(url: credential.endpoint)
         request.setValue("Bearer \(credential.clientSecret)", forHTTPHeaderField: "Authorization")

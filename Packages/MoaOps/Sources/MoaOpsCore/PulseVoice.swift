@@ -11,6 +11,7 @@ public protocol PulseVoiceControlling: AnyObject {
     func startContinuousCapture() async -> Bool
     func stopContinuousCapture()
     func playPCM16(_ pcm: Data)
+    func playPCM16(_ pcm: Data, completion: @escaping @Sendable () -> Void)
     func flushPlayback()
     func stopAll()
     func setMuted(_ muted: Bool)
@@ -22,6 +23,10 @@ public protocol PulseVoiceControlling: AnyObject {
 }
 
 public extension PulseVoiceControlling {
+    func playPCM16(_ pcm: Data, completion: @escaping @Sendable () -> Void) {
+        playPCM16(pcm)
+        completion()
+    }
     func setPlaybackDrainedHandler(_: @escaping () -> Void) {}
     func setTemporaryInterruptionHandler(_: @escaping () -> Void) {}
     func setCaptureResumedHandler(_: @escaping () -> Void) {}
@@ -314,7 +319,9 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         try? AVAudioSession.sharedInstance().setActive(false)
     }
 
-    public func playPCM16(_ pcm: Data) {
+    public func playPCM16(_ pcm: Data) { playPCM16(pcm, completion: {}) }
+
+    public func playPCM16(_ pcm: Data, completion: @escaping @Sendable () -> Void) {
         guard let samples = OpenAIRealtimePCM16.float32Samples(pcm),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return }
         buffer.frameLength = AVAudioFrameCount(samples.count)
@@ -332,6 +339,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         player.scheduleBuffer(buffer) { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.playbackGeneration == generation else { return }
+                completion()
                 self.queuedPlaybackBuffers = max(0, self.queuedPlaybackBuffers - 1)
                 if self.queuedPlaybackBuffers == 0 { self.playbackDrainedHandler?() }
             }

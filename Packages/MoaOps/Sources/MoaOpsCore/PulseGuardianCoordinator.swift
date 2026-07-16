@@ -313,9 +313,13 @@ public final class PulseGuardianCoordinator {
                 }, onText: { [weak owner] text in
                     let value = owner
                     Task { @MainActor in value?.onText?(text) }
-                }, onAudio: { [weak owner] pcm in
+                }, onAudio: { [weak owner] pcm, played in
                     let value = owner
-                    Task { @MainActor in value?.notePulseAudio(); value?.voice.playPCM16(pcm) }
+                    Task { @MainActor in
+                        guard let value, value.socketGeneration == generation else { return }
+                        value.notePulseAudio()
+                        value.voice.playPCM16(pcm, completion: played)
+                    }
                 }, onBargeIn: { [weak owner] in
                     let value = owner
                     Task { @MainActor in value?.voice.flushPlayback() }

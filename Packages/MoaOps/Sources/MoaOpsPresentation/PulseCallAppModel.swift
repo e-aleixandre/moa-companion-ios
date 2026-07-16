@@ -128,7 +128,8 @@ public final class PulseCallAppModel: ObservableObject {
                 let credential = try await service.mintRealtimeClientSecret()
                 try Task.checkCancellation()
                 guard let self, self.owns(generation) else { return }
-                let call = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: "<estado_inicial_moa>\n\(overview.output)\n</estado_inicial_moa>", onState: { [weak self] event in Task { @MainActor in self?.apply(event, generation: generation, service: service, attempt: attempt) } }, onText: { [weak self] text in Task { @MainActor in self?.append(text, owner: false, generation: generation) } }, onAudio: { [weak self] pcm in Task { @MainActor in guard self?.owns(generation) == true else { return }; self?.voice.playPCM16(pcm) } })
+                let owner = self
+                let call = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: "<estado_inicial_moa>\n\(overview.output)\n</estado_inicial_moa>", onState: { [weak owner] event in Task { @MainActor in owner?.apply(event, generation: generation, service: service, attempt: attempt) } }, onText: { [weak owner] text in Task { @MainActor in owner?.append(text, owner: false, generation: generation) } }, onAudio: { [weak owner] pcm in Task { @MainActor in guard owner?.owns(generation) == true else { return }; owner?.voice.playPCM16(pcm) } })
                 guard self.owns(generation) else { await call.end(); return }
                 self.call = call
                 guard await self.voice.startContinuousCapture() else {

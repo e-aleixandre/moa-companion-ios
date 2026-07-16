@@ -65,7 +65,7 @@ public struct PulseCallSceneView: View {
         VStack(spacing: 20) {
             HStack { VStack(alignment: .leading) { Text("Pulse").font(.title.bold()); Text(model.serverName).foregroundStyle(.secondary) }; Spacer(); Button("Desconectar", role: .destructive) { showDisconnect = true } }
             Spacer()
-            Image(systemName: symbol).font(.system(size: 80)).foregroundStyle(model.isCallActive ? .green : .tint)
+            Image(systemName: symbol).font(.system(size: 80)).foregroundStyle(model.isCallActive ? Color.green : Color.accentColor)
             Text(model.state.spanishLabel).font(.title2.weight(.semibold))
             Text(model.isCallActive ? "Conversación continua · habla con normalidad" : "Inicia una llamada para hablar con tus sesiones.").foregroundStyle(.secondary)
             if let message = model.userMessage { Text(message).font(.footnote).foregroundStyle(.red) }

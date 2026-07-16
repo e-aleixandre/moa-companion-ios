@@ -14,6 +14,17 @@ public protocol PulseVoiceControlling: AnyObject {
     func flushPlayback()
     func stopAll()
     func setMuted(_ muted: Bool)
+    func setPlaybackDrainedHandler(_ handler: @escaping () -> Void)
+    func setTemporaryInterruptionHandler(_ handler: @escaping () -> Void)
+    func setRouteChangedHandler(_ handler: @escaping () -> Void)
+    func hasPrivateOutputRoute() -> Bool
+}
+
+public extension PulseVoiceControlling {
+    func setPlaybackDrainedHandler(_: @escaping () -> Void) {}
+    func setTemporaryInterruptionHandler(_: @escaping () -> Void) {}
+    func setRouteChangedHandler(_: @escaping () -> Void) {}
+    func hasPrivateOutputRoute() -> Bool { true }
 }
 
 #if os(iOS) && canImport(AVFoundation)
@@ -82,6 +93,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
     private var engineConfigObserver: NSObjectProtocol?
+    private var playbackDrainedHandler: (() -> Void)?
+    private var temporaryInterruptionHandler: (() -> Void)?
+    private var routeChangedHandler: (() -> Void)?
+    private var queuedPlaybackBuffers = 0
+    private var playbackGeneration: UInt64 = 0
 
     public override init() {
         super.init()
@@ -92,6 +108,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         }
         routeChangeObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.scheduleCaptureRebuild()
+            self?.routeChangedHandler?()
         }
         engineConfigObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
             self?.scheduleCaptureRebuild()
@@ -232,6 +249,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             capturedPCM.removeAll()
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
+            temporaryInterruptionHandler?()
         case .ended:
             guard interrupted else { return }
             interrupted = false
@@ -280,6 +298,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     }
 
     public func flushPlayback() {
+        playbackGeneration &+= 1
+        queuedPlaybackBuffers = 0
         player.stop()
     }
 
@@ -303,8 +323,25 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             onPlaybackFailure?()
             return
         }
-        player.scheduleBuffer(buffer)
+        queuedPlaybackBuffers += 1
+        let generation = playbackGeneration
+        player.scheduleBuffer(buffer) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.playbackGeneration == generation else { return }
+                self.queuedPlaybackBuffers = max(0, self.queuedPlaybackBuffers - 1)
+                if self.queuedPlaybackBuffers == 0 { self.playbackDrainedHandler?() }
+            }
+        }
         if !player.isPlaying { player.play() }
+    }
+
+    public func setPlaybackDrainedHandler(_ handler: @escaping () -> Void) { playbackDrainedHandler = handler }
+    public func setTemporaryInterruptionHandler(_ handler: @escaping () -> Void) { temporaryInterruptionHandler = handler }
+    public func setRouteChangedHandler(_ handler: @escaping () -> Void) { routeChangedHandler = handler }
+    public func hasPrivateOutputRoute() -> Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains {
+            [.headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE].contains($0.portType)
+        }
     }
 }
 #else

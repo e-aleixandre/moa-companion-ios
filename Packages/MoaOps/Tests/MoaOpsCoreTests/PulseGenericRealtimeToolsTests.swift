@@ -54,6 +54,21 @@ final class PulseGenericRealtimeToolsTests: XCTestCase {
         XCTAssertNil(emptyRisk["risk_flags"])
     }
 
+    func testListSessionsIncludesLiveActivity() async throws {
+        let executor = PulseGenericToolExecutor(service: Stub(activity: true))
+        let result = await executor.execute(.init(id: "activity", name: "list_sessions", arguments: Data("{}".utf8)))
+        XCTAssertFalse(result.isError)
+        let object = try transcriptObject(result.output)
+        let sessions = try XCTUnwrap(object["sessions"] as? [[String: Any]])
+        let activity = try XCTUnwrap(sessions.first?["activity"] as? [String: Any])
+
+        XCTAssertEqual(activity["kind"] as? String, "subagent")
+        XCTAssertEqual(activity["detail"] as? String, "implement phase 2")
+        XCTAssertEqual(activity["model"] as? String, "terra")
+        XCTAssertEqual(activity["count"] as? Int, 2)
+        XCTAssertNil(activity["tool"])
+    }
+
     func testTranscriptResultsAreChronological() async throws {
         let executor = PulseGenericToolExecutor(service: Stub(orderedTranscript: true))
         let session = await executor.execute(.init(id: "session", name: "read_session", arguments: Data(#"{"session_id":"s1"}"#.utf8)))
@@ -148,7 +163,8 @@ private actor Stub: PulseGenericToolService {
     private let singleLargeItem: Bool
     private let orderedTranscript: Bool
     private let longNewestFirst: Bool
-    init(failSend: Bool = false, actionStatusCode: Int? = nil, singleLargeItem: Bool = false, orderedTranscript: Bool = false, longNewestFirst: Bool = false) { self.failSend = failSend; self.actionStatusCode = actionStatusCode; self.singleLargeItem = singleLargeItem; self.orderedTranscript = orderedTranscript; self.longNewestFirst = longNewestFirst }
+    private let activity: Bool
+    init(failSend: Bool = false, actionStatusCode: Int? = nil, singleLargeItem: Bool = false, orderedTranscript: Bool = false, longNewestFirst: Bool = false, activity: Bool = false) { self.failSend = failSend; self.actionStatusCode = actionStatusCode; self.singleLargeItem = singleLargeItem; self.orderedTranscript = orderedTranscript; self.longNewestFirst = longNewestFirst; self.activity = activity }
     func listSessions() async throws -> [MoaServeSessionInfo] { [try session()] }
     func attention() async throws -> MoaServeAttentionResponse { try decode(#"{"items":[{"id":"a","priority":0,"kind":"permission","session_id":"s1","alias":"alias-secret","spoken":"spoken-secret","verbatim":"verbatim-secret","state":"pending","created_at":"2026-01-01T00:00:00Z","ref_id":"p1","risk_level":"high","risk_flags":["shell","write"]},{"id":"b","priority":1,"kind":"ask","session_id":"s1","alias":"empty-risk","spoken":"empty-risk","state":"pending","created_at":"2026-01-01T00:00:00Z","risk_level":"","risk_flags":[]}]}"#) }
     func readSession(sessionID: String, limit: Int, cursor: String?) async throws -> MoaServeConversationPage { try decode(longNewestFirst ? longNewestFirstPage() : (orderedTranscript ? orderedSessionPage() : page())) }
@@ -166,7 +182,11 @@ private actor Stub: PulseGenericToolService {
     func resumeSession(sessionID: String) async throws -> MoaServeSessionInfo { try session() }
     func cancelRun(sessionID: String) async throws {}
     func archiveSession(sessionID: String) async throws -> MoaServeArchiveSessionResponse { try decode(#"{"ok":true,"archived":true}"#) }
-    private func session() throws -> MoaServeSessionInfo { try decode(#"{"id":"s1","title":"Test","state":"idle","model":"gpt-5","provider":"openai","thinking":"low","cwd":"/private","created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z","context_percent":0,"permission_mode":"ask","cost_usd":0}"#) }
+    private func session() throws -> MoaServeSessionInfo {
+        try decode(activity
+            ? #"{"id":"s1","title":"Test","state":"idle","model":"gpt-5","provider":"openai","thinking":"low","cwd":"/private","created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z","context_percent":0,"permission_mode":"ask","cost_usd":0,"activity":{"kind":"subagent","detail":"implement phase 2","model":"terra","count":2}}"#
+            : #"{"id":"s1","title":"Test","state":"idle","model":"gpt-5","provider":"openai","thinking":"low","cwd":"/private","created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z","context_percent":0,"permission_mode":"ask","cost_usd":0}"#)
+    }
     private func page() -> String {
         let count = singleLargeItem ? 1 : 20
         let text = String(repeating: singleLargeItem ? "z" : "x", count: singleLargeItem ? PulseGenericToolBounds.transcriptText : 2000)

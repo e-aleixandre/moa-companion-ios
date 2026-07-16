@@ -21,6 +21,25 @@ final class MoaServeModelsTests: XCTestCase {
         XCTAssertNil(session.error)
     }
 
+    func testSessionActivityDecodesWhenPresentAndIsNilWhenOmitted() throws {
+        let withActivity = #"""
+        {"id":"session-1","title":"Fix tests","state":"running","model":"gpt-5","provider":"openai","thinking":"high","cwd":"/workspace","created":"2026-07-15T18:00:00Z","updated":"2026-07-15T18:02:00Z","context_percent":42,"permission_mode":"ask","cost_usd":0.125,"activity":{"kind":"subagent","detail":"implement phase 2","model":"terra","count":2}}
+        """#
+        let withoutActivity = #"""
+        {"id":"session-2","title":"Fix tests","state":"running","model":"gpt-5","provider":"openai","thinking":"high","cwd":"/workspace","created":"2026-07-15T18:00:00Z","updated":"2026-07-15T18:02:00Z","context_percent":42,"permission_mode":"ask","cost_usd":0.125}
+        """#
+
+        let active = try JSONDecoder.moaOps.decode(MoaServeSessionInfo.self, from: Data(withActivity.utf8))
+        let inactive = try JSONDecoder.moaOps.decode(MoaServeSessionInfo.self, from: Data(withoutActivity.utf8))
+
+        XCTAssertEqual(active.activity?.kind, "subagent")
+        XCTAssertEqual(active.activity?.detail, "implement phase 2")
+        XCTAssertEqual(active.activity?.model, "terra")
+        XCTAssertEqual(active.activity?.count, 2)
+        XCTAssertNil(active.activity?.tool)
+        XCTAssertNil(inactive.activity)
+    }
+
     func testAttentionFixtureDecodesItems() throws {
         let fixture = #"""
         {"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"session-1","alias":"Fix tests","spoken":"Moa necesita permiso.","verbatim":"go test ./...","state":"pending","created_at":"2026-07-15T18:02:00Z","ref_id":"perm_1","risk_level":"medium","risk_flags":["shell"]}]}

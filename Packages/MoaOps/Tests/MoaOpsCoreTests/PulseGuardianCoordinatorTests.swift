@@ -115,9 +115,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         try await waitFor { await realtime.begins() == 1 }
         await settle()
         await realtime.emit(.listening)
+        try await waitFor { coordinator.state == .listening }
         await realtime.emit(.responding)
-        await settle()
-        XCTAssertEqual(coordinator.state, .speaking)
+        try await waitFor { coordinator.state == .speaking }
 
         try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertNotEqual(coordinator.state, .guardianStandby)

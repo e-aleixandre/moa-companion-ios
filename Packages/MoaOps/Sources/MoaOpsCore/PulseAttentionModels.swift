@@ -98,7 +98,7 @@ public struct PulseBriefing: Codable, Equatable, Sendable {
 }
 
 public struct PulseAttentionServerMessage: Codable, Equatable, Sendable {
-    public enum Kind: String, Codable, Sendable { case `init`, attention, itemUpdate = "item_update", briefing, roster, inactive, error }
+    public enum Kind: String, Codable, Sendable { case initial = "init", attention, itemUpdate = "item_update", briefing, roster, inactive, error }
     public let type: Kind
     public let version: Int?
     public let items: [PulseAttentionItem]?

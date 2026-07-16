@@ -7,7 +7,7 @@ final class PulseAttentionModelsTests: XCTestCase {
         let message = try JSONDecoder.moaOps.decode(PulseAttentionServerMessage.self, from: Data(#"""
         {"type":"init","v":1,"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"Necesita permiso","state":"pending","created_at":"2026-07-16T10:00:00Z","ref_id":"perm_1","risk_level":"high","risk_flags":["shell"],"verbatim":"rm -rf tmp"}],"sessions":[{"session_id":"s1","alias":"build","title":"Build","state":"permission","pending_asks":0,"pending_perms":1}],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}
         """#.utf8))
-        XCTAssertEqual(message.type, .init)
+        XCTAssertEqual(message.type, .initial)
         XCTAssertEqual(message.version, 1)
         XCTAssertEqual(message.items?.first?.priority, .p0)
         XCTAssertEqual(message.items?.first?.verbatim, "rm -rf tmp")

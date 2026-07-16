@@ -101,7 +101,7 @@ public final class PulseGuardianCoordinator {
     private var privateRouteWasPresent = false
     private var announcementsPausedForRoute = false
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: PulseAttentionWebSocket, voice: any PulseVoiceControlling = NativePulseVoiceController(), wakeWord: any PulseWakeWordDetecting = PulseWakeWordDetector(), hotWindow: TimeInterval = 5) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: PulseAttentionWebSocket, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 5) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
@@ -123,7 +123,7 @@ public final class PulseGuardianCoordinator {
             Task { @MainActor [weak self] in self?.wakeFromOwner() }
         }
         wakeAvailable = await wakeWord.start()
-        attention.start(onEvent: { [weak self] message in
+        await attention.start(onEvent: { [weak self] message in
             Task { @MainActor [weak self] in self?.receive(message) }
         }, onState: { [weak self] socketState in
             Task { @MainActor [weak self] in self?.receive(socketState) }
@@ -134,7 +134,7 @@ public final class PulseGuardianCoordinator {
     public func stop() {
         isRunning = false
         wakeWord.stop()
-        attention.stop()
+        Task { await attention.stop() }
         closeTask?.cancel(); closeTask = nil
         pcmTask?.cancel(); pcmTask = nil; pcmQueue.removeAll()
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false
@@ -146,7 +146,7 @@ public final class PulseGuardianCoordinator {
     /// The UI fallback when on-device Speech is unavailable, and useful for
     /// testing while the device is locked.
     public func activateTalk() { wakeFromOwner() }
-    public func reclaimAttention() { attention.reclaim() }
+    public func reclaimAttention() { Task { await attention.reclaim() } }
     public var isWakeWordAvailable: Bool { wakeAvailable }
 
     private func configureAudioCallbacks() {
@@ -175,7 +175,7 @@ public final class PulseGuardianCoordinator {
     private func receive(_ message: PulseAttentionServerMessage) {
         guard isRunning else { return }
         switch message.type {
-        case .init:
+        case .initial:
             // The only legal reconciliation is replacement, never a merge.
             snapshot.items = message.items ?? []
             snapshot.sessions = message.sessions ?? []
@@ -186,7 +186,7 @@ public final class PulseGuardianCoordinator {
                 } else { enqueue(.termination(termination)) }
             }
             for item in snapshot.items { enqueue(.item(item)) }
-        case let .attention:
+        case .attention:
             if let item = message.item {
                 snapshot.items.removeAll { $0.id == item.id }
                 snapshot.items.append(item)

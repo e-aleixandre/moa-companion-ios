@@ -126,8 +126,9 @@ public actor PulseAttentionWebSocket {
         while owns(generation), !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 25_000_000_000)
             guard owns(generation), !Task.isCancelled else { return }
-            do { try await socket.sendPing() }
-            catch { socket.cancel(with: .goingAway, reason: nil); return }
+            socket.sendPing { error in
+                if error != nil { socket.cancel(with: .goingAway, reason: nil) }
+            }
         }
     }
 

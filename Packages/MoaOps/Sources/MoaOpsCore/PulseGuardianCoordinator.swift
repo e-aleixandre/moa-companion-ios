@@ -310,6 +310,10 @@ public final class PulseGuardianCoordinator {
         guard isRunning else { return }
         wakeWord.appendPCM16(pcm)
         guard let call else { return }
+        // Any owner speech extends the hot window; never tear down a socket in
+        // the middle of a turn merely because the previous response was quiet.
+        closeTask?.cancel()
+        closeTask = nil
         if pcmQueue.count == 8 { pcmQueue.removeFirst() }
         pcmQueue.append(pcm)
         guard pcmTask == nil else { return }

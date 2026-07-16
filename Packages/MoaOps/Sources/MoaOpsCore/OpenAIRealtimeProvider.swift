@@ -216,8 +216,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                     if let itemID = event["item_id"] as? String { currentAudioItemID = itemID }
                     if !discardingInterruptedAudio, let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) {
                         let itemID = currentAudioItemID
-                        onAudio(audio) { [weak self] in
-                            Task { await self?.recordPlayedAudio(audio.count, itemID: itemID) }
+                        let call = self
+                        let byteCount = audio.count
+                        onAudio(audio) {
+                            Task { await call.recordPlayedAudio(byteCount, itemID: itemID) }
                         }
                     }
                 case "response.output_audio_transcript.delta", "response.output_text.delta": if let delta = event["delta"] as? String { onText(delta) }

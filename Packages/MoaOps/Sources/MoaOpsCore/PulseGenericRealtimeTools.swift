@@ -406,7 +406,7 @@ public actor PulseGenericToolExecutor {
             if item.truncated { result["truncated"] = true }
             return result
         }
-        var result: [String: Any] = ["session_id": sessionID, "order": "chronological", "items": messages, "has_more": hasMore || source.count > ordered.count]
+        var result: [String: Any] = ["session_id": sessionID, "order": "chronological", "items": messages, "newest_included": true, "has_older": hasMore || source.count > ordered.count]
         if let title { result["title"] = bounded(title, PulseGenericToolBounds.title) }
         if let jobID { result["job_id"] = jobID }
         if let cursor = nextCursor { result["next_cursor"] = bounded(cursor, PulseGenericToolBounds.cursor) }

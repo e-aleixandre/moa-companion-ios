@@ -97,7 +97,8 @@ final class PulseGenericRealtimeToolsTests: XCTestCase {
         XCTAssertEqual(ids.last, "m24", "the last item must be the newest message")
         XCTAssertEqual(ids.first, "m5", "the page must be the 20 newest, chronologically")
         XCTAssertFalse(ids.contains("m0"), "oldest messages must be dropped, not the newest")
-        XCTAssertEqual(object["has_more"] as? Bool, true)
+        XCTAssertEqual(object["has_older"] as? Bool, true, "more messages exist, but they are OLDER not newer")
+        XCTAssertEqual(object["newest_included"] as? Bool, true, "the page always contains the newest message")
     }
 
     func testReadSubagentWithoutJobIDListsDiscoverableTasks() async throws {

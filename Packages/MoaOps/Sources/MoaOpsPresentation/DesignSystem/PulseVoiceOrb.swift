@@ -2,13 +2,13 @@ import SwiftUI
 
 /// Estado visual del orbe de voz.
 public enum PulseOrbMode: Equatable, Sendable {
-    /// En reposo: respiración lenta, superficie casi quieta.
+    /// En reposo: nebulosa fría y serena, deriva muy lenta.
     case idle
-    /// Conectando o reconectando: cometa orbitando, expectante.
+    /// Conectando o reconectando: una veta de luz circula, expectante.
     case connecting
-    /// Escuchando al dueño: ondas frías que se expanden.
+    /// Escuchando al dueño: aurora cian, más luminosa y con más flujo.
     case listening
-    /// Pulse habla: turbulencia cálida, más energía.
+    /// Pulse habla: nebulosa cálida ember con vetas crema, más energía.
     case speaking
 
     var tone: PulseTone {
@@ -22,11 +22,12 @@ public enum PulseOrbMode: Equatable, Sendable {
 
 /// El orbe de voz de Pulse: el foco emocional de la pantalla de llamada.
 ///
-/// Ya no es un círculo con gradiente: es un blob orgánico cuyo contorno
-/// ondula con senoides desfasadas por ángulo, con una nebulosa interior de
-/// "wisps" que orbitan a distintas velocidades (parallax) y una iridiscencia
-/// angular que gira lenta. Todo SwiftUI puro sobre `TimelineView(.animation)`
-/// a 30 fps, sin symbol effects ni shaders (iOS 17-safe).
+/// Una esfera de cristal perfecta con una nebulosa dentro: nubes de color
+/// muy difuminadas que derivan en órbitas lentas, se cruzan y se funden
+/// como tinta en agua oscura. El contorno es un círculo limpio; todo el
+/// arte vive en el relleno. SwiftUI puro sobre `TimelineView(.animation)`
+/// a 30 fps, compuesto en GPU con `drawingGroup()` (iOS 17-safe, sin
+/// symbol effects ni shaders).
 public struct PulseVoiceOrb: View {
     public var mode: PulseOrbMode
     public var diameter: CGFloat
@@ -41,7 +42,7 @@ public struct PulseVoiceOrb: View {
             orb(time: context.date.timeIntervalSinceReferenceDate)
         }
         .frame(width: diameter * 1.5, height: diameter * 1.5)
-        .animation(.easeInOut(duration: 0.45), value: mode)
+        .animation(.easeInOut(duration: 0.6), value: mode)
         .accessibilityHidden(true)
     }
 
@@ -49,215 +50,248 @@ public struct PulseVoiceOrb: View {
 
     @ViewBuilder
     private func orb(time t: TimeInterval) -> some View {
-        let color = mode.tone == .neutral ? PulseColor.textSecondary : mode.tone.color
         let breath = breathScale(time: t)
-        let wobble = wobbleAmplitude(time: t)
 
         ZStack {
-            haloLayer(color: color, time: t, wobble: wobble, breath: breath)
-
-            if mode == .listening {
-                listeningRipples(color: color, time: t)
-            }
-
-            if mode == .connecting {
-                connectingComet(color: color, time: t)
-            }
-
-            coreLayer(color: color, time: t, wobble: wobble, breath: breath)
-        }
-        // Aísla los blendModes internos para que no "sumen" contra lo que
-        // haya debajo del orbe en la pantalla.
-        .compositingGroup()
-    }
-
-    /// Halo exterior: un blob más deformado y difuso que el núcleo, para que
-    /// el resplandor también se sienta orgánico y sin bordes duros.
-    private func haloLayer(color: Color, time t: TimeInterval, wobble: Double, breath: CGFloat) -> some View {
-        OrbBlobShape(time: t, wobble: wobble * 1.7, speed: flowSpeed * 0.55, phase: 1.3)
-            .fill(
-                RadialGradient(
-                    colors: [color.opacity(haloOpacity), color.opacity(0)],
-                    center: .center,
-                    startRadius: diameter * 0.18,
-                    endRadius: diameter * 0.7
-                )
-            )
-            .frame(width: diameter * 1.4, height: diameter * 1.4)
-            .blur(radius: 10)
-            .scaleEffect(breath)
-    }
-
-    /// Núcleo: base de volumen + nebulosa de wisps + iridiscencia + especular,
-    /// todo recortado por el contorno orgánico.
-    private func coreLayer(color: Color, time t: TimeInterval, wobble: Double, breath: CGFloat) -> some View {
-        let energetic = mode == .listening || mode == .speaking
-        // El mismo blob para el clip y el trazo del borde: deben coincidir.
-        let rim = OrbBlobShape(time: t, wobble: wobble, speed: flowSpeed, phase: 0)
-
-        return ZStack {
-            // Volumen base: gradiente descentrado hacia arriba-izquierda.
-            RadialGradient(
-                colors: [
-                    color.opacity(mode == .idle ? 0.34 : 0.72),
-                    color.opacity(mode == .idle ? 0.12 : 0.24),
-                    PulseColor.backgroundRaised,
-                ],
-                center: UnitPoint(x: 0.40, y: 0.34),
-                startRadius: 0,
-                endRadius: diameter * 0.66
-            )
-
-            // Nebulosa interior: tres manchas difusas que orbitan a
-            // velocidades y sentidos distintos → sensación de profundidad.
-            wisp(color: color, time: t, orbit: diameter * 0.22, size: diameter * 0.62,
-                 speed: flowSpeed * 0.45, phase: 0.0, opacity: energetic ? 0.50 : 0.28)
-            wisp(color: color, time: t, orbit: diameter * 0.30, size: diameter * 0.46,
-                 speed: -flowSpeed * 0.28, phase: 2.4, opacity: energetic ? 0.36 : 0.20)
-            wisp(color: .white, time: t, orbit: diameter * 0.16, size: diameter * 0.34,
-                 speed: flowSpeed * 0.6, phase: 4.2, opacity: energetic ? 0.16 : 0.09)
-
-            // Iridiscencia: barrido angular que gira despacio. Se funde a
-            // `color.opacity(0)` (no `.clear`) para no ensuciar el tono.
-            AngularGradient(
-                colors: [
-                    color.opacity(0),
-                    color.opacity(0.30),
-                    color.opacity(0),
-                    Color.white.opacity(0.12),
-                    color.opacity(0),
-                ],
-                center: .center,
-                angle: .radians(t * flowSpeed * 0.5)
-            )
-            .blendMode(.plusLighter)
-            .opacity(mode == .idle ? 0.55 : 0.95)
-
-            // Brillo especular arriba-izquierda: ancla la "materialidad".
+            // Halo exterior difuso, respira con la esfera.
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [Color.white.opacity(0.20), Color.white.opacity(0)],
+                        colors: [glowColor.opacity(haloOpacity), glowColor.opacity(0)],
+                        center: .center,
+                        startRadius: diameter * 0.20,
+                        endRadius: diameter * 0.72
+                    )
+                )
+                .frame(width: diameter * 1.5, height: diameter * 1.5)
+                .scaleEffect(breath)
+
+            sphere(time: t)
+                .scaleEffect(coreScale(time: t, base: breath))
+                .pulseGlow(glowColor, radius: 26, opacity: mode == .idle ? 0.14 : 0.40)
+        }
+    }
+
+    /// La esfera: base oscura + nebulosa + volumen (sombra/especular),
+    /// todo recortado por un círculo perfecto y con borde de cristal.
+    private func sphere(time t: TimeInterval) -> some View {
+        ZStack {
+            // Base oscura con un matiz del modo arriba: da profundidad y
+            // evita que las nubes floten sobre negro puro.
+            RadialGradient(
+                colors: [
+                    tintColor.opacity(0.30),
+                    PulseColor.backgroundRaised,
+                    PulseColor.backgroundBase,
+                ],
+                center: UnitPoint(x: 0.5, y: 0.40),
+                startRadius: 0,
+                endRadius: diameter * 0.70
+            )
+
+            // Nebulosa: las nubes giran juntas muy despacio ADEMÁS de sus
+            // órbitas propias, para que las mezclas nunca se repitan igual.
+            ZStack {
+                ForEach(0..<Self.clouds.count, id: \.self) { index in
+                    cloud(Self.clouds[index], color: palette[index], time: t)
+                }
+            }
+            .rotationEffect(.radians(t * 0.05 * flowSpeed))
+
+            if mode == .connecting {
+                connectingStreak(time: t)
+            }
+
+            // Sombra interior desde abajo: vende el volumen esférico.
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [Color.black.opacity(0.42), Color.black.opacity(0)],
+                        center: UnitPoint(x: 0.5, y: 1.18),
+                        startRadius: diameter * 0.1,
+                        endRadius: diameter * 0.85
+                    )
+                )
+
+            // Brillo especular arriba-izquierda: highlight de cristal.
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [Color.white.opacity(0.18), Color.white.opacity(0)],
                         center: .center,
                         startRadius: 0,
                         endRadius: diameter * 0.26
                     )
                 )
-                .frame(width: diameter * 0.5, height: diameter * 0.5)
-                .offset(x: -diameter * 0.15, y: -diameter * 0.18)
+                .frame(width: diameter * 0.52, height: diameter * 0.52)
+                .offset(x: -diameter * 0.15, y: -diameter * 0.19)
         }
         .frame(width: diameter, height: diameter)
-        .clipShape(rim)
-        // Borde suave: un pelo de blur mata el aliasing del contorno curvo.
+        .clipShape(Circle())
+        // Todo el interior (blurs + blendModes) se compone en GPU de una vez.
+        .drawingGroup()
+        // Borde de cristal: más luz arriba, casi nada abajo.
         .overlay(
-            rim
-                .stroke(color.opacity(0.45), lineWidth: 1)
-                .blur(radius: 0.6)
+            Circle().strokeBorder(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.30), Color.white.opacity(0.04)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: 1
+            )
         )
-        .compositingGroup()
-        .scaleEffect(coreScale(time: t, base: breath))
-        .pulseGlow(color, radius: 26, opacity: mode == .idle ? 0.14 : 0.42)
     }
 
-    /// Mancha luminosa difusa que orbita el centro del núcleo.
-    private func wisp(color: Color, time t: TimeInterval, orbit: CGFloat, size: CGFloat,
-                      speed: Double, phase: Double, opacity: Double) -> some View {
-        let angle = t * speed + phase
-        return Circle()
+    /// Una nube: elipse rellena con gradiente color→transparente, muy
+    /// difuminada, que deriva en una órbita senoidal lenta con fase propia
+    /// y rota sobre sí misma. `plusLighter` hace que al cruzarse SUMEN luz,
+    /// que es lo que da el efecto acuarela.
+    private func cloud(_ spec: CloudSpec, color: Color, time t: TimeInterval) -> some View {
+        let flow = flowSpeed
+        let x = sin(t * spec.freqX * flow + spec.phase) * Double(spec.orbit)
+        let y = cos(t * spec.freqY * flow + spec.phase * 1.7) * Double(spec.orbit) * 0.8
+        let width = diameter * spec.size
+        return Ellipse()
             .fill(
                 RadialGradient(
-                    colors: [color.opacity(opacity), color.opacity(0)],
+                    colors: [color.opacity(spec.baseOpacity * luminosity), color.opacity(0)],
                     center: .center,
                     startRadius: 0,
-                    endRadius: size * 0.5
+                    endRadius: width * 0.5
                 )
             )
-            .frame(width: size, height: size)
-            .offset(x: CGFloat(cos(angle)) * orbit, y: CGFloat(sin(angle)) * orbit)
-            .blur(radius: size * 0.12)
+            .frame(width: width, height: width * spec.aspect)
+            .rotationEffect(.radians(t * spec.spin * flow + spec.phase))
+            .offset(x: diameter * CGFloat(x), y: diameter * CGFloat(y))
+            .blur(radius: diameter * 0.055)
             .blendMode(.plusLighter)
     }
 
-    /// Ondas de escucha: contornos orgánicos (no círculos) que se expanden
-    /// y desvanecen, como ondas en agua fría.
-    private func listeningRipples(color: Color, time t: TimeInterval) -> some View {
-        ForEach(0..<3, id: \.self) { index in
-            let progress = ripple(time: t, offset: Double(index) / 3)
-            let fade = (1 - progress) * (1 - progress)
-            OrbBlobShape(time: t * 0.6, wobble: 0.02, speed: 0.5, phase: Double(index) * 1.7)
-                .stroke(color.opacity(0.5 * fade), lineWidth: 1.2)
-                .frame(width: diameter, height: diameter)
-                .scaleEffect(0.9 + progress * 0.55)
-                .blur(radius: 0.5)
-        }
+    /// Veta de luz que circula por el interior mientras conecta.
+    private func connectingStreak(time t: TimeInterval) -> some View {
+        let angle = t * 0.9
+        let orbit = diameter * 0.30
+        return Ellipse()
+            .fill(
+                RadialGradient(
+                    colors: [Color.white.opacity(0.34), Color.white.opacity(0)],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: diameter * 0.22
+                )
+            )
+            .frame(width: diameter * 0.44, height: diameter * 0.20)
+            // La veta apunta en la dirección de avance (tangente a la órbita).
+            .rotationEffect(.radians(angle + .pi / 2))
+            .offset(x: CGFloat(cos(angle)) * orbit, y: CGFloat(sin(angle)) * orbit)
+            .blur(radius: diameter * 0.03)
+            .blendMode(.plusLighter)
     }
 
-    /// Cometa de conexión: un arco-estela con cabeza brillante orbitando el
-    /// núcleo. La estela usa un gradiente angular alineado con el trim para
-    /// que se desvanezca hacia la cola.
-    private func connectingComet(color: Color, time t: TimeInterval) -> some View {
-        let radius = diameter * 0.58
-        let sweep = 0.28
-        let headAngle = sweep * 2 * .pi
-        let spin = t.truncatingRemainder(dividingBy: 4) / 4 * 2 * .pi
-        return ZStack {
-            Circle()
-                .trim(from: 0, to: sweep)
-                .stroke(
-                    AngularGradient(
-                        colors: [color.opacity(0), color.opacity(0.7)],
-                        center: .center,
-                        startAngle: .zero,
-                        endAngle: .radians(headAngle)
-                    ),
-                    style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
-                )
-                .frame(width: radius * 2, height: radius * 2)
-            Circle()
-                .fill(color.opacity(0.9))
-                .frame(width: 5, height: 5)
-                .offset(x: radius * CGFloat(cos(headAngle)), y: radius * CGFloat(sin(headAngle)))
-                .pulseGlow(color, radius: 6, opacity: 0.8)
+    // MARK: - Nubes
+
+    private struct CloudSpec {
+        let size: CGFloat       // ancho relativo al diámetro
+        let aspect: CGFloat     // alto = ancho * aspect (elipse, no bola)
+        let orbit: CGFloat      // radio de deriva relativo al diámetro
+        let freqX: Double       // rad/s antes del multiplicador de modo
+        let freqY: Double
+        let phase: Double
+        let spin: Double        // rotación propia, rad/s
+        let baseOpacity: Double
+    }
+
+    /// Frecuencias inconmensurables entre sí y fases repartidas: el patrón
+    /// de mezcla tarda minutos en parecerse a sí mismo.
+    private static let clouds: [CloudSpec] = [
+        CloudSpec(size: 0.95, aspect: 0.80, orbit: 0.15, freqX: 0.13, freqY: 0.17, phase: 0.0, spin: 0.05, baseOpacity: 0.85),
+        CloudSpec(size: 0.70, aspect: 0.60, orbit: 0.24, freqX: 0.21, freqY: 0.15, phase: 2.1, spin: -0.08, baseOpacity: 0.70),
+        CloudSpec(size: 0.55, aspect: 0.90, orbit: 0.28, freqX: 0.17, freqY: 0.23, phase: 4.0, spin: 0.06, baseOpacity: 0.34),
+        CloudSpec(size: 0.80, aspect: 0.55, orbit: 0.20, freqX: 0.11, freqY: 0.19, phase: 5.3, spin: -0.04, baseOpacity: 0.60),
+        CloudSpec(size: 0.48, aspect: 0.75, orbit: 0.30, freqX: 0.25, freqY: 0.13, phase: 1.2, spin: 0.09, baseOpacity: 0.50),
+    ]
+
+    /// Un color por nube, alineado con `clouds`. La posición 2 es siempre la
+    /// veta clara (blanco → crema sobre ember, bruma sobre cian).
+    private var palette: [Color] {
+        switch mode {
+        case .idle, .connecting:
+            [
+                PulseColor.listening,
+                PulseColor.textSecondary,
+                Color.white,
+                PulseColor.listening,
+                PulseColor.textSecondary,
+            ]
+        case .listening:
+            [
+                PulseColor.listening,
+                PulseColor.listening,
+                Color.white,
+                PulseColor.listening,
+                PulseColor.textSecondary,
+            ]
+        case .speaking:
+            [
+                PulseColor.ember,
+                PulseColor.warning,
+                Color.white,
+                PulseColor.ember,
+                PulseColor.warning,
+            ]
         }
-        .rotationEffect(.radians(spin))
     }
 
     // MARK: - Parámetros por modo
+
+    /// Color del halo/glow exterior; el interior lo pone la paleta.
+    private var glowColor: Color {
+        mode.tone == .neutral ? PulseColor.textSecondary : mode.tone.color
+    }
+
+    /// Matiz de la base oscura bajo la nebulosa.
+    private var tintColor: Color {
+        switch mode {
+        case .idle, .connecting, .listening: PulseColor.listening
+        case .speaking: PulseColor.ember
+        }
+    }
 
     private var haloOpacity: Double {
         switch mode {
         case .idle: 0.10
         case .connecting: 0.16
         case .listening: 0.26
-        case .speaking: 0.34
+        case .speaking: 0.32
         }
     }
 
-    /// Velocidad del "flujo" interno (deformación, wisps, iridiscencia).
+    /// Multiplicador de velocidad del flujo interno.
     private var flowSpeed: Double {
         switch mode {
-        case .idle: 0.35
-        case .connecting: 0.7
-        case .listening: 0.9
-        case .speaking: 2.2
+        case .idle: 0.9
+        case .connecting: 1.6
+        case .listening: 2.4
+        case .speaking: 4.0
         }
     }
 
-    /// Amplitud de la deformación del contorno. Al hablar se modula con un
-    /// batido de dos senoides para simular turbulencia de voz.
-    private func wobbleAmplitude(time t: TimeInterval) -> Double {
+    /// Brillo global de las nubes. En reposo la nebulosa es tenue; al
+    /// escuchar/hablar sube la luz, no solo la velocidad.
+    private var luminosity: Double {
         switch mode {
-        case .idle: 0.018
-        case .connecting: 0.030
-        case .listening: 0.035
-        case .speaking: 0.055 + 0.030 * abs(sin(t * 2 * .pi / 0.31) * sin(t * 2 * .pi / 0.9))
+        case .idle: 0.30
+        case .connecting: 0.38
+        case .listening: 0.55
+        case .speaking: 0.60
         }
     }
 
     /// Respiración senoidal lenta; más viva al hablar.
     private func breathScale(time t: TimeInterval) -> CGFloat {
         let period: Double = mode == .speaking ? 1.1 : 3.6
-        let amplitude: Double = mode == .speaking ? 0.045 : 0.02
+        let amplitude: Double = mode == .speaking ? 0.040 : 0.018
         return CGFloat(1 + amplitude * sin(t * 2 * .pi / period))
     }
 
@@ -266,66 +300,8 @@ public struct PulseVoiceOrb: View {
     /// // sustituir esta senoide por la amplitud medida.
     private func coreScale(time t: TimeInterval, base: CGFloat) -> CGFloat {
         guard mode == .speaking else { return base }
-        let flutter = 0.03 * sin(t * 2 * .pi / 0.27) * sin(t * 2 * .pi / 0.83)
+        let flutter = 0.025 * sin(t * 2 * .pi / 0.27) * sin(t * 2 * .pi / 0.83)
         return base + CGFloat(flutter)
-    }
-
-    /// Progreso 0→1 cíclico para las ondas de escucha.
-    private func ripple(time t: TimeInterval, offset: Double) -> Double {
-        let period = 1.9
-        return ((t / period) + offset).truncatingRemainder(dividingBy: 1)
-    }
-}
-
-// MARK: - Contorno orgánico
-
-/// Blob de curvas Bézier: el radio de cada punto de control oscila con tres
-/// senoides de frecuencia angular distinta (3, 5 y 2 lóbulos) desfasadas en
-/// el tiempo, y los puntos se unen con un spline Catmull-Rom cerrado. El
-/// radio base se encoge en `wobble` para que la deformación nunca desborde
-/// el rect (evita recortes duros al usarlo como `clipShape`).
-private struct OrbBlobShape: Shape {
-    var time: Double
-    var wobble: Double
-    var speed: Double
-    var phase: Double
-
-    func path(in rect: CGRect) -> Path {
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let base = min(rect.width, rect.height) / 2 * CGFloat(1 - wobble)
-        let count = 12
-        let t = time * speed
-
-        var points: [CGPoint] = []
-        points.reserveCapacity(count)
-        for index in 0..<count {
-            let angle = Double(index) / Double(count) * 2 * .pi
-            // Suma normalizada (0.55 + 0.30 + 0.15 = 1) para acotar el offset.
-            let offset =
-                0.55 * sin(angle * 3 + t * 1.9 + phase)
-                + 0.30 * sin(angle * 5 - t * 1.3 + phase * 2.1)
-                + 0.15 * sin(angle * 2 + t * 0.7 + phase * 0.6)
-            let radius = base * CGFloat(1 + wobble * offset)
-            points.append(CGPoint(
-                x: center.x + CGFloat(cos(angle)) * radius,
-                y: center.y + CGFloat(sin(angle)) * radius
-            ))
-        }
-
-        // Catmull-Rom cerrado → tramos cúbicos suaves sin esquinas.
-        var path = Path()
-        path.move(to: points[0])
-        for index in 0..<count {
-            let p0 = points[(index - 1 + count) % count]
-            let p1 = points[index]
-            let p2 = points[(index + 1) % count]
-            let p3 = points[(index + 2) % count]
-            let control1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
-            let control2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
-            path.addCurve(to: p2, control1: control1, control2: control2)
-        }
-        path.closeSubpath()
-        return path
     }
 }
 

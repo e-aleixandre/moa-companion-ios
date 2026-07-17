@@ -44,7 +44,7 @@ public final class PulseCallAppModel: ObservableObject {
     /// Guardián is the default UI mode. `startCall()` remains the explicit
     /// legacy Conversation entry point for callers that rely on it.
     @Published public var isGuardianMode = true
-    @Published public var isMuted = false { didSet { voice.setMuted(isMuted) } }
+    @Published public var isMuted = false { didSet { voice.setMuted(isMuted); updateGuardianLiveActivity() } }
 
     private let store: any PulseSecureStore
     private let voice: any PulseVoiceControlling
@@ -67,6 +67,7 @@ public final class PulseCallAppModel: ObservableObject {
         self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
         configureVoice()
         restoreRegistration()
+        registerRemoteControl()
     }
 
     deinit { connectionTask?.cancel() }
@@ -142,7 +143,7 @@ public final class PulseCallAppModel: ObservableObject {
         if isGuardianActive {
             guardianLiveActivity.start(
                 attributes: .init(startedAt: Date(), ownerName: nil),
-                contentState: PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot)
+                contentState: PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot, micMuted: isMuted)
             )
         } else {
             userMessage = "No se pudo iniciar el micrófono del Guardián."
@@ -152,10 +153,29 @@ public final class PulseCallAppModel: ObservableObject {
     public func stopGuardian() {
         guardian?.stop()
         guardian = nil
-        guardianLiveActivity.end()
         isGuardianActive = false
         guardianState = .idle
         guardianSnapshot = .init()
+        // Keep the Live Activity alive in its stopped form so the single
+        // lock-screen toggle can restart the Guardián without opening the app.
+        // Tapping "Activar" relaunches the app process in the background.
+        updateGuardianLiveActivity()
+    }
+
+    /// One lock-screen toggle: start when stopped, stop when running. Mirrors the
+    /// single in-app Guardián button.
+    public func toggleGuardian() async {
+        if isGuardianActive { stopGuardian() }
+        else { await startGuardian() }
+    }
+
+    /// Muting is purely a capture gate — the Guardián keeps its behaviour, it
+    /// just stops listening so cabin noise doesn't interrupt it.
+    public func toggleMic() { isMuted.toggle() }
+
+    private func registerRemoteControl() {
+        PulseGuardianRemoteControl.shared.onToggleMic = { [weak self] in self?.toggleMic() }
+        PulseGuardianRemoteControl.shared.onToggleGuardian = { [weak self] in await self?.toggleGuardian() }
     }
 
     public func activateGuardianTalk() { guardian?.activateTalk() }
@@ -251,7 +271,7 @@ public final class PulseCallAppModel: ObservableObject {
     private func owns(_ generation: UInt64) -> Bool { wantsCall && generation == callGeneration }
 
     private func updateGuardianLiveActivity() {
-        guardianLiveActivity.update(PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot))
+        guardianLiveActivity.update(PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot, micMuted: isMuted))
     }
 
     private func configureVoice() {

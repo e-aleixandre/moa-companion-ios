@@ -20,17 +20,25 @@ public struct PulseGuardianActivityAttributes: Codable, Hashable, Sendable {
         public let sessionCount: Int
         public let pendingCount: Int
         public let lastEventLine: String?
+        /// Whether the Guardián is active. Drives which lock-screen control is
+        /// shown: running -> mute + stop; stopped -> start.
+        public let isRunning: Bool
+        /// Whether the microphone is muted. Purely a capture gate; it does not
+        /// change how the Guardián behaves otherwise.
+        public let micMuted: Bool
 
-        public init(stateLabel: String, sessionCount: Int, pendingCount: Int, lastEventLine: String?) {
+        public init(stateLabel: String, sessionCount: Int, pendingCount: Int, lastEventLine: String?, isRunning: Bool = true, micMuted: Bool = false) {
             self.stateLabel = stateLabel
             self.sessionCount = sessionCount
             self.pendingCount = pendingCount
             self.lastEventLine = lastEventLine
+            self.isRunning = isRunning
+            self.micMuted = micMuted
         }
     }
 
-    /// Pure snapshot mapper shared by the app and the future widget target.
-    public static func contentState(state: PulseGuardianState, snapshot: PulseGuardianSnapshot) -> ContentState {
+    /// Pure snapshot mapper shared by the app and the widget target.
+    public static func contentState(state: PulseGuardianState, snapshot: PulseGuardianSnapshot, micMuted: Bool = false) -> ContentState {
         let events = snapshot.items.map { ($0.createdAt, "\($0.alias): \($0.spoken)") }
             + snapshot.terminations.map { ($0.createdAt, "\($0.alias): \($0.spoken)") }
         let lastEventLine = events.max { $0.0 < $1.0 }.map { shortened($0.1) }
@@ -38,7 +46,9 @@ public struct PulseGuardianActivityAttributes: Codable, Hashable, Sendable {
             stateLabel: state.spanishLabel,
             sessionCount: snapshot.sessions.count,
             pendingCount: snapshot.sessions.reduce(0) { $0 + $1.pendingAsks + $1.pendingPerms },
-            lastEventLine: lastEventLine
+            lastEventLine: lastEventLine,
+            isRunning: state != .idle,
+            micMuted: micMuted
         )
     }
 

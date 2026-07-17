@@ -29,29 +29,6 @@ public struct PulseGuardianSnapshot: Equatable, Sendable {
     public init() {}
 }
 
-/// Live diagnostics for the wake-word chain, surfaced on screen so the "Pulse va
-/// sordo" bug can be reproduced without Console.app (which drops `.info`).
-/// `micFrames` counts audio actually arriving from the engine into the
-/// coordinator; `wake.appendedBuffers` counts what reaches the recognizer.
-/// Reading them together during a repro pinpoints where the chain breaks:
-/// mic frozen → dead audio tap; mic climbing but appended frozen → recognizer
-/// desarmado; both climb but no match → recognizer fed but deaf.
-public struct PulseGuardianDiagnostics: Equatable, Sendable {
-    public var micFrames: Int
-    public var wakeWordActive: Bool
-    public var wakeAvailable: Bool
-    public var hasCall: Bool
-    public var wake: PulseWakeWordDiagnostics
-
-    public init(micFrames: Int = 0, wakeWordActive: Bool = false, wakeAvailable: Bool = false, hasCall: Bool = false, wake: PulseWakeWordDiagnostics = .init()) {
-        self.micFrames = micFrames
-        self.wakeWordActive = wakeWordActive
-        self.wakeAvailable = wakeAvailable
-        self.hasCall = hasCall
-        self.wake = wake
-    }
-}
-
 /// Coordinates three independent resources: the inexpensive attention socket,
 /// local capture/wake word, and the short-lived Realtime socket. It deliberately
 /// contains no policy gate for permissions; the Realtime prompt reads verbatim.
@@ -150,7 +127,6 @@ public final class PulseGuardianCoordinator {
     private var announcementsPausedForRoute = false
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
-    private var micFrames = 0
 
     public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25) {
         self.service = service
@@ -201,16 +177,6 @@ public final class PulseGuardianCoordinator {
     public func activateTalk() { wakeFromOwner() }
     public func reclaimAttention() { Task { await attention.reclaim() } }
     public var isWakeWordAvailable: Bool { wakeAvailable }
-
-    public var diagnostics: PulseGuardianDiagnostics {
-        PulseGuardianDiagnostics(
-            micFrames: micFrames,
-            wakeWordActive: wakeWordActive,
-            wakeAvailable: wakeAvailable,
-            hasCall: call != nil,
-            wake: wakeWord.diagnostics
-        )
-    }
 
     private func configureAudioCallbacks() {
         voice.onPCM16 = { [weak self] pcm in self?.receivePCM(pcm) }
@@ -587,7 +553,6 @@ public final class PulseGuardianCoordinator {
 
     private func receivePCM(_ pcm: Data) {
         guard isRunning else { return }
-        micFrames &+= 1
         wakeWord.appendPCM16(pcm)
         // BUG 2: between activation and socket-ready there is no call yet. Instead
         // of discarding the owner's opening words, capture them in a bounded

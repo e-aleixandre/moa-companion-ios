@@ -41,7 +41,6 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var isGuardianActive = false
     @Published public private(set) var guardianState: PulseGuardianState = .idle
     @Published public private(set) var guardianSnapshot = PulseGuardianSnapshot()
-    @Published public private(set) var guardianDiagnostics = PulseGuardianDiagnostics()
     /// Guardián is the default UI mode. `startCall()` remains the explicit
     /// legacy Conversation entry point for callers that rely on it.
     @Published public var isGuardianMode = true
@@ -63,7 +62,6 @@ public final class PulseCallAppModel: ObservableObject {
     private var registration: PulseDeviceRegistration?
     private var guardian: PulseGuardianCoordinator?
     private let guardianLiveActivity = PulseGuardianLiveActivityController()
-    private var diagnosticsTimer: Task<Void, Never>?
 
     public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
         self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
@@ -72,7 +70,7 @@ public final class PulseCallAppModel: ObservableObject {
         registerRemoteControl()
     }
 
-    deinit { connectionTask?.cancel(); diagnosticsTimer?.cancel() }
+    deinit { connectionTask?.cancel() }
     public var rootDestination: PulseCallRootDestination { hasPairedDevice ? .call : .pairing }
     public var canStartCall: Bool {
         guard hasPairedDevice, !wantsCall else { return false }
@@ -143,7 +141,6 @@ public final class PulseCallAppModel: ObservableObject {
         await coordinator.start()
         isGuardianActive = coordinator.state != .failed
         if isGuardianActive {
-            startDiagnosticsPolling()
             guardianLiveActivity.start(
                 attributes: .init(startedAt: Date(), ownerName: nil),
                 contentState: PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot, micMuted: isMuted)
@@ -154,13 +151,11 @@ public final class PulseCallAppModel: ObservableObject {
     }
 
     public func stopGuardian() {
-        stopDiagnosticsPolling()
         guardian?.stop()
         guardian = nil
         isGuardianActive = false
         guardianState = .idle
         guardianSnapshot = .init()
-        guardianDiagnostics = .init()
         // Keep the Live Activity alive in its stopped form so the single
         // lock-screen toggle can restart the Guardián without opening the app.
         // Tapping "Activar" relaunches the app process in the background.
@@ -277,28 +272,6 @@ public final class PulseCallAppModel: ObservableObject {
 
     private func updateGuardianLiveActivity() {
         guardianLiveActivity.update(PulseGuardianActivityAttributes.contentState(state: guardianState, snapshot: guardianSnapshot, micMuted: isMuted))
-    }
-
-    /// Lightweight on-screen diagnostics: polls the coordinator ~1/s so the
-    /// wake-word chain (mic frames vs recognizer buffers) is visible live during
-    /// a repro, without depending on Console.app `.info` logs.
-    private func startDiagnosticsPolling() {
-        diagnosticsTimer?.cancel()
-        diagnosticsTimer = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                if let guardian = self.guardian {
-                    let snapshot = guardian.diagnostics
-                    if snapshot != self.guardianDiagnostics { self.guardianDiagnostics = snapshot }
-                }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-        }
-    }
-
-    private func stopDiagnosticsPolling() {
-        diagnosticsTimer?.cancel()
-        diagnosticsTimer = nil
     }
 
     private func configureVoice() {

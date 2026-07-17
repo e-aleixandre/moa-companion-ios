@@ -9,51 +9,9 @@ import os
 /// recognizer sees "Pulse". If the selected locale lacks offline recognition,
 /// `start()` returns false and the caller keeps the explicit talk button as a
 /// fallback. TODO: surface that fallback prominently in the redesign.
-/// On-screen diagnostics for the wake word, so the "Pulse va sordo" bug can be
-/// reproduced without diving into Console.app logs (which drop `.info`).
-public struct PulseWakeWordDiagnostics: Equatable, Sendable {
-    /// True while a recognition task is installed and hasn't fired yet, i.e.
-    /// `appendPCM16` will actually feed the recognizer instead of early-returning.
-    public var armed: Bool
-    public var active: Bool
-    public var didFire: Bool
-    public var generation: Int
-    /// Total PCM buffers that reached the recognizer (passed the `active/didFire`
-    /// guard). If this freezes while the coordinator keeps receiving mic audio,
-    /// the recognizer is desarmado; if it climbs but "Pulse" never matches, the
-    /// recognizer is fed but deaf.
-    public var appendedBuffers: Int
-    /// Why the recognizer could/couldn't arm, captured on the last `start()`.
-    /// Lets the on-screen panel show the exact reason for
-    /// "on-device recognition unavailable" (locale, nil recognizer, service
-    /// availability, on-device support, authorization) instead of a dead end.
-    public var localeIdentifier: String
-    public var recognizerIsNil: Bool
-    public var recognizerAvailable: Bool
-    public var supportsOnDevice: Bool
-    public var authorization: String
-    /// Whether `locale` is in `SFSpeechRecognizer.supportedLocales()`.
-    public var localeSupported: Bool
-
-    public init(armed: Bool = false, active: Bool = false, didFire: Bool = false, generation: Int = 0, appendedBuffers: Int = 0, localeIdentifier: String = "?", recognizerIsNil: Bool = false, recognizerAvailable: Bool = false, supportsOnDevice: Bool = false, authorization: String = "?", localeSupported: Bool = false) {
-        self.armed = armed
-        self.active = active
-        self.didFire = didFire
-        self.generation = generation
-        self.appendedBuffers = appendedBuffers
-        self.localeIdentifier = localeIdentifier
-        self.recognizerIsNil = recognizerIsNil
-        self.recognizerAvailable = recognizerAvailable
-        self.supportsOnDevice = supportsOnDevice
-        self.authorization = authorization
-        self.localeSupported = localeSupported
-    }
-}
-
 @MainActor
 public protocol PulseWakeWordDetecting: AnyObject {
     var onWakeWord: (() -> Void)? { get set }
-    var diagnostics: PulseWakeWordDiagnostics { get }
     func start() async -> Bool
     func stop()
     func appendPCM16(_ pcm: Data)
@@ -103,7 +61,6 @@ public enum PulseWakeWordLocale {
 public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
     public var onWakeWord: (() -> Void)?
     private let locale: Locale
-    private var resolvedLocale: Locale?
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -118,15 +75,6 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
     private var recognitionGeneration = 0
     private var retryTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.moa.pulse", category: "wakeword")
-    private var appendedBuffers = 0
-    private var lastHeartbeat = Date.distantPast
-    // Captured on each start() so the on-screen panel can explain exactly why the
-    // recognizer did or didn't arm (locale / nil recognizer / availability /
-    // on-device support / authorization).
-    private var lastRecognizerIsNil = false
-    private var lastRecognizerAvailable = false
-    private var lastSupportsOnDevice = false
-    private var lastAuthorization: SFSpeechRecognizerAuthorizationStatus = .notDetermined
     // SFSpeechRecognitionRequest stops delivering results after ~1 min on
     // device, so the recognition task is recreated well before that ceiling.
     private let recycleInterval: TimeInterval
@@ -163,35 +111,6 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         return nil
     }
 
-    public var diagnostics: PulseWakeWordDiagnostics {
-        PulseWakeWordDiagnostics(
-            armed: active && !didFire && task != nil,
-            active: active,
-            didFire: didFire,
-            generation: recognitionGeneration,
-            appendedBuffers: appendedBuffers,
-            localeIdentifier: resolvedLocale?.identifier ?? locale.identifier,
-            recognizerIsNil: lastRecognizerIsNil,
-            recognizerAvailable: lastRecognizerAvailable,
-            supportsOnDevice: lastSupportsOnDevice,
-            authorization: Self.authorizationLabel(lastAuthorization),
-            localeSupported: {
-                let effective = resolvedLocale ?? locale
-                return SFSpeechRecognizer.supportedLocales().contains { $0.identifier == effective.identifier }
-            }()
-        )
-    }
-
-    private static func authorizationLabel(_ status: SFSpeechRecognizerAuthorizationStatus) -> String {
-        switch status {
-        case .notDetermined: return "notDetermined"
-        case .denied: return "denied"
-        case .restricted: return "restricted"
-        case .authorized: return "authorized"
-        @unknown default: return "unknown"
-        }
-    }
-
     /// Idempotent (re)arm: every call resets `didFire` and installs a fresh
     /// recognition task, so the coordinator can rearm after each activation.
     public func start() async -> Bool {
@@ -200,7 +119,6 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         // while suspended, this arm is stale and must not revive active/didFire.
         let generation = recognitionGeneration
         let authorization = await requestAuthorization()
-        lastAuthorization = authorization
         guard authorization == .authorized else {
             log.info("wake arm failed: authorization=\(authorization.rawValue, privacy: .public)")
             return false
@@ -209,20 +127,14 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
             log.info("wake arm abandoned: stopped during authorization")
             return false
         }
-        let recognizer = SFSpeechRecognizer(locale: locale)
-        lastRecognizerIsNil = recognizer == nil
-        lastRecognizerAvailable = recognizer?.isAvailable ?? false
-        lastSupportsOnDevice = recognizer?.supportsOnDeviceRecognition ?? false
         // `Locale.current` may be a combination with no offline model (e.g.
         // `en_ES`), so negotiate the user's preferred languages against the
         // locales that actually support on-device recognition instead of giving
         // up. "Pulse" is recognised across locales.
         guard let resolved = Self.onDeviceRecognizer() else {
-            log.info("wake arm failed: on-device recognition unavailable nil=\(recognizer == nil, privacy: .public) available=\(self.lastRecognizerAvailable, privacy: .public) locale=\(self.locale.identifier, privacy: .public)")
+            log.info("wake arm failed: on-device recognition unavailable locale=\(self.locale.identifier, privacy: .public)")
             return false
         }
-        self.resolvedLocale = resolved.locale
-        lastSupportsOnDevice = true
         if resolved.locale.identifier != locale.identifier {
             log.info("wake locale fallback \(self.locale.identifier, privacy: .public) -> \(resolved.locale.identifier, privacy: .public)")
         }
@@ -328,15 +240,6 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
             destination.assign(from: source.assumingMemoryBound(to: Int16.self), count: Int(buffer.frameLength))
         }
         request.append(buffer)
-        // Heartbeat: confirms on device whether audio still reaches the wake
-        // word after the first activation cycle (distinguishes a dead tap from a
-        // dead recognizer). One line every ~5s while armed, not per buffer.
-        appendedBuffers &+= 1
-        let now = Date()
-        if now.timeIntervalSince(lastHeartbeat) >= 5 {
-            lastHeartbeat = now
-            log.info("wake pcm heartbeat gen=\(self.recognitionGeneration, privacy: .public) buffers=\(self.appendedBuffers, privacy: .public)")
-        }
     }
 
     private func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
@@ -359,7 +262,6 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
 @MainActor
 public final class PulseWakeWordDetector: PulseWakeWordDetecting {
     public var onWakeWord: (() -> Void)?
-    public var diagnostics: PulseWakeWordDiagnostics { PulseWakeWordDiagnostics() }
     public init(locale _: Locale = .current) {}
     public func start() async -> Bool { false }
     public func stop() {}

@@ -12,9 +12,6 @@ final class MockWakeWord: PulseWakeWordDetecting {
     private(set) var appended: [Data] = []
     var available = true
 
-    var diagnostics: PulseWakeWordDiagnostics {
-        PulseWakeWordDiagnostics(appendedBuffers: appended.count)
-    }
     func start() async -> Bool { startCount += 1; return available }
     func stop() { stopCount += 1 }
     func appendPCM16(_ pcm: Data) { appended.append(pcm) }

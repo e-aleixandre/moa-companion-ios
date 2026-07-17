@@ -302,28 +302,6 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(afterReconnect, 1, "a reconnection must not re-announce an ask the owner already heard")
     }
 
-    // On-screen diagnostics must reflect the live wake-word chain: mic frames
-    // arriving from the engine and buffers reaching the recognizer, so the
-    // "Pulse va sordo" bug is diagnosable watching the screen (Console.app drops
-    // the `.info` instrumentation).
-    func testDiagnosticsCountMicFramesAndRecognizerBuffers() async throws {
-        let wake = MockWakeWord()
-        let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: MockRealtime(), attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
-        await coordinator.start()
-        await settle()
-
-        for _ in 0..<3 { voice.emitPCM(Data([0, 0])) }
-        await settle()
-
-        let diagnostics = coordinator.diagnostics
-        XCTAssertEqual(diagnostics.micFrames, 3)
-        XCTAssertEqual(diagnostics.wake.appendedBuffers, 3)
-        XCTAssertTrue(diagnostics.wakeWordActive)
-        XCTAssertTrue(diagnostics.wakeAvailable)
-        XCTAssertFalse(diagnostics.hasCall)
-    }
-
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }
     private func decodeMessage(_ json: String) throws -> PulseAttentionServerMessage { try JSONDecoder.moaOps.decode(PulseAttentionServerMessage.self, from: Data(json.utf8)) }

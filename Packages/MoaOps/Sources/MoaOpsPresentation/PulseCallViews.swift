@@ -289,6 +289,10 @@ struct PulseWakeWordDiagnosticsPanel: View {
                 .foregroundStyle(PulseColor.textSecondary)
             Text("wwActive=\(flag(diagnostics.wakeWordActive)) avail=\(flag(diagnostics.wakeAvailable)) call=\(flag(diagnostics.hasCall))")
                 .foregroundStyle(PulseColor.textSecondary)
+            Text("loc=\(diagnostics.wake.localeIdentifier) locSup=\(flag(diagnostics.wake.localeSupported))")
+                .foregroundStyle(PulseColor.textSecondary)
+            Text("nil=\(flag(diagnostics.wake.recognizerIsNil)) recAvail=\(flag(diagnostics.wake.recognizerAvailable)) onDev=\(flag(diagnostics.wake.supportsOnDevice)) auth=\(diagnostics.wake.authorization)")
+                .foregroundStyle(PulseColor.textSecondary)
         }
         .font(PulseFont.monoSmall)
         .frame(maxWidth: .infinity, alignment: .leading)

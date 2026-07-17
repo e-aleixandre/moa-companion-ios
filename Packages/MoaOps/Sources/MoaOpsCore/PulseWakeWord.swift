@@ -59,6 +59,45 @@ public protocol PulseWakeWordDetecting: AnyObject {
     func appendPCM16(_ pcm: Data)
 }
 
+/// Pure locale negotiation for the wake word, kept outside the iOS/Speech gate
+/// so it compiles and is unit-testable on any platform (CI runs `swift test` on
+/// macOS). Given the user's preferred languages and the locales the recognizer
+/// supports, it produces the ordered, de-duplicated list of locales to try.
+public enum PulseWakeWordLocale {
+    /// For each preferred language: the exact requested locale first, then the
+    /// region-matched supported variant (es-ES over es-MX for a Spain phone),
+    /// then any other supported variant of that language. `en-US` closes the
+    /// list as a safety net. `Locale.current` can be a combination with no
+    /// offline model (e.g. `en_ES`: English UI + Spain region), which is exactly
+    /// why we negotiate instead of trusting a single locale.
+    public static func candidates(
+        preferredLanguages: [String],
+        supported: [Locale],
+        region: String?
+    ) -> [Locale] {
+        var candidates: [Locale] = []
+        var seen = Set<String>()
+        func add(_ locale: Locale) {
+            guard seen.insert(locale.identifier).inserted else { return }
+            candidates.append(locale)
+        }
+
+        let supportedSorted = supported.sorted { $0.identifier < $1.identifier }
+        for tag in preferredLanguages {
+            let requested = Locale(identifier: tag)
+            add(requested)
+            guard let language = requested.languageCode else { continue }
+            let sameLanguage = supportedSorted.filter { $0.languageCode == language }
+            let preferredRegion = requested.regionCode ?? region
+            for locale in sameLanguage.sorted(by: { lhs, _ in lhs.regionCode == preferredRegion }) {
+                add(locale)
+            }
+        }
+        add(Locale(identifier: "en-US"))
+        return candidates
+    }
+}
+
 #if os(iOS) && canImport(Speech) && canImport(AVFoundation)
 @MainActor
 public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
@@ -97,31 +136,27 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         self.recycleInterval = recycleInterval
     }
 
-    /// Picks a recognizer whose locale actually supports on-device recognition.
-    /// `Locale.current` can be a combination with no offline model (e.g. `en_ES`:
-    /// English UI + Spain region), which was the real cause of "on-device
-    /// recognition unavailable". Candidates are tried most-specific first — the
-    /// exact requested locale, then its language against the supported locales
-    /// (preferring the region-matched variant), then en-US as a last resort — and
-    /// the first one that supports on-device wins. "Pulse" is recognised across
-    /// these, so falling back to another locale keeps the wake word working.
-    static func onDeviceRecognizer(preferring requested: Locale) -> (recognizer: SFSpeechRecognizer, locale: Locale)? {
-        var candidates: [Locale] = [requested]
-        let language = requested.languageCode
-        let region = requested.regionCode
-        let supported = SFSpeechRecognizer.supportedLocales()
-            .sorted { $0.identifier < $1.identifier }
-        if let language {
-            let sameLanguage = supported.filter { $0.languageCode == language }
-            // Prefer the region-matched variant (es-ES over es-MX) when present.
-            candidates += sameLanguage.sorted { lhs, _ in lhs.regionCode == region }
-        }
-        candidates.append(Locale(identifier: "en-US"))
-
-        var seen = Set<String>()
+    /// Picks a recognizer whose locale actually supports on-device recognition,
+    /// negotiating the user's language the way Apple's own frameworks do rather
+    /// than trusting a single locale.
+    ///
+    /// So we walk the user's preferred languages in order (Settings ▸ Language &
+    /// Region — the same list the OS localises against) and pick the first
+    /// supported variant that has an offline model. The wake word "Pulse" is
+    /// recognised across languages, so this keeps it working for every user —
+    /// Spanish, Italian, whatever their phone is set to — without hardcoding a
+    /// language.
+    static func onDeviceRecognizer(
+        preferredLanguages: [String] = Locale.preferredLanguages,
+        region: String? = Locale.current.regionCode
+    ) -> (recognizer: SFSpeechRecognizer, locale: Locale)? {
+        let candidates = PulseWakeWordLocale.candidates(
+            preferredLanguages: preferredLanguages,
+            supported: SFSpeechRecognizer.supportedLocales().map { $0 },
+            region: region
+        )
         for candidate in candidates {
-            guard seen.insert(candidate.identifier).inserted,
-                  let recognizer = SFSpeechRecognizer(locale: candidate),
+            guard let recognizer = SFSpeechRecognizer(locale: candidate),
                   recognizer.supportsOnDeviceRecognition else { continue }
             return (recognizer, candidate)
         }
@@ -179,9 +214,10 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         lastRecognizerAvailable = recognizer?.isAvailable ?? false
         lastSupportsOnDevice = recognizer?.supportsOnDeviceRecognition ?? false
         // `Locale.current` may be a combination with no offline model (e.g.
-        // `en_ES`), so fall back to a locale that actually supports on-device
-        // recognition instead of giving up. "Pulse" is recognised across locales.
-        guard let resolved = Self.onDeviceRecognizer(preferring: locale) else {
+        // `en_ES`), so negotiate the user's preferred languages against the
+        // locales that actually support on-device recognition instead of giving
+        // up. "Pulse" is recognised across locales.
+        guard let resolved = Self.onDeviceRecognizer() else {
             log.info("wake arm failed: on-device recognition unavailable nil=\(recognizer == nil, privacy: .public) available=\(self.lastRecognizerAvailable, privacy: .public) locale=\(self.locale.identifier, privacy: .public)")
             return false
         }

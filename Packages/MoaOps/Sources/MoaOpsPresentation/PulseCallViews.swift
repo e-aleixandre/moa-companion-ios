@@ -188,6 +188,10 @@ public struct PulseCallSceneView: View {
                 }
             }
 
+            if model.isGuardianMode && model.isGuardianActive {
+                PulseWakeWordDiagnosticsPanel(diagnostics: model.guardianDiagnostics)
+            }
+
             if let message = model.userMessage {
                 PulseInlineNotice(message)
             }
@@ -261,6 +265,37 @@ public struct PulseCallSceneView: View {
         }
         return model.isCallActive ? "Conversación continua · habla con normalidad" : "Inicia una llamada para hablar con tus sesiones."
     }
+}
+
+// MARK: - Diagnóstico wake word
+
+/// On-screen live counters for the wake-word chain. Present only while the
+/// Guardián is active; it lets us reproduce the "Pulse va sordo" bug watching the
+/// screen instead of Console.app (which drops `.info`). Read it during a repro:
+/// `mic` frozen → el micro dejó de capturar; `mic` sube pero `rec` congelado →
+/// el reconocedor no está armado; ambos suben y "Pulse" no despierta → el
+/// reconocedor recibe audio pero está sordo.
+struct PulseWakeWordDiagnosticsPanel: View {
+    let diagnostics: PulseGuardianDiagnostics
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("DIAG WAKE WORD")
+                .pulseMicroCaps()
+                .foregroundStyle(PulseColor.textSecondary)
+            Text("mic=\(diagnostics.micFrames)  rec=\(diagnostics.wake.appendedBuffers)")
+                .foregroundStyle(PulseColor.textPrimary)
+            Text("armed=\(flag(diagnostics.wake.armed)) active=\(flag(diagnostics.wake.active)) fired=\(flag(diagnostics.wake.didFire)) gen=\(diagnostics.wake.generation)")
+                .foregroundStyle(PulseColor.textSecondary)
+            Text("wwActive=\(flag(diagnostics.wakeWordActive)) avail=\(flag(diagnostics.wakeAvailable)) call=\(flag(diagnostics.hasCall))")
+                .foregroundStyle(PulseColor.textSecondary)
+        }
+        .font(PulseFont.monoSmall)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .pulseCard()
+    }
+
+    private func flag(_ value: Bool) -> String { value ? "1" : "0" }
 }
 
 // MARK: - Ajustes

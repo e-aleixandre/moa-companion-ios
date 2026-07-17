@@ -44,21 +44,14 @@ jobs:
       - name: Install provisioning profile
         env:
           PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
-          WIDGET_PROVISIONING_PROFILE_BASE64: ${{ secrets.WIDGET_PROVISIONING_PROFILE_BASE64 }}
         run: |
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           PROFILE=$RUNNER_TEMP/pulse.mobileprovision
           echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE"
           UUID=$(security cms -D -i "$PROFILE" | plutil -extract UUID raw -o - -)
           NAME=$(security cms -D -i "$PROFILE" | plutil -extract Name raw -o - -)
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp "$PROFILE" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID".mobileprovision
           echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
-          WIDGET_PROFILE=$RUNNER_TEMP/pulse-widget.mobileprovision
-          echo "$WIDGET_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$WIDGET_PROFILE"
-          WIDGET_UUID=$(security cms -D -i "$WIDGET_PROFILE" | plutil -extract UUID raw -o - -)
-          WIDGET_NAME=$(security cms -D -i "$WIDGET_PROFILE" | plutil -extract Name raw -o - -)
-          cp "$WIDGET_PROFILE" ~/Library/MobileDevice/Provisioning\ Profiles/"$WIDGET_UUID".mobileprovision
-          echo "WIDGET_PROFILE_NAME=$WIDGET_NAME" >> "$GITHUB_ENV"
 
       - name: Compute build number
         run: |
@@ -80,6 +73,7 @@ jobs:
           CODE_SIGN_STYLE=Manual
           CODE_SIGN_IDENTITY="Apple Distribution"
           DEVELOPMENT_TEAM=4H47VQ3UP4
+          PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
           CURRENT_PROJECT_VERSION=$BUILD_NUMBER
           MARKETING_VERSION=$MARKETING_VERSION
 
@@ -96,7 +90,6 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>com.ealeixandre.moa.pulse</key><string>$PROFILE_NAME</string>
-              <key>com.ealeixandre.moa.pulse.LiveActivity</key><string>$WIDGET_PROFILE_NAME</string>
             </dict>
           </dict>
           </plist>

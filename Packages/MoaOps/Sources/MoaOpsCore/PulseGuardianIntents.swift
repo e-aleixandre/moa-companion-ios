@@ -1,4 +1,4 @@
-#if canImport(AppIntents)
+#if os(iOS) && canImport(AppIntents)
 import AppIntents
 
 /// Lock-screen / Dynamic Island buttons for the Guardián Live Activity.

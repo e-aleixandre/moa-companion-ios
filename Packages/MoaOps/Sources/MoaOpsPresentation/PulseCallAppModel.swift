@@ -41,6 +41,10 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var isGuardianActive = false
     @Published public private(set) var guardianState: PulseGuardianState = .idle
     @Published public private(set) var guardianSnapshot = PulseGuardianSnapshot()
+    /// Nivel 0..1 de la voz relevante (dueño o Pulse) mientras el Guardián
+    /// está activo; alimenta la reactividad del orbe. Ya llega suavizado y
+    /// limitado a ~30 Hz desde la capa de audio.
+    @Published public private(set) var audioLevel: Float = 0
     /// Guardián is the default UI mode. `startCall()` remains the explicit
     /// legacy Conversation entry point for callers that rely on it.
     @Published public var isGuardianMode = true
@@ -137,6 +141,10 @@ public final class PulseCallAppModel: ObservableObject {
                 model.captions = Array((model.captions + [.init(text: text)]).suffix(20))
             }
         }
+        coordinator.onAudioLevel = { [weak self] level in
+            let model = self
+            Task { @MainActor in model?.audioLevel = level }
+        }
         guardian = coordinator
         await coordinator.start()
         isGuardianActive = coordinator.state != .failed
@@ -156,6 +164,7 @@ public final class PulseCallAppModel: ObservableObject {
         isGuardianActive = false
         guardianState = .idle
         guardianSnapshot = .init()
+        audioLevel = 0
         // Keep the Live Activity alive in its stopped form so the single
         // lock-screen toggle can restart the Guardián without opening the app.
         // Tapping "Activar" relaunches the app process in the background.

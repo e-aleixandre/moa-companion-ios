@@ -8,6 +8,10 @@ public protocol PulseVoiceControlling: AnyObject {
     var onPCM16: ((Data) -> Void)? { get set }
     var onInterruption: (() -> Void)? { get set }
     var onPlaybackFailure: (() -> Void)? { get set }
+    /// Nivel 0..1 de voz del micrófono (RMS con envolvente), para la UI.
+    var onInputLevel: ((Float) -> Void)? { get set }
+    /// Nivel 0..1 de la voz reproducida de Pulse (RMS con envolvente).
+    var onOutputLevel: ((Float) -> Void)? { get set }
     func startContinuousCapture() async -> Bool
     func stopContinuousCapture()
     func playPCM16(_ pcm: Data)
@@ -85,6 +89,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public var onPCM16: ((Data) -> Void)?
     public var onInterruption: (() -> Void)?
     public var onPlaybackFailure: (() -> Void)?
+    public var onInputLevel: ((Float) -> Void)?
+    public var onOutputLevel: ((Float) -> Void)?
     public private(set) var isVoiceProcessingActive = false
 
     private let engine = AVAudioEngine()
@@ -114,6 +120,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var routeChangedHandler: (() -> Void)?
     private var queuedPlaybackBuffers = 0
     private var playbackGeneration: UInt64 = 0
+    // Envolventes de nivel para la UI: ataque inmediato, caída exponencial.
+    private var inputLevelEnvelope: Float = 0
+    private var outputLevelEnvelope: Float = 0
+    private var lastInputLevelEmit: TimeInterval = 0
+    private var lastOutputLevelEmit: TimeInterval = 0
 
     public override init() {
         super.init()
@@ -244,6 +255,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
             guard result != .error, output.frameLength > 0, let samples = output.int16ChannelData else { return }
             capturedPCM.enqueue(Data(bytes: samples[0], count: Int(output.frameLength) * 2)) { [weak self] pcm in
                 guard let self, !self.muted else { return }
+                self.trackInputLevel(pcm)
                 self.onPCM16?(pcm)
             }
         }
@@ -345,13 +357,19 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
 
     public func setMuted(_ muted: Bool) {
         self.muted = muted
-        if muted { capturedPCM.removeAll() }
+        if muted {
+            capturedPCM.removeAll()
+            inputLevelEnvelope = 0
+            onInputLevel?(0)
+        }
     }
 
     public func flushPlayback() {
         playbackGeneration &+= 1
         queuedPlaybackBuffers = 0
         player.stop()
+        outputLevelEnvelope = 0
+        onOutputLevel?(0)
     }
 
     public func stopAll() {
@@ -366,6 +384,10 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public func playPCM16(_ pcm: Data, completion: @escaping @Sendable () -> Void) {
         guard let samples = OpenAIRealtimePCM16.float32Samples(pcm),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return }
+        // Aproximación deliberada: el nivel se mide al encolar, no al sonar.
+        // Los chunks del Realtime llegan a ritmo casi real, así que el
+        // adelanto visual es de milisegundos y no compensa un tap de salida.
+        trackOutputLevel(samples)
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { samples in
             buffer.floatChannelData?[0].assign(from: samples.baseAddress!, count: samples.count)
@@ -383,10 +405,48 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
                 guard let self, self.playbackGeneration == generation else { return }
                 completion()
                 self.queuedPlaybackBuffers = max(0, self.queuedPlaybackBuffers - 1)
-                if self.queuedPlaybackBuffers == 0 { self.playbackDrainedHandler?() }
+                if self.queuedPlaybackBuffers == 0 {
+                    // Sin más audio en cola no llegan más bloques que decaigan la
+                    // envolvente: se fuerza el silencio para que la UI repose.
+                    self.outputLevelEnvelope = 0
+                    self.onOutputLevel?(0)
+                    self.playbackDrainedHandler?()
+                }
             }
         }
         if !player.isPlaying { player.play() }
+    }
+
+    // MARK: Niveles de voz para la UI
+
+    /// RMS del bloque llevado a 0..1 de "voz": el habla normal ronda un RMS
+    /// de 0.05-0.25 sobre fondo de escala completa, así que se aplica una
+    /// ganancia de 4 y se satura, para que hablar normal ya se vea vivo.
+    private static func voiceLevel(of samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sum: Float = 0
+        for sample in samples { sum += sample * sample }
+        return min(1, (sum / Float(samples.count)).squareRoot() * 4)
+    }
+
+    private func trackInputLevel(_ pcm: Data) {
+        guard onInputLevel != nil, let samples = OpenAIRealtimePCM16.float32Samples(pcm) else { return }
+        inputLevelEnvelope = max(Self.voiceLevel(of: samples), inputLevelEnvelope * 0.85)
+        let now = Date().timeIntervalSinceReferenceDate
+        // Los bloques llegan a ~50 Hz; se emite como mucho a ~30 Hz para no
+        // inundar el MainActor con publicaciones de @Published.
+        guard now - lastInputLevelEmit >= 1.0 / 30.0 else { return }
+        lastInputLevelEmit = now
+        onInputLevel?(inputLevelEnvelope)
+    }
+
+    private func trackOutputLevel(_ samples: [Float]) {
+        guard onOutputLevel != nil else { return }
+        outputLevelEnvelope = max(Self.voiceLevel(of: samples), outputLevelEnvelope * 0.85)
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastOutputLevelEmit >= 1.0 / 30.0 else { return }
+        lastOutputLevelEmit = now
+        onOutputLevel?(outputLevelEnvelope)
     }
 
     public func setPlaybackDrainedHandler(_ handler: @escaping () -> Void) { playbackDrainedHandler = handler }
@@ -405,6 +465,8 @@ public final class NativePulseVoiceController: PulseVoiceControlling {
     public var onPCM16: ((Data) -> Void)?
     public var onInterruption: (() -> Void)?
     public var onPlaybackFailure: (() -> Void)?
+    public var onInputLevel: ((Float) -> Void)?
+    public var onOutputLevel: ((Float) -> Void)?
     public init() {}
     public func startContinuousCapture() async -> Bool { true }
     public func stopContinuousCapture() {}

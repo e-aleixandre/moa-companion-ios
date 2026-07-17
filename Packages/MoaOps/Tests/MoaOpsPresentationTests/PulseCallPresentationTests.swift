@@ -89,6 +89,8 @@ private final class PresentationVoice: PulseVoiceControlling {
     var onPCM16: ((Data) -> Void)?
     var onInterruption: (() -> Void)?
     var onPlaybackFailure: (() -> Void)?
+    var onInputLevel: ((Float) -> Void)?
+    var onOutputLevel: ((Float) -> Void)?
     private let captureStarts: Bool
     private(set) var playbackFlushes = 0
     init(captureStarts: Bool = true) { self.captureStarts = captureStarts }

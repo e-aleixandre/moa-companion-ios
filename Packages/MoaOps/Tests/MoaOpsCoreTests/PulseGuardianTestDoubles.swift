@@ -23,6 +23,8 @@ final class MockVoice: PulseVoiceControlling {
     var onPCM16: ((Data) -> Void)?
     var onInterruption: (() -> Void)?
     var onPlaybackFailure: (() -> Void)?
+    var onInputLevel: ((Float) -> Void)?
+    var onOutputLevel: ((Float) -> Void)?
     private var playbackDrained: (() -> Void)?
     private var temporaryInterruption: (() -> Void)?
     private var captureResumed: (() -> Void)?

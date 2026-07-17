@@ -4,17 +4,20 @@ import SwiftUI
 public enum PulseOrbMode: Equatable, Sendable {
     /// En reposo: nebulosa fría y serena, deriva muy lenta.
     case idle
-    /// Conectando o reconectando: una veta de luz circula, expectante.
+    /// Conectando o despertando: una veta de luz circula, expectante.
     case connecting
-    /// Escuchando al dueño: aurora cian, más luminosa y con más flujo.
+    /// Escuchando al dueño: aurora cian que florece con su voz.
     case listening
-    /// Pulse habla: nebulosa cálida ember con vetas crema, más energía.
+    /// Pulse piensa/resuelve: vórtice dorado concentrado hacia dentro.
+    case thinking
+    /// Pulse habla: nebulosa cálida ember que late con su voz.
     case speaking
 
     var tone: PulseTone {
         switch self {
         case .idle, .connecting: .neutral
         case .listening: .listening
+        case .thinking: .warning
         case .speaking: .accent
         }
     }
@@ -31,10 +34,15 @@ public enum PulseOrbMode: Equatable, Sendable {
 public struct PulseVoiceOrb: View {
     public var mode: PulseOrbMode
     public var diameter: CGFloat
+    /// Nivel 0..1 de la voz relevante (la del dueño al escuchar, la de Pulse
+    /// al hablar). Llega ya suavizado con envolvente desde la capa de audio;
+    /// aquí solo se traduce a luz, escala y densidad de nebulosa.
+    public var level: Float
 
-    public init(mode: PulseOrbMode, diameter: CGFloat = 148) {
+    public init(mode: PulseOrbMode, diameter: CGFloat = 148, level: Float = 0) {
         self.mode = mode
         self.diameter = diameter
+        self.level = level
     }
 
     public var body: some View {
@@ -53,22 +61,33 @@ public struct PulseVoiceOrb: View {
         let breath = breathScale(time: t)
 
         ZStack {
-            // Halo exterior difuso, respira con la esfera.
+            // Halo exterior difuso: respira con la esfera y FLORECE con la voz
+            // — es la capa que más se ve de reojo, así que lleva la reacción
+            // más generosa al nivel.
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [glowColor.opacity(haloOpacity), glowColor.opacity(0)],
+                        colors: [glowColor.opacity(haloOpacity + 0.30 * boost), glowColor.opacity(0)],
                         center: .center,
                         startRadius: diameter * 0.20,
-                        endRadius: diameter * 0.72
+                        endRadius: diameter * (0.72 + 0.10 * boost)
                     )
                 )
                 .frame(width: diameter * 1.5, height: diameter * 1.5)
-                .scaleEffect(breath)
+                .scaleEffect(breath + CGFloat(0.05 * boost))
 
             sphere(time: t)
                 .scaleEffect(coreScale(time: t, base: breath))
-                .pulseGlow(glowColor, radius: 26, opacity: mode == .idle ? 0.14 : 0.40)
+                .pulseGlow(glowColor, radius: 26, opacity: mode == .idle ? 0.10 : 0.40)
+
+            // El instante de DESPERTAR: al entrar en escucha, la vista se
+            // inserta y su onAppear dispara una única onda que se expande y
+            // se apaga — el "abrir los ojos" al oír «Pulse». Ligada a la
+            // inserción (no a onChange) para no depender de APIs con firma
+            // distinta entre iOS 17 y macOS 13.
+            if mode == .listening {
+                WakeBloomRing(color: PulseColor.listening, diameter: diameter)
+            }
         }
     }
 
@@ -91,15 +110,23 @@ public struct PulseVoiceOrb: View {
 
             // Nebulosa: las nubes giran juntas muy despacio ADEMÁS de sus
             // órbitas propias, para que las mezclas nunca se repitan igual.
+            // Al pensar, el conjunto gira mucho más rápido y las órbitas se
+            // contraen (orbitScale): la nebulosa se vuelve un vórtice denso y
+            // concentrado, "mirando hacia dentro" — lo contrario de escuchar,
+            // que se abre hacia el dueño.
             ZStack {
                 ForEach(0..<Self.clouds.count, id: \.self) { index in
                     cloud(Self.clouds[index], color: palette[index], time: t)
                 }
             }
-            .rotationEffect(.radians(t * 0.05 * flowSpeed))
+            .rotationEffect(.radians(t * nebulaSpin))
 
             if mode == .connecting {
                 connectingStreak(time: t)
+            }
+
+            if mode == .thinking {
+                thinkingMotes(time: t)
             }
 
             // Sombra interior desde abajo: vende el volumen esférico.
@@ -163,7 +190,7 @@ public struct PulseVoiceOrb: View {
             )
             .frame(width: width, height: width * spec.aspect)
             .rotationEffect(.radians(t * spec.spin * flow + spec.phase))
-            .offset(x: diameter * CGFloat(x), y: diameter * CGFloat(y))
+            .offset(x: diameter * CGFloat(x) * orbitScale, y: diameter * CGFloat(y) * orbitScale)
             .blur(radius: diameter * 0.055)
             .blendMode(.plusLighter)
     }
@@ -187,6 +214,30 @@ public struct PulseVoiceOrb: View {
             .offset(x: CGFloat(cos(angle)) * orbit, y: CGFloat(sin(angle)) * orbit)
             .blur(radius: diameter * 0.03)
             .blendMode(.plusLighter)
+    }
+
+    /// Dos motas de luz en contrarrotación cerrada: el "engranaje" visible
+    /// del pensamiento. Pequeñas y rápidas para leerse como actividad
+    /// interna, no como señal hacia el dueño.
+    private func thinkingMotes(time t: TimeInterval) -> some View {
+        ForEach(0..<2, id: \.self) { index in
+            let direction: Double = index == 0 ? 1 : -1
+            let angle = t * 1.6 * direction + Double(index) * .pi
+            let orbit = diameter * (index == 0 ? 0.18 : 0.12)
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [Color.white.opacity(0.40), Color.white.opacity(0)],
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: diameter * 0.10
+                    )
+                )
+                .frame(width: diameter * 0.20, height: diameter * 0.20)
+                .offset(x: CGFloat(cos(angle)) * orbit, y: CGFloat(sin(angle)) * orbit)
+                .blur(radius: diameter * 0.02)
+                .blendMode(.plusLighter)
+        }
     }
 
     // MARK: - Nubes
@@ -232,6 +283,14 @@ public struct PulseVoiceOrb: View {
                 PulseColor.listening,
                 PulseColor.textSecondary,
             ]
+        case .thinking:
+            [
+                PulseColor.warning,
+                PulseColor.ember,
+                Color.white,
+                PulseColor.warning,
+                PulseColor.ember,
+            ]
         case .speaking:
             [
                 PulseColor.ember,
@@ -245,6 +304,11 @@ public struct PulseVoiceOrb: View {
 
     // MARK: - Parámetros por modo
 
+    /// Nivel de voz saneado a 0..1 en Double, listo para mezclar en opacidades.
+    private var boost: Double {
+        Double(min(max(level, 0), 1))
+    }
+
     /// Color del halo/glow exterior; el interior lo pone la paleta.
     private var glowColor: Color {
         mode.tone == .neutral ? PulseColor.textSecondary : mode.tone.color
@@ -254,54 +318,107 @@ public struct PulseVoiceOrb: View {
     private var tintColor: Color {
         switch mode {
         case .idle, .connecting, .listening: PulseColor.listening
+        case .thinking: PulseColor.warning
         case .speaking: PulseColor.ember
         }
     }
 
     private var haloOpacity: Double {
         switch mode {
-        case .idle: 0.10
+        case .idle: 0.06
         case .connecting: 0.16
-        case .listening: 0.26
-        case .speaking: 0.32
+        case .listening: 0.24
+        case .thinking: 0.20
+        case .speaking: 0.30
         }
     }
 
     /// Multiplicador de velocidad del flujo interno.
     private var flowSpeed: Double {
         switch mode {
-        case .idle: 0.9
+        case .idle: 0.7
         case .connecting: 1.6
         case .listening: 2.4
+        case .thinking: 3.0
         case .speaking: 4.0
         }
     }
 
-    /// Brillo global de las nubes. En reposo la nebulosa es tenue; al
-    /// escuchar/hablar sube la luz, no solo la velocidad.
-    private var luminosity: Double {
-        switch mode {
-        case .idle: 0.30
-        case .connecting: 0.38
-        case .listening: 0.55
-        case .speaking: 0.60
-        }
+    /// Rotación de conjunto de la nebulosa. Al pensar es un orden de
+    /// magnitud mayor: el giro colectivo ES el gesto de concentración.
+    private var nebulaSpin: Double {
+        mode == .thinking ? 0.55 : 0.05 * flowSpeed
     }
 
-    /// Respiración senoidal lenta; más viva al hablar.
+    /// Contracción de las órbitas de deriva de las nubes (vórtice al pensar).
+    private var orbitScale: CGFloat {
+        mode == .thinking ? 0.55 : 1.0
+    }
+
+    /// Brillo global de las nubes. En reposo la nebulosa es apenas un rescoldo
+    /// (dormida); al escuchar/hablar sube la luz base Y ADEMÁS florece con el
+    /// nivel de voz: la voz literalmente ilumina la nebulosa.
+    private var luminosity: Double {
+        let base: Double = switch mode {
+        case .idle: 0.20
+        case .connecting: 0.38
+        case .listening: 0.50
+        case .thinking: 0.52
+        case .speaking: 0.55
+        }
+        let voiceGain: Double = switch mode {
+        case .listening, .speaking: 0.55
+        default: 0
+        }
+        return base + voiceGain * boost
+    }
+
+    /// Respiración senoidal. Dormido respira más hondo y lento (período
+    /// largo) — el gesto universal de "está dormido"; hablando es más corta
+    /// porque el latido real lo pone la voz en `coreScale`.
     private func breathScale(time t: TimeInterval) -> CGFloat {
-        let period: Double = mode == .speaking ? 1.1 : 3.6
-        let amplitude: Double = mode == .speaking ? 0.040 : 0.018
+        let period: Double
+        let amplitude: Double
+        switch mode {
+        case .idle: period = 5.2; amplitude = 0.022
+        case .connecting: period = 2.4; amplitude = 0.02
+        case .listening: period = 3.2; amplitude = 0.015
+        case .thinking: period = 1.6; amplitude = 0.012
+        case .speaking: period = 1.4; amplitude = 0.015
+        }
         return CGFloat(1 + amplitude * sin(t * 2 * .pi / period))
     }
 
-    /// Al hablar, superpone un latido rápido de "amplitud de voz" simulada.
-    /// // TODO: cuando el motor exponga niveles de audio reales (RMS del PCM),
-    /// // sustituir esta senoide por la amplitud medida.
+    /// Latido por voz REAL: la envolvente del RMS empuja la escala. Al hablar
+    /// late con la voz de Pulse (gesto grande); al escuchar asiente con la del
+    /// dueño (gesto sutil: te está oyendo, no compitiendo contigo).
     private func coreScale(time t: TimeInterval, base: CGFloat) -> CGFloat {
-        guard mode == .speaking else { return base }
-        let flutter = 0.025 * sin(t * 2 * .pi / 0.27) * sin(t * 2 * .pi / 0.83)
-        return base + CGFloat(flutter)
+        switch mode {
+        case .speaking: base + CGFloat(0.065 * boost)
+        case .listening: base + CGFloat(0.030 * boost)
+        default: base
+        }
+    }
+}
+
+// MARK: - Onda de despertar
+
+/// Anillo que se expande una sola vez cuando el orbe empieza a escuchar.
+private struct WakeBloomRing: View {
+    let color: Color
+    let diameter: CGFloat
+    @State private var bloomed = false
+
+    var body: some View {
+        Circle()
+            .strokeBorder(color.opacity(bloomed ? 0 : 0.65), lineWidth: 2)
+            .frame(width: diameter, height: diameter)
+            .scaleEffect(bloomed ? 1.45 : 0.95)
+            .blur(radius: 1)
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.9)) { bloomed = true }
+            }
+            .allowsHitTesting(false)
     }
 }
 
@@ -310,22 +427,50 @@ public struct PulseVoiceOrb: View {
     VStack(spacing: PulseSpacing.xl) {
         HStack(spacing: 0) {
             VStack(spacing: PulseSpacing.xs) {
-                PulseVoiceOrb(mode: .idle, diameter: 90)
+                PulseVoiceOrb(mode: .idle, diameter: 80)
                 Text("idle").font(.caption).foregroundStyle(PulseColor.textSecondary)
             }
             VStack(spacing: PulseSpacing.xs) {
-                PulseVoiceOrb(mode: .connecting, diameter: 90)
+                PulseVoiceOrb(mode: .connecting, diameter: 80)
                 Text("connecting").font(.caption).foregroundStyle(PulseColor.textSecondary)
+            }
+            VStack(spacing: PulseSpacing.xs) {
+                PulseVoiceOrb(mode: .thinking, diameter: 80)
+                Text("thinking").font(.caption).foregroundStyle(PulseColor.textSecondary)
             }
         }
         HStack(spacing: 0) {
             VStack(spacing: PulseSpacing.xs) {
-                PulseVoiceOrb(mode: .listening, diameter: 90)
+                PulseVoiceOrb(mode: .listening, diameter: 80)
                 Text("listening").font(.caption).foregroundStyle(PulseColor.textSecondary)
             }
             VStack(spacing: PulseSpacing.xs) {
-                PulseVoiceOrb(mode: .speaking, diameter: 90)
+                PulseVoiceOrb(mode: .speaking, diameter: 80)
                 Text("speaking").font(.caption).foregroundStyle(PulseColor.textSecondary)
+            }
+        }
+    }
+    .pulseScreenBackground()
+}
+
+#Preview("Orbe · reactivo a la voz") {
+    VStack(spacing: PulseSpacing.xl) {
+        HStack(spacing: 0) {
+            ForEach([Float(0.0), 0.4, 0.9], id: \.self) { level in
+                VStack(spacing: PulseSpacing.xs) {
+                    PulseVoiceOrb(mode: .listening, diameter: 80, level: level)
+                    Text("escucha \(level, specifier: "%.1f")")
+                        .font(.caption).foregroundStyle(PulseColor.textSecondary)
+                }
+            }
+        }
+        HStack(spacing: 0) {
+            ForEach([Float(0.0), 0.4, 0.9], id: \.self) { level in
+                VStack(spacing: PulseSpacing.xs) {
+                    PulseVoiceOrb(mode: .speaking, diameter: 80, level: level)
+                    Text("habla \(level, specifier: "%.1f")")
+                        .font(.caption).foregroundStyle(PulseColor.textSecondary)
+                }
             }
         }
     }

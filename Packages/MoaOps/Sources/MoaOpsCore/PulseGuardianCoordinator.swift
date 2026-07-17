@@ -37,6 +37,7 @@ public final class PulseGuardianCoordinator {
     public typealias StateHandler = @Sendable (PulseGuardianState) -> Void
     public typealias SnapshotHandler = @Sendable (PulseGuardianSnapshot) -> Void
     public typealias TextHandler = @Sendable (String) -> Void
+    public typealias AudioLevelHandler = @Sendable (Float) -> Void
 
     private enum Pending: Sendable {
         case item(PulseAttentionItem)
@@ -75,11 +76,26 @@ public final class PulseGuardianCoordinator {
     private struct BriefingEnvelope: Encodable { let type = "briefing"; let briefing: PulseBriefing }
     private struct TerminationEnvelope: Encodable { let type = "termination"; let termination: PulseRunTermination }
 
-    public private(set) var state: PulseGuardianState = .idle { didSet { onState?(state) } }
+    public private(set) var state: PulseGuardianState = .idle {
+        didSet {
+            onState?(state)
+            // Al salir de los estados con voz el nivel visual vuelve a cero;
+            // si no, el último nivel emitido se quedaría congelado en la UI
+            // (halo encendido con el orbe dormido).
+            switch state {
+            case .listening, .waking, .speaking, .draining, .resolving: break
+            default: onAudioLevel?(0)
+            }
+        }
+    }
     public private(set) var snapshot = PulseGuardianSnapshot() { didSet { onSnapshot?(snapshot) } }
     public var onState: StateHandler?
     public var onSnapshot: SnapshotHandler?
     public var onText: TextHandler?
+    /// Nivel 0..1 de la voz "relevante" según el estado: la del dueño
+    /// mientras Pulse escucha, la de Pulse mientras habla. Un solo canal
+    /// para que la UI no tenga que duplicar la lógica de quién suena.
+    public var onAudioLevel: AudioLevelHandler?
 
     private let service: any PulseCallServing
     private let realtime: any PulseRealtimeCalling
@@ -180,6 +196,8 @@ public final class PulseGuardianCoordinator {
 
     private func configureAudioCallbacks() {
         voice.onPCM16 = { [weak self] pcm in self?.receivePCM(pcm) }
+        voice.onInputLevel = { [weak self] level in self?.receiveAudioLevel(level, fromOutput: false) }
+        voice.onOutputLevel = { [weak self] level in self?.receiveAudioLevel(level, fromOutput: true) }
         voice.onInterruption = { [weak self] in self?.audioFailed() }
         voice.onPlaybackFailure = { [weak self] in self?.audioFailed() }
         voice.setPlaybackDrainedHandler { [weak self] in self?.playbackDrained() }
@@ -549,6 +567,24 @@ public final class PulseGuardianCoordinator {
         // TODO(ui): play a short earcon/tone here so the owner hears when to
         // speak. Sound synthesis belongs in the redesign UI branch; the explicit
         // .listening transition is the reliable signal in the meantime.
+    }
+
+    /// Elige el nivel relevante según quién tiene "la palabra". Mientras
+    /// suena audio de Pulse manda la salida (el micro captaría el eco de su
+    /// propia voz por el altavoz); en el resto de estados con voz, el micro.
+    private func receiveAudioLevel(_ level: Float, fromOutput: Bool) {
+        guard isRunning else { return }
+        let outputHasFloor = isNarrating || isResponding || isPlayingResponseAudio
+        if fromOutput {
+            guard outputHasFloor else { return }
+            onAudioLevel?(level)
+        } else {
+            guard !outputHasFloor else { return }
+            switch state {
+            case .listening, .waking: onAudioLevel?(level)
+            default: break
+            }
+        }
     }
 
     private func receivePCM(_ pcm: Data) {

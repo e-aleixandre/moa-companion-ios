@@ -44,7 +44,7 @@ public enum PulseGuardianMode: Hashable, Sendable, CaseIterable {
         case .watching: .idle
         case .listening: .listening
         case .speaking: .speaking
-        case .resolving: .speaking
+        case .resolving: .thinking
         case .reconnecting: .connecting
         }
     }

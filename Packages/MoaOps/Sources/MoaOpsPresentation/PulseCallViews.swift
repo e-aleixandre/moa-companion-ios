@@ -35,6 +35,25 @@ extension PulseCallState {
     }
 }
 
+/// Mapeo de presentación del estado real del Guardián al lenguaje visual del
+/// orbe. Vive aquí (no en Core) porque es una decisión de cómo se muestra:
+/// el motor no sabe qué es "dormido" ni "pensando", solo la UI.
+extension PulseGuardianState {
+    var orbMode: PulseOrbMode {
+        switch self {
+        // Dormido/apagado: sin guardia, sin permiso de otro dispositivo, o roto.
+        case .idle, .guardianStandby, .interrupted, .inactive, .failed: .idle
+        // Transiciones con expectativa: arrancando, oyó «Pulse», reconectando.
+        case .guardianStarting, .waking, .attentionReconnecting: .connecting
+        case .listening: .listening
+        // Resolviendo = Pulse trabajando por dentro: el vórtice de pensar.
+        case .resolving: .thinking
+        // draining sigue sonando su voz: visualmente sigue hablando.
+        case .speaking, .draining: .speaking
+        }
+    }
+}
+
 // MARK: - Raíz
 
 public struct PulseCallRootView: View {
@@ -169,7 +188,10 @@ public struct PulseCallSceneView: View {
 
             Spacer(minLength: 0)
 
-            PulseVoiceOrb(mode: model.isGuardianMode ? (model.isGuardianActive ? .listening : .idle) : model.state.orbMode)
+            PulseVoiceOrb(
+                mode: model.isGuardianMode ? model.guardianState.orbMode : model.state.orbMode,
+                level: model.audioLevel
+            )
 
             VStack(spacing: PulseSpacing.xs) {
                 PulseStatusPill(

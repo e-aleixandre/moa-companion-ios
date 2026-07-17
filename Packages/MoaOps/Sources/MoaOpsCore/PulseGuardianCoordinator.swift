@@ -447,7 +447,12 @@ public final class PulseGuardianCoordinator {
         case .listening:
             isResponding = false
             if isNarrating { state = .draining }
-            else { state = .listening; if !isPlayingResponseAudio { scheduleCloseAfterHotWindow() } }
+            else if !isPlayingResponseAudio {
+                // response.done termina la generación del servidor antes de que
+                // el último PCM haya terminado de sonar en el dispositivo.
+                state = .listening
+                scheduleCloseAfterHotWindow()
+            }
         case .speechStarted:
             // Real owner voice (server VAD): keep the call open through the turn.
             ownerSpeaking = true
@@ -466,7 +471,10 @@ public final class PulseGuardianCoordinator {
         if !isNarrating {
             guard isPlayingResponseAudio else { return }
             isPlayingResponseAudio = false
-            if !isResponding, !ownerSpeaking, queue.isEmpty { scheduleCloseAfterHotWindow() }
+            if !isResponding, !ownerSpeaking {
+                state = .listening
+                if queue.isEmpty { scheduleCloseAfterHotWindow() }
+            }
             return
         }
         state = .draining

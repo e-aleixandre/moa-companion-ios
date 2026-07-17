@@ -48,7 +48,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
         XCTAssertEqual(resumes, 1)
     }
 
-    func testSpeechStartedFlushesPlaybackAndDropsInterruptedAudio() async throws {
+    func testSpeechStartedAfterEchoGuardFlushesPlaybackAndDropsInterruptedAudio() async throws {
         let firstAudio = Data([1, 2]).base64EncodedString()
         let interruptedAudio = Data([3, 4]).base64EncodedString()
         let nextAudio = Data([5, 6]).base64EncodedString()
@@ -59,7 +59,7 @@ final class PulseRealtimeTransportTests: XCTestCase {
             #"{"type":"response.output_audio.delta","delta":"\#(interruptedAudio)"}"#,
             #"{"type":"response.created"}"#,
             #"{"type":"response.output_audio.delta","delta":"\#(nextAudio)"}"#,
-        ])
+        ], receiveDelays: [0, 0, 500_000_000])
         let recorder = BargeInRecorder()
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
         // onAudio/onBargeIn fire synchronously from the read loop in wire order;
@@ -72,13 +72,32 @@ final class PulseRealtimeTransportTests: XCTestCase {
         await call.end()
     }
 
+    func testSpeechStartedInsideEchoGuardDoesNotInterruptPlayback() async throws {
+        let firstAudio = Data([1, 2]).base64EncodedString()
+        let continuedAudio = Data([3, 4]).base64EncodedString()
+        let socket = FixtureSocket(events: [
+            #"{"type":"response.created"}"#,
+            #"{"type":"response.output_audio.delta","delta":"\#(firstAudio)"}"#,
+            #"{"type":"input_audio_buffer.speech_started"}"#,
+            #"{"type":"response.output_audio.delta","delta":"\#(continuedAudio)"}"#,
+        ])
+        let recorder = BargeInRecorder()
+        let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { pcm, _ in recorder.append(pcm) }, onBargeIn: { recorder.recordBargeIn() })
+        await waitUntil { recorder.audio == [Data([1, 2]), Data([3, 4])] }
+        XCTAssertEqual(recorder.bargeInCount, 0)
+        let frames = await socket.sentJSON
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "conversation.item.truncate" })
+        await call.end()
+    }
+
     func testSpeechStartedTruncatesInProgressAudioResponse() async throws {
         let audio = Data([1, 2, 3, 4]).base64EncodedString()
         let socket = FixtureSocket(events: [
             #"{"type":"response.created"}"#,
             #"{"type":"response.output_audio.delta","item_id":"item-audio-1","delta":"\#(audio)"}"#,
             #"{"type":"input_audio_buffer.speech_started"}"#,
-        ])
+        ], receiveDelays: [0, 0, 500_000_000])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
         let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onAudio: { _, _ in }, onBargeIn: {})
         await waitUntil { await socket.sentJSON.contains { $0["type"] as? String == "conversation.item.truncate" } }
@@ -118,14 +137,22 @@ final class PulseRealtimeTransportTests: XCTestCase {
 
 private actor FixtureSocket: PulseRealtimeSocket {
     private var events: [String]
+    private var receiveDelays: [UInt64]
     private(set) var sentJSON: [[String: Any]] = []
     private(set) var wasCancelled = false
     private(set) var resumeCount = 0
-    init(events: [String]) { self.events = events }
+    init(events: [String], receiveDelays: [UInt64] = []) {
+        self.events = events
+        self.receiveDelays = receiveDelays
+    }
     func resume() { resumeCount += 1 }
     func send(text: String) throws { sentJSON.append((try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) ?? [:]) }
-    func receive() throws -> String {
+    func receive() async throws -> String {
         guard !events.isEmpty else { throw OpenAIRealtimeClientError.transport }
+        if !receiveDelays.isEmpty {
+            let delay = receiveDelays.removeFirst()
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+        }
         return events.removeFirst()
     }
     func cancel() { wasCancelled = true }

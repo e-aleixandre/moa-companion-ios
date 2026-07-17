@@ -113,6 +113,7 @@ actor MockRealtime: PulseRealtimeCalling {
     private(set) var lastInitialContext = ""
     private let startsReady: Bool
     private var onState: (@Sendable (PulseRealtimeCallState) -> Void)?
+    private var onAudio: (@Sendable (Data, @escaping @Sendable () -> Void) -> Void)?
     private var onBargeIn: (@Sendable () -> Void)?
     private var call: MockRealtimeCall?
 
@@ -122,6 +123,7 @@ actor MockRealtime: PulseRealtimeCalling {
         beginCount += 1
         lastInitialContext = initialContext
         self.onState = onState
+        self.onAudio = onAudio
         self.onBargeIn = onBargeIn
         let call = MockRealtimeCall(startsReady: startsReady)
         self.call = call
@@ -129,6 +131,7 @@ actor MockRealtime: PulseRealtimeCalling {
     }
 
     func emit(_ state: PulseRealtimeCallState) { onState?(state) }
+    func emitAudio(_ pcm: Data) { onAudio?(pcm, {}) }
     func emitBargeIn() { onBargeIn?() }
     func begins() -> Int { beginCount }
     func initialContext() -> String { lastInitialContext }

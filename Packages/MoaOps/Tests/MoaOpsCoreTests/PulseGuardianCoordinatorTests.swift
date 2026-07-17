@@ -126,6 +126,27 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         try await waitFor { coordinator.state == .guardianStandby }
     }
 
+    func testListeningWaitsForResponseAudioToDrain() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        await realtime.emit(.responding)
+        await realtime.emitAudio(Data([1, 2]))
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+        XCTAssertEqual(coordinator.state, .speaking)
+
+        voice.drainPlayback()
+        XCTAssertEqual(coordinator.state, .listening)
+    }
+
     // BUG 2: PCM captured between activation and socket-ready must be buffered
     // and then flushed, in order, once the session is ready — never discarded.
     func testOwnerSpeechDuringWarmupIsBufferedAndFlushedInOrder() async throws {

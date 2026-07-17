@@ -142,6 +142,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private var closed = false
     private var currentAudioItemID: String?
     private var playedAudioBytes = 0
+    // Durante este breve margen el VPIO aún puede estar convergiendo y detectar
+    // la propia voz de Pulse como si fuera una interrupción del propietario.
+    private let echoGuardWindow: TimeInterval = 0.4
+    private var responseAudioStartedAt: Date?
     private var sessionReady = false
     private var sessionReadyWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -215,6 +219,7 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 case "response.output_audio.delta":
                     if let itemID = event["item_id"] as? String { currentAudioItemID = itemID }
                     if !discardingInterruptedAudio, let audio = (event["delta"] as? String).flatMap({ Data(base64Encoded: $0) }) {
+                        if responseAudioStartedAt == nil { responseAudioStartedAt = Date() }
                         let itemID = currentAudioItemID
                         let call = self
                         let byteCount = audio.count
@@ -233,6 +238,12 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                     try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": callID, "output": result.output]])
                     hasFunctionCallOutputsForCurrentResponse = true
                 case "input_audio_buffer.speech_started":
+                    if let responseAudioStartedAt,
+                       Date().timeIntervalSince(responseAudioStartedAt) < echoGuardWindow {
+                        // El primer VAD tras arrancar la salida suele ser eco,
+                        // no una intervención real; no se cancela esta respuesta.
+                        break
+                    }
                     discardingInterruptedAudio = true
                     // BUG 5: tell the server how much of the in-progress audio the
                     // owner actually heard so it never assumes the rest was spoken.
@@ -244,6 +255,7 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 case "response.created":
                     discardingInterruptedAudio = false
                     playedAudioBytes = 0
+                    responseAudioStartedAt = nil
                     onState(.responding)
                 case "response.done":
                     currentAudioItemID = nil

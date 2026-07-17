@@ -45,6 +45,11 @@ public struct PulseVoiceOrb: View {
         self.level = level
     }
 
+    /// Memoria continua del orbe entre frames (fases integradas y parámetros
+    /// suavizados). Es una clase a propósito: mutarla durante el tick del
+    /// TimelineView no dispara invalidaciones extra de SwiftUI.
+    @State private var dynamics = OrbDynamics()
+
     public var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
             orb(time: context.date.timeIntervalSinceReferenceDate)
@@ -58,7 +63,10 @@ public struct PulseVoiceOrb: View {
 
     @ViewBuilder
     private func orb(time t: TimeInterval) -> some View {
-        let breath = breathScale(time: t)
+        // Un solo punto de verdad por frame: todos los parámetros que dependen
+        // del modo salen ya SUAVIZADOS de aquí, nunca directos de un switch.
+        let f = dynamics.advance(to: t, mode: mode, boost: boost)
+        let breath = CGFloat(1 + f.breathAmplitude * sin(f.breathPhase))
 
         ZStack {
             // Halo exterior difuso: respira con la esfera y FLORECE con la voz
@@ -67,7 +75,7 @@ public struct PulseVoiceOrb: View {
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [glowColor.opacity(haloOpacity + 0.30 * boost), glowColor.opacity(0)],
+                        colors: [glowColor.opacity(f.haloOpacity + 0.30 * boost), glowColor.opacity(0)],
                         center: .center,
                         startRadius: diameter * 0.20,
                         endRadius: diameter * (0.72 + 0.10 * boost)
@@ -76,9 +84,9 @@ public struct PulseVoiceOrb: View {
                 .frame(width: diameter * 1.5, height: diameter * 1.5)
                 .scaleEffect(breath + CGFloat(0.05 * boost))
 
-            sphere(time: t)
-                .scaleEffect(coreScale(time: t, base: breath))
-                .pulseGlow(glowColor, radius: 26, opacity: mode == .idle ? 0.10 : 0.40)
+            sphere(frame: f, time: t)
+                .scaleEffect(breath + CGFloat(f.voiceScale * boost))
+                .pulseGlow(glowColor, radius: 26, opacity: f.glowStrength)
 
             // El instante de DESPERTAR: al entrar en escucha, la vista se
             // inserta y su onAppear dispara una única onda que se expande y
@@ -87,13 +95,14 @@ public struct PulseVoiceOrb: View {
             // distinta entre iOS 17 y macOS 13.
             if mode == .listening {
                 WakeBloomRing(color: PulseColor.listening, diameter: diameter)
+                    .transition(.opacity)
             }
         }
     }
 
     /// La esfera: base oscura + nebulosa + volumen (sombra/especular),
     /// todo recortado por un círculo perfecto y con borde de cristal.
-    private func sphere(time t: TimeInterval) -> some View {
+    private func sphere(frame f: OrbDynamics.Frame, time t: TimeInterval) -> some View {
         ZStack {
             // Base oscura con un matiz del modo arriba: da profundidad y
             // evita que las nubes floten sobre negro puro.
@@ -116,17 +125,21 @@ public struct PulseVoiceOrb: View {
             // que se abre hacia el dueño.
             ZStack {
                 ForEach(0..<Self.clouds.count, id: \.self) { index in
-                    cloud(Self.clouds[index], color: palette[index], time: t)
+                    cloud(Self.clouds[index], color: palette[index], frame: f)
                 }
             }
-            .rotationEffect(.radians(t * nebulaSpin))
+            .rotationEffect(.radians(f.spinPhase))
 
+            // Los adornos por-modo entran y salen con fundido: la animación
+            // implícita de `mode` solo gobierna ya colores y estas transiciones.
             if mode == .connecting {
                 connectingStreak(time: t)
+                    .transition(.opacity)
             }
 
             if mode == .thinking {
-                thinkingMotes(time: t)
+                ZStack { thinkingMotes(time: t) }
+                    .transition(.opacity)
             }
 
             // Sombra interior desde abajo: vende el volumen esférico.
@@ -174,23 +187,25 @@ public struct PulseVoiceOrb: View {
     /// difuminada, que deriva en una órbita senoidal lenta con fase propia
     /// y rota sobre sí misma. `plusLighter` hace que al cruzarse SUMEN luz,
     /// que es lo que da el efecto acuarela.
-    private func cloud(_ spec: CloudSpec, color: Color, time t: TimeInterval) -> some View {
-        let flow = flowSpeed
-        let x = sin(t * spec.freqX * flow + spec.phase) * Double(spec.orbit)
-        let y = cos(t * spec.freqY * flow + spec.phase * 1.7) * Double(spec.orbit) * 0.8
+    private func cloud(_ spec: CloudSpec, color: Color, frame f: OrbDynamics.Frame) -> some View {
+        // Las órbitas se calculan sobre la FASE integrada, no sobre `t` por un
+        // multiplicador de modo: así un cambio de velocidad nunca teletransporta
+        // la nube, solo acelera o frena su deriva desde donde está.
+        let x = sin(f.flowPhase * spec.freqX + spec.phase) * Double(spec.orbit)
+        let y = cos(f.flowPhase * spec.freqY + spec.phase * 1.7) * Double(spec.orbit) * 0.8
         let width = diameter * spec.size
         return Ellipse()
             .fill(
                 RadialGradient(
-                    colors: [color.opacity(spec.baseOpacity * luminosity), color.opacity(0)],
+                    colors: [color.opacity(spec.baseOpacity * f.luminosity), color.opacity(0)],
                     center: .center,
                     startRadius: 0,
                     endRadius: width * 0.5
                 )
             )
             .frame(width: width, height: width * spec.aspect)
-            .rotationEffect(.radians(t * spec.spin * flow + spec.phase))
-            .offset(x: diameter * CGFloat(x) * orbitScale, y: diameter * CGFloat(y) * orbitScale)
+            .rotationEffect(.radians(f.flowPhase * spec.spin + spec.phase))
+            .offset(x: diameter * CGFloat(x) * f.orbitScale, y: diameter * CGFloat(y) * f.orbitScale)
             .blur(radius: diameter * 0.055)
             .blendMode(.plusLighter)
     }
@@ -323,81 +338,129 @@ public struct PulseVoiceOrb: View {
         }
     }
 
-    private var haloOpacity: Double {
-        switch mode {
-        case .idle: 0.06
-        case .connecting: 0.16
-        case .listening: 0.24
-        case .thinking: 0.20
-        case .speaking: 0.30
+}
+
+// MARK: - Dinámica continua entre estados
+
+/// Memoria del orbe entre frames. La causa del salto errático al cambiar de
+/// estado era doble: (1) el movimiento multiplicaba el tiempo ABSOLUTO por
+/// una velocidad por-modo (`t * flowSpeed`), y como `t` es enorme, cambiar el
+/// multiplicador producía saltos de fase de millones de radianes que la
+/// animación implícita encima intentaba recorrer en 0.6 s (giro/teletransporte
+/// frenético); (2) opacidades, órbitas y respiración salían de un switch y
+/// cambiaban de golpe. Aquí las velocidades se INTEGRAN en fases
+/// (`fase += velocidad · dt`) y cada parámetro PERSIGUE su objetivo de modo
+/// con una envolvente exponencial (τ ≈ 0.55 s, independiente del framerate):
+/// el cruce de estado es una rampa continua, nunca un corte.
+private final class OrbDynamics {
+    struct Frame {
+        var flowPhase: Double
+        var spinPhase: Double
+        var breathPhase: Double
+        var breathAmplitude: Double
+        var orbitScale: CGFloat
+        var haloOpacity: Double
+        var luminosity: Double
+        var voiceScale: Double
+        var glowStrength: Double
+    }
+
+    /// Valores de régimen de cada modo (los mismos que antes vivían en los
+    /// switch de la vista, ahora como objetivos a perseguir).
+    private struct Targets {
+        var flowSpeed: Double
+        var spinSpeed: Double
+        var breathRate: Double
+        var breathAmplitude: Double
+        var orbitScale: Double
+        var haloOpacity: Double
+        var luminosityBase: Double
+        var voiceGain: Double
+        var voiceScale: Double
+        var glowStrength: Double
+
+        init(mode: PulseOrbMode) {
+            // Respiración: dormido más honda y lenta; hablando corta porque el
+            // latido real lo pone la voz vía voiceScale. Al pensar, el giro de
+            // conjunto (spinSpeed) es un orden de magnitud mayor y las órbitas
+            // se contraen: el vórtice de concentración.
+            switch mode {
+            case .idle:
+                flowSpeed = 0.7; spinSpeed = 0.035
+                breathRate = 2 * .pi / 5.2; breathAmplitude = 0.022
+                orbitScale = 1.0; haloOpacity = 0.06; luminosityBase = 0.20
+                voiceGain = 0; voiceScale = 0; glowStrength = 0.10
+            case .connecting:
+                flowSpeed = 1.6; spinSpeed = 0.08
+                breathRate = 2 * .pi / 2.4; breathAmplitude = 0.02
+                orbitScale = 1.0; haloOpacity = 0.16; luminosityBase = 0.38
+                voiceGain = 0; voiceScale = 0; glowStrength = 0.40
+            case .listening:
+                flowSpeed = 2.4; spinSpeed = 0.12
+                breathRate = 2 * .pi / 3.2; breathAmplitude = 0.015
+                orbitScale = 1.0; haloOpacity = 0.24; luminosityBase = 0.50
+                voiceGain = 0.55; voiceScale = 0.030; glowStrength = 0.40
+            case .thinking:
+                flowSpeed = 3.0; spinSpeed = 0.55
+                breathRate = 2 * .pi / 1.6; breathAmplitude = 0.012
+                orbitScale = 0.55; haloOpacity = 0.20; luminosityBase = 0.52
+                voiceGain = 0; voiceScale = 0; glowStrength = 0.40
+            case .speaking:
+                flowSpeed = 4.0; spinSpeed = 0.20
+                breathRate = 2 * .pi / 1.4; breathAmplitude = 0.015
+                orbitScale = 1.0; haloOpacity = 0.30; luminosityBase = 0.55
+                voiceGain = 0.55; voiceScale = 0.065; glowStrength = 0.40
+            }
         }
     }
 
-    /// Multiplicador de velocidad del flujo interno.
-    private var flowSpeed: Double {
-        switch mode {
-        case .idle: 0.7
-        case .connecting: 1.6
-        case .listening: 2.4
-        case .thinking: 3.0
-        case .speaking: 4.0
-        }
-    }
+    private var lastTime: TimeInterval?
+    private var current: Targets = Targets(mode: .idle)
+    private var flowPhase = 0.0
+    private var spinPhase = 0.0
+    private var breathPhase = 0.0
 
-    /// Rotación de conjunto de la nebulosa. Al pensar es un orden de
-    /// magnitud mayor: el giro colectivo ES el gesto de concentración.
-    private var nebulaSpin: Double {
-        mode == .thinking ? 0.55 : 0.05 * flowSpeed
-    }
+    func advance(to t: TimeInterval, mode: PulseOrbMode, boost: Double) -> Frame {
+        let targets = Targets(mode: mode)
 
-    /// Contracción de las órbitas de deriva de las nubes (vórtice al pensar).
-    private var orbitScale: CGFloat {
-        mode == .thinking ? 0.55 : 1.0
-    }
+        if let last = lastTime {
+            // dt acotado: tras una pausa larga (background, preview congelada)
+            // el orbe continúa suave desde donde estaba, sin teletransportes.
+            let dt = min(max(t - last, 0), 0.1)
+            // Envolvente exponencial hacia el objetivo, estable a cualquier fps.
+            let k = 1 - exp(-dt / 0.55)
+            current.flowSpeed += (targets.flowSpeed - current.flowSpeed) * k
+            current.spinSpeed += (targets.spinSpeed - current.spinSpeed) * k
+            current.breathRate += (targets.breathRate - current.breathRate) * k
+            current.breathAmplitude += (targets.breathAmplitude - current.breathAmplitude) * k
+            current.orbitScale += (targets.orbitScale - current.orbitScale) * k
+            current.haloOpacity += (targets.haloOpacity - current.haloOpacity) * k
+            current.luminosityBase += (targets.luminosityBase - current.luminosityBase) * k
+            current.voiceGain += (targets.voiceGain - current.voiceGain) * k
+            current.voiceScale += (targets.voiceScale - current.voiceScale) * k
+            current.glowStrength += (targets.glowStrength - current.glowStrength) * k
+            flowPhase += current.flowSpeed * dt
+            spinPhase += current.spinSpeed * dt
+            breathPhase += current.breathRate * dt
+        } else {
+            // Primer frame: nace ya en régimen del modo actual, sin rampa.
+            current = targets
+        }
+        lastTime = t
 
-    /// Brillo global de las nubes. En reposo la nebulosa es apenas un rescoldo
-    /// (dormida); al escuchar/hablar sube la luz base Y ADEMÁS florece con el
-    /// nivel de voz: la voz literalmente ilumina la nebulosa.
-    private var luminosity: Double {
-        let base: Double = switch mode {
-        case .idle: 0.20
-        case .connecting: 0.38
-        case .listening: 0.50
-        case .thinking: 0.52
-        case .speaking: 0.55
-        }
-        let voiceGain: Double = switch mode {
-        case .listening, .speaking: 0.55
-        default: 0
-        }
-        return base + voiceGain * boost
-    }
-
-    /// Respiración senoidal. Dormido respira más hondo y lento (período
-    /// largo) — el gesto universal de "está dormido"; hablando es más corta
-    /// porque el latido real lo pone la voz en `coreScale`.
-    private func breathScale(time t: TimeInterval) -> CGFloat {
-        let period: Double
-        let amplitude: Double
-        switch mode {
-        case .idle: period = 5.2; amplitude = 0.022
-        case .connecting: period = 2.4; amplitude = 0.02
-        case .listening: period = 3.2; amplitude = 0.015
-        case .thinking: period = 1.6; amplitude = 0.012
-        case .speaking: period = 1.4; amplitude = 0.015
-        }
-        return CGFloat(1 + amplitude * sin(t * 2 * .pi / period))
-    }
-
-    /// Latido por voz REAL: la envolvente del RMS empuja la escala. Al hablar
-    /// late con la voz de Pulse (gesto grande); al escuchar asiente con la del
-    /// dueño (gesto sutil: te está oyendo, no compitiendo contigo).
-    private func coreScale(time t: TimeInterval, base: CGFloat) -> CGFloat {
-        switch mode {
-        case .speaking: base + CGFloat(0.065 * boost)
-        case .listening: base + CGFloat(0.030 * boost)
-        default: base
-        }
+        return Frame(
+            flowPhase: flowPhase,
+            spinPhase: spinPhase,
+            breathPhase: breathPhase,
+            breathAmplitude: current.breathAmplitude,
+            orbitScale: CGFloat(current.orbitScale),
+            haloOpacity: current.haloOpacity,
+            // La voz ilumina la nebulosa; su ganancia también entra en rampa,
+            // así el brillo por voz no aparece de golpe al entrar en escucha.
+            luminosity: current.luminosityBase + current.voiceGain * boost,
+            voiceScale: current.voiceScale,
+            glowStrength: current.glowStrength
+        )
     }
 }
 

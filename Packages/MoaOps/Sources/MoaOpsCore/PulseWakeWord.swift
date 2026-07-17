@@ -9,9 +9,34 @@ import os
 /// recognizer sees "Pulse". If the selected locale lacks offline recognition,
 /// `start()` returns false and the caller keeps the explicit talk button as a
 /// fallback. TODO: surface that fallback prominently in the redesign.
+/// On-screen diagnostics for the wake word, so the "Pulse va sordo" bug can be
+/// reproduced without diving into Console.app logs (which drop `.info`).
+public struct PulseWakeWordDiagnostics: Equatable, Sendable {
+    /// True while a recognition task is installed and hasn't fired yet, i.e.
+    /// `appendPCM16` will actually feed the recognizer instead of early-returning.
+    public var armed: Bool
+    public var active: Bool
+    public var didFire: Bool
+    public var generation: Int
+    /// Total PCM buffers that reached the recognizer (passed the `active/didFire`
+    /// guard). If this freezes while the coordinator keeps receiving mic audio,
+    /// the recognizer is desarmado; if it climbs but "Pulse" never matches, the
+    /// recognizer is fed but deaf.
+    public var appendedBuffers: Int
+
+    public init(armed: Bool = false, active: Bool = false, didFire: Bool = false, generation: Int = 0, appendedBuffers: Int = 0) {
+        self.armed = armed
+        self.active = active
+        self.didFire = didFire
+        self.generation = generation
+        self.appendedBuffers = appendedBuffers
+    }
+}
+
 @MainActor
 public protocol PulseWakeWordDetecting: AnyObject {
     var onWakeWord: (() -> Void)? { get set }
+    var diagnostics: PulseWakeWordDiagnostics { get }
     func start() async -> Bool
     func stop()
     func appendPCM16(_ pcm: Data)
@@ -45,6 +70,16 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
     public init(locale: Locale = .current, recycleInterval: TimeInterval = 50) {
         self.locale = locale
         self.recycleInterval = recycleInterval
+    }
+
+    public var diagnostics: PulseWakeWordDiagnostics {
+        PulseWakeWordDiagnostics(
+            armed: active && !didFire && task != nil,
+            active: active,
+            didFire: didFire,
+            generation: recognitionGeneration,
+            appendedBuffers: appendedBuffers
+        )
     }
 
     /// Idempotent (re)arm: every call resets `didFire` and installs a fresh
@@ -201,6 +236,7 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
 @MainActor
 public final class PulseWakeWordDetector: PulseWakeWordDetecting {
     public var onWakeWord: (() -> Void)?
+    public var diagnostics: PulseWakeWordDiagnostics { PulseWakeWordDiagnostics() }
     public init(locale _: Locale = .current) {}
     public func start() async -> Bool { false }
     public func stop() {}

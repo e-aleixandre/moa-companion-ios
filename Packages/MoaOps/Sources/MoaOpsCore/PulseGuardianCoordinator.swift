@@ -485,13 +485,17 @@ public final class PulseGuardianCoordinator {
     /// Re-arms on-device wake detection after the Realtime socket closes. Without
     /// this the detector stays `didFire`/inactive and "Pulse" never wakes again.
     private func rearmWakeWord() {
-        guard isRunning, wakeAvailable, !wakeWordActive, state != .inactive, state != .idle else { return }
+        guard isRunning, wakeAvailable, !wakeWordActive, state != .inactive, state != .idle else {
+            log.info("wake rearm skipped: running=\(self.isRunning, privacy: .public) avail=\(self.wakeAvailable, privacy: .public) active=\(self.wakeWordActive, privacy: .public) state=\(String(describing: self.state), privacy: .public)")
+            return
+        }
         if wakeRearmTask != nil {
             if wakeRearmTaskGeneration != wakeWordGeneration { wakeRearmPending = true }
             return
         }
         let generation = wakeWordGeneration
         wakeRearmTaskGeneration = generation
+        log.info("wake rearm start gen=\(generation, privacy: .public)")
         wakeRearmTask = Task { [weak self] in
             guard let self else { return }
             let started = await self.wakeWord.start()
@@ -508,6 +512,7 @@ public final class PulseGuardianCoordinator {
                 return
             }
             self.wakeWordActive = started
+            self.log.info("wake rearm done gen=\(generation, privacy: .public) started=\(started, privacy: .public)")
             if self.wakeRearmPending {
                 self.wakeRearmPending = false
                 self.rearmWakeWord()

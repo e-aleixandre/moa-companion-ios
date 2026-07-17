@@ -2,6 +2,7 @@ import Foundation
 #if os(iOS) && canImport(Speech) && canImport(AVFoundation)
 import AVFoundation
 import Speech
+import os
 #endif
 
 /// On-device wake-word recognition. Audio is never sent to OpenAI until the
@@ -27,6 +28,16 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
     private var recycleTask: Task<Void, Never>?
     private var active = false
     private var didFire = false
+    // Identifies the current recognition task. Every stop()/start()/recycle
+    // bumps it, so a late callback from a cancelled SFSpeechRecognitionTask can
+    // be recognized as stale and ignored instead of tearing down the live task
+    // that replaced it (the root cause of "Pulse" going deaf after the first
+    // activation).
+    private var recognitionGeneration = 0
+    private var retryTask: Task<Void, Never>?
+    private let log = Logger(subsystem: "com.moa.pulse", category: "wakeword")
+    private var appendedBuffers = 0
+    private var lastHeartbeat = Date.distantPast
     // SFSpeechRecognitionRequest stops delivering results after ~1 min on
     // device, so the recognition task is recreated well before that ceiling.
     private let recycleInterval: TimeInterval
@@ -40,10 +51,23 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
     /// recognition task, so the coordinator can rearm after each activation.
     public func start() async -> Bool {
         stop()
+        // Capture the generation across the authorization await: if stop() runs
+        // while suspended, this arm is stale and must not revive active/didFire.
+        let generation = recognitionGeneration
         let authorization = await requestAuthorization()
-        guard authorization == .authorized else { return false }
+        guard authorization == .authorized else {
+            log.info("wake arm failed: authorization=\(authorization.rawValue, privacy: .public)")
+            return false
+        }
+        guard generation == recognitionGeneration else {
+            log.info("wake arm abandoned: stopped during authorization")
+            return false
+        }
         let recognizer = SFSpeechRecognizer(locale: locale)
-        guard let recognizer, recognizer.supportsOnDeviceRecognition else { return false }
+        guard let recognizer, recognizer.supportsOnDeviceRecognition else {
+            log.info("wake arm failed: on-device recognition unavailable")
+            return false
+        }
         self.recognizer = recognizer
         didFire = false
         active = true
@@ -53,6 +77,9 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
 
     public func stop() {
         active = false
+        recognitionGeneration &+= 1
+        retryTask?.cancel()
+        retryTask = nil
         recycleTask?.cancel()
         recycleTask = nil
         request?.endAudio()
@@ -66,18 +93,35 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
     /// `didFire`, so a long standby never silently stops hearing "Pulse".
     private func startRecognitionTask() {
         guard active, !didFire, let recognizer else { return }
+        retryTask?.cancel()
+        retryTask = nil
         request?.endAudio()
         task?.cancel()
+        recognitionGeneration &+= 1
+        let generation = recognitionGeneration
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
         self.request = request
+        log.info("wake task armed gen=\(generation, privacy: .public)")
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let ended = (result?.isFinal ?? false) || error != nil
+            let errorInfo = error.map { "\(($0 as NSError).domain)#\(($0 as NSError).code)" }
             Task { @MainActor [weak self] in
-                if let text { self?.recognize(text) }
-                if ended { self?.recycleRecognition() }
+                guard let self else { return }
+                // A callback from a task other than the current one is stale
+                // (e.g. the cancellation error of the task we just replaced). It
+                // must never recycle or wake, or it would tear down the live task.
+                guard generation == self.recognitionGeneration else {
+                    self.log.info("wake callback ignored: stale gen=\(generation, privacy: .public) current=\(self.recognitionGeneration, privacy: .public) err=\(errorInfo ?? "nil", privacy: .public)")
+                    return
+                }
+                if let text { self.recognize(text) }
+                if ended {
+                    self.log.info("wake task ended gen=\(generation, privacy: .public) err=\(errorInfo ?? "nil", privacy: .public)")
+                    if error != nil { self.scheduleRetry() } else { self.recycleRecognition() }
+                }
             }
         }
         scheduleRecycle()
@@ -90,6 +134,23 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
             try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await self?.recycleRecognition()
+        }
+    }
+
+    /// A task that ended with an error is not recreated synchronously: a
+    /// permanent error would spin a hot create/cancel loop. A short cancellable
+    /// delay recovers from transient Speech errors without churning.
+    private func scheduleRetry() {
+        guard active, !didFire else { return }
+        retryTask?.cancel()
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.retryTask = nil
+                self.recycleRecognition()
+            }
         }
     }
 
@@ -109,6 +170,15 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
             destination.assign(from: source.assumingMemoryBound(to: Int16.self), count: Int(buffer.frameLength))
         }
         request.append(buffer)
+        // Heartbeat: confirms on device whether audio still reaches the wake
+        // word after the first activation cycle (distinguishes a dead tap from a
+        // dead recognizer). One line every ~5s while armed, not per buffer.
+        appendedBuffers &+= 1
+        let now = Date()
+        if now.timeIntervalSince(lastHeartbeat) >= 5 {
+            lastHeartbeat = now
+            log.info("wake pcm heartbeat gen=\(self.recognitionGeneration, privacy: .public) buffers=\(self.appendedBuffers, privacy: .public)")
+        }
     }
 
     private func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
@@ -123,6 +193,7 @@ public final class PulseWakeWordDetector: NSObject, PulseWakeWordDetecting {
         let words = text.split(whereSeparator: { !$0.isLetter }).map(String.init)
         guard words.contains(where: { $0.caseInsensitiveCompare("pulse") == .orderedSame }) else { return }
         didFire = true
+        log.info("wake matched gen=\(self.recognitionGeneration, privacy: .public)")
         onWakeWord?()
     }
 }

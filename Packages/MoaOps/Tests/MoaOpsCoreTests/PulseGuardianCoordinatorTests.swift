@@ -1347,18 +1347,85 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(earcons.wakeCount, 1)
     }
 
-    func testSleepEarconSoundsOnManualStop() async throws {
+    func testSleepEarconIsSilentWhenTheGuardianIsStoppedFromStandby() async throws {
         let wake = MockWakeWord()
         let earcons = MockEarcons()
         let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: MockRealtime(), attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
 
+        // Nothing was being listened to: there is no conversation to close.
+        coordinator.stop()
+        XCTAssertEqual(earcons.sleepCount, 0)
+        coordinator.stop()
+        XCTAssertEqual(earcons.sleepCount, 0)
+    }
+
+    // Stopping the Guardián while it is in conversation does cut it off: that is
+    // the transition the cue names.
+    func testSleepEarconSoundsWhenStopCutsALiveConversation() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { coordinator.state == .listening }
+
         coordinator.stop()
         XCTAssertEqual(earcons.sleepCount, 1)
-        // Stopping an already stopped Guardián is not a transition.
+    }
+
+    // The hot window already told the owner Pulse stopped listening. Switching
+    // the Guardián off afterwards is not a second goodbye.
+    func testHotWindowCloseFollowedByStopSoundsOneSleep() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 0.05, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emit(.listening)
+        try await waitFor { earcons.sleepCount == 1 }
+
         coordinator.stop()
-        XCTAssertEqual(earcons.sleepCount, 1)
+        await settle()
+        XCTAssertEqual(earcons.sleepCount, 1, "the conversation had already ended with its own cue")
+    }
+
+    // Asking for Pulse while a reconnection is already opening a socket is the
+    // exact gap the cue exists to cover: the owner must still hear they were
+    // heard, and must hear it only once no matter how often they ask.
+    func testWakeDuringAnOpeningInFlightSoundsExactlyOneCue() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        let service = MockGuardianService()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        XCTAssertEqual(earcons.wakeCount, 1)
+
+        // The retry is parked mid-mint: the socket is opening and stays opening.
+        service.holdMint()
+        await realtime.emit(.failed)
+        try await waitFor { service.mintCount == 2 }
+        await settle()
+        XCTAssertEqual(earcons.wakeCount, 1, "the automatic retry nobody asked for stays silent")
+
+        wake.fire()
+        await settle()
+        XCTAssertEqual(earcons.wakeCount, 2, "the owner asked and deserves the confirmation")
+        wake.fire()
+        await settle()
+        XCTAssertEqual(earcons.wakeCount, 2, "one opening, one cue")
+
+        service.releaseMint()
     }
 
     // A voice reconnection recycles the socket while the conversation is still

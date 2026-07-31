@@ -264,9 +264,15 @@ final class MockGuardianService: PulseCallServing, @unchecked Sendable {
     /// reconnection budget was actually spent.
     var mintCount: Int { lock.withLock { storedMintCount } }
 
+    /// Parks the next mints instead of answering them, so a test can hold the
+    /// coordinator in its "opening the socket" phase for as long as it needs.
+    func holdMint() { lock.withLock { mintHeld = true } }
+    func releaseMint() { lock.withLock { mintHeld = false } }
+
     private let lock = NSLock()
     private var storedMintFailure: Error?
     private var storedMintCount = 0
+    private var mintHeld = false
 
     func listSessions() async throws -> [MoaServeSessionInfo] { [] }
     func attention() async throws -> MoaServeAttentionResponse { try JSONDecoder.moaOps.decode(MoaServeAttentionResponse.self, from: Data(#"{"items":[]}"#.utf8)) }
@@ -283,6 +289,9 @@ final class MockGuardianService: PulseCallServing, @unchecked Sendable {
     func archiveSession(sessionID: String) async throws -> MoaServeArchiveSessionResponse { throw PulseCallError.operationUnavailable }
     func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
         lock.withLock { storedMintCount += 1 }
+        while lock.withLock({ mintHeld }) {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
         if let failure = mintFailure { throw failure }
         return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1","model":"gpt-realtime-2.1"}"#.utf8))
     }

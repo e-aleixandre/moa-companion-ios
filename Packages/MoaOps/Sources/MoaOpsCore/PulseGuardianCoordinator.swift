@@ -258,6 +258,10 @@ public final class PulseGuardianCoordinator {
     private var presenceTask: Task<Void, Never>?
     private var isRunning = false
     private var isOpeningRealtime = false
+    // Whether the opening currently in flight already played its wake cue. A
+    // wake that lands while a socket is being opened still deserves the "te he
+    // oído", but two wakes inside the same opening must not double-tone.
+    private var wakeCuePlayedForOpening = false
     private var isNarrating = false
     private var isResponding = false
     private var isPlayingResponseAudio = false
@@ -323,10 +327,11 @@ public final class PulseGuardianCoordinator {
     }
 
     public func stop() {
-        // The owner is no longer being listened to at all: that is exactly what
-        // the closing cue means, so a manual stop earns it like the hot window
-        // does. Gated on `isRunning` so a second stop() is silent.
-        if isRunning { earcons.sleep() }
+        // The cue means "I stopped listening to the conversation", so only a
+        // stop that really cuts one earns it: switching the Guardián off from
+        // standby has nothing to stop listening to, and the hot window already
+        // sounded when that conversation ended.
+        if isRunning, call != nil || isOpeningRealtime { earcons.sleep() }
         // A clean stop is the last moment the Guardián was really listening: a
         // catch-up must measure the absence from here, not from the last tick.
         // Unconditional on purpose — this runs while the app is demonstrably
@@ -346,7 +351,7 @@ public final class PulseGuardianCoordinator {
         // later start() tells it instead of acking it silently.
         requeueInterruptedNarration()
         clearToolsInFlight()
-        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false
+        let old = call; call = nil; isOpeningRealtime = false; wakeCuePlayedForOpening = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false
         narrationResponseStarted = false; narrationResponseDone = false
         voice.stopAll()
         state = .idle
@@ -778,6 +783,7 @@ public final class PulseGuardianCoordinator {
                 self.costs.beginSession(at: self.now())
                 self.call = opened
                 self.isOpeningRealtime = false
+                self.wakeCuePlayedForOpening = false
                 // BUG 2: don't stream audio until the session is actually ready to
                 // receive it, then flush everything the owner said during warmup so
                 // the phrase started right after "Pulse" is not lost.
@@ -791,6 +797,7 @@ public final class PulseGuardianCoordinator {
             } catch {
                 guard self.socketGeneration == generation else { return }
                 self.isOpeningRealtime = false
+                self.wakeCuePlayedForOpening = false
                 // Minting a fresh client secret can fail for the same reason the
                 // socket dropped (no coverage): keep retrying within the budget.
                 if self.isReconnectingVoice { self.scheduleVoiceReconnect(); return }
@@ -1148,13 +1155,16 @@ public final class PulseGuardianCoordinator {
         // Asking for Pulse while a dropped conversation is being retried means
         // "try now": skip the remaining backoff instead of opening a second socket.
         if isReconnectingVoice {
-            guard !isOpeningRealtime else { return }
-            voiceReconnectTask?.cancel(); voiceReconnectTask = nil
             // The owner asked for Pulse and a socket is being opened right now
             // because of it: same promise as any other activation. Note this is
             // the owner's own wake, not the automatic retry — that one opens
             // without anybody having asked and stays silent.
-            earcons.wake()
+            playWakeCue()
+            // A retry already opening is exactly the gap the cue covers: confirm
+            // it was heard, but let that attempt finish instead of racing it with
+            // a second socket.
+            guard !isOpeningRealtime else { return }
+            voiceReconnectTask?.cancel(); voiceReconnectTask = nil
             openRealtimeForActivation()
             return
         }
@@ -1167,11 +1177,21 @@ public final class PulseGuardianCoordinator {
             // Immediately, before the socket exists: the opening takes ~1-2s and
             // this is the only thing telling the owner they were heard and may
             // start talking (the warmup buffer keeps those words).
-            earcons.wake()
+            playWakeCue()
             openRealtimeForActivation()
         } else {
             state = .listening
         }
+    }
+
+    /// The opening cue, at most once per socket opening: a wake arriving while
+    /// one is already in flight is still answered, but the owner never hears the
+    /// same confirmation twice for the same activation. The flag clears when the
+    /// opening settles (ready, failed, or torn down).
+    private func playWakeCue() {
+        guard !wakeCuePlayedForOpening else { return }
+        wakeCuePlayedForOpening = true
+        earcons.wake()
     }
 
     /// Re-arms on-device wake detection after the Realtime socket closes. Without
@@ -1304,7 +1324,7 @@ public final class PulseGuardianCoordinator {
         socketGeneration &+= 1
         requeueInterruptedNarration()
         clearToolsInFlight()
-        let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false; ownerSpeaking = false; activeAcknowledgement = nil
+        let old = call; call = nil; isOpeningRealtime = false; wakeCuePlayedForOpening = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false; ownerSpeaking = false; activeAcknowledgement = nil
         narrationResponseStarted = false; narrationResponseDone = false
         bufferingOwnerSpeech = false; warmupBuffer.removeAll()
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil

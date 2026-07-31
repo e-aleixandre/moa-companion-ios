@@ -168,6 +168,60 @@ final class PulseCallPresentationTests: XCTestCase {
         XCTAssertEqual(model.state, .ended, "a dead call must never leave the orb thinking")
     }
 
+    // Each provider callback hops to the main actor on its own, so a tool's
+    // `finished` can be applied before its own `started`. The pair must balance
+    // out or the orb stays thinking for the rest of the call.
+    func testToolCallFinishedArrivingBeforeItsStartedReturnsToTheLiveTurn() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.05, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+        XCTAssertEqual(model.state, .listening)
+
+        // Inverted order, forced deterministically instead of relying on scheduling.
+        await realtime.emit(.toolCallFinished)
+        await settle()
+        await realtime.emit(.toolCallStarted)
+        await settle()
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(model.state, .listening, "an inverted pair must not leave the orb thinking")
+
+        // And the counter is balanced: the next real tool still shows the vortex.
+        await realtime.emit(.toolCallStarted)
+        try await waitFor { model.state == .resolving }
+        await realtime.emit(.toolCallFinished)
+        try await waitFor { model.state == .listening }
+        model.endCall()
+    }
+
+    // A tool of a call that was already hung up reports back: the late callback
+    // belongs to a dead generation and must not unbalance the next call.
+    func testToolCallFinishedAfterHangupDoesNotContaminateTheNextCall() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.05, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+        model.endCall()
+        await settle()
+        await realtime.emit(.toolCallFinished)
+        await settle()
+
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+        await realtime.emit(.toolCallStarted)
+        try await waitFor { model.state == .resolving }
+        await realtime.emit(.toolCallFinished)
+        try await waitFor { model.state == .listening }
+        model.endCall()
+    }
+
     private func registration() throws -> PulseDeviceRegistration { try .init(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture) }
     private func pairedStore() throws -> PresentationStore { let store = PresentationStore(); try store.saveDeviceRegistration(registration()); return store }
     private func settle() async { for _ in 0..<40 { await Task.yield() } }

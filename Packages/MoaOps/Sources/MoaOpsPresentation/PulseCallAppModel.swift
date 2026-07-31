@@ -69,7 +69,10 @@ public final class PulseCallAppModel: ObservableObject {
     private var wantsCall = false
     private var registration: PulseDeviceRegistration?
     // Moa tools the model is running through the app. Counted, not flagged: one
-    // response commonly chains several calls.
+    // response commonly chains several calls. It may dip below zero for an
+    // instant: each provider callback reaches the main actor in its own hop, so
+    // a `finished` can land before its own `started` and the pair only balances
+    // out once both have been applied.
     private var toolsInFlight = 0
     private var resolvingTask: Task<Void, Never>?
     private var isResolvingVisible = false
@@ -277,7 +280,7 @@ public final class PulseCallAppModel: ObservableObject {
         case .listening: applyLiveState(.listening)
         case .responding: applyLiveState(.responding)
         case .toolCallStarted: toolCallStarted(generation: generation)
-        case .toolCallFinished: toolCallFinished()
+        case .toolCallFinished: toolCallFinished(generation: generation)
         case .speechStarted, .speechStopped:
             // Conversation mode already streams continuously; owner-speech
             // boundaries only matter for the Guardián hot window.
@@ -307,6 +310,9 @@ public final class PulseCallAppModel: ObservableObject {
     private func toolCallStarted(generation: UInt64) {
         guard owns(generation) else { return }
         toolsInFlight += 1
+        // Its own `finished` was applied first: the pair is balanced and there is
+        // nothing left to wait for, so the vortex must not be scheduled at all.
+        guard toolsInFlight > 0 else { return }
         guard toolsInFlight == 1, !isResolvingVisible, resolvingTask == nil else { return }
         let delay = resolvingDelay
         resolvingTask = Task { [weak self] in
@@ -317,12 +323,18 @@ public final class PulseCallAppModel: ObservableObject {
         }
     }
 
-    private func toolCallFinished() {
-        guard toolsInFlight > 0 else { return }
+    private func toolCallFinished(generation: UInt64) {
+        // Deliberately NOT `toolsInFlight > 0`: an out-of-order `finished` dropped
+        // here would leave the counter stuck at 1 and strand the orb thinking
+        // forever. Letting it go negative inside the same live generation keeps
+        // the pair balanced, and the generation guard — the same one `started`
+        // uses — drops the late callbacks of a call that is already gone, so they
+        // cannot contaminate the next one.
+        guard owns(generation) else { return }
         toolsInFlight -= 1
         // Chained tools read as one continuous "Pulse is working": the vortex only
         // leaves when the last call is back.
-        guard toolsInFlight == 0 else { return }
+        guard toolsInFlight <= 0 else { return }
         resolvingTask?.cancel(); resolvingTask = nil
         leaveResolving()
     }

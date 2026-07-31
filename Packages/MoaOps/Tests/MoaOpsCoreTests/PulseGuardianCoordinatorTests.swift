@@ -1238,6 +1238,61 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .conversationLost, "a dead session must never leave the orb thinking forever")
     }
 
+    // Every provider callback reaches the main actor in its own hop, so a tool's
+    // `finished` can be applied before its own `started`. The pair must still
+    // balance out: a counter stranded at 1 would freeze the orb and, worse, veto
+    // the hot window forever with the socket open.
+    func testToolCallFinishedArrivingBeforeItsStartedDoesNotStrandTheSession() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.2, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        // Inverted order, forced deterministically instead of relying on scheduling.
+        await realtime.emitToolCallFinished()
+        await settle()
+        await realtime.emitToolCallStarted()
+        await settle()
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNotEqual(coordinator.state, .resolving, "an inverted pair must not leave the orb thinking")
+        // The counter is balanced again, so the hot window can do its job: the
+        // expensive socket goes back to standby instead of staying open forever.
+        try await waitFor { coordinator.state == .guardianStandby }
+        let ended = await realtime.currentCall()?.wasEnded()
+        XCTAssertEqual(ended, true, "a balanced session must still close on the hot window")
+    }
+
+    // The socket already closed and a tool of that dead session reports back:
+    // the late callback must not push the next session's counter negative.
+    func testToolCallFinishedAfterTheSocketClosedDoesNotContaminateTheNextSession() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emit(.listening)
+        try await waitFor { coordinator.state == .guardianStandby }
+
+        // The dead session's tool answers now: nobody owns it any more.
+        await realtime.emitToolCallFinished()
+        await settle()
+
+        wake.fire()
+        try await waitFor { await realtime.begins() == 2 }
+        try await waitFor { coordinator.state == .listening }
+        await realtime.emitToolCallStarted()
+        try await waitFor { coordinator.state == .resolving }
+        await realtime.emitToolCallFinished()
+        try await waitFor { coordinator.state == .listening }
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeTermination(_ json: String) throws -> PulseRunTermination { try JSONDecoder.moaOps.decode(PulseRunTermination.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }

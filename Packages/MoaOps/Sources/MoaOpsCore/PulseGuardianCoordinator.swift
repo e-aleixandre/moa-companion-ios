@@ -235,7 +235,16 @@ public final class PulseGuardianCoordinator {
     private var terminationsAwaitingCatchUp = Set<String>()
     // Moa tool calls the model is running against the paired device. A counter,
     // not a flag: one response often chains several tools, and a bool would let
-    // the first one to finish clear a state the others still own.
+    // the first one to finish clear a state the others still own. It may dip
+    // below zero for an instant when a `finished` reaches the main actor before
+    // its own `started` (each provider callback hops separately, so the pair is
+    // not FIFO); everything that reads it treats "<= 0" as "nothing in flight".
+    // No dedicated timeout guards a counter stuck above zero on purpose: the
+    // provider brackets every function call and emits `finished` on both the
+    // success and the failure path, and a socket that dies mid-tool goes through
+    // `closeRealtime`/`stop`, which zero it. A timer here could only fire while a
+    // legitimately slow tool is still running and would close the socket the
+    // answer is coming back into — the very thing the counter exists to prevent.
     private var toolsInFlight = 0
     private var resolvingTask: Task<Void, Never>?
     private let resolvingDelay: TimeInterval
@@ -856,6 +865,15 @@ public final class PulseGuardianCoordinator {
         // A tool in flight is live work: the socket must not be closed out from
         // under the answer it is about to send back.
         closeTask?.cancel(); closeTask = nil
+        // Its own `finished` already went through (see `toolCallFinished`): the
+        // pair is balanced again and there is no work left to wait for. The
+        // cancel above just took the close timer away from a session that has
+        // nothing in flight, so the hot window is armed again right here —
+        // otherwise the socket would stay open with no timer at all.
+        guard toolsInFlight > 0 else {
+            if queue.isEmpty { scheduleCloseAfterHotWindow() }
+            return
+        }
         guard toolsInFlight == 1, state != .resolving, resolvingTask == nil else { return }
         let generation = socketGeneration
         let delay = resolvingDelay
@@ -868,11 +886,20 @@ public final class PulseGuardianCoordinator {
     }
 
     private func toolCallFinished() {
-        guard toolsInFlight > 0 else { return }
+        // Deliberately NOT `toolsInFlight > 0`: every provider callback is
+        // delivered in its own hop to the main actor, so a `finished` can be
+        // scheduled ahead of its own `started`. Dropping it here would leave the
+        // counter stuck at 1 forever — orb frozen in resolving and, worse, hot
+        // window vetoed with the socket open and no timer. Going negative inside
+        // a live session is harmless: the pending `started` brings it back to 0.
+        // The same liveness guard as `started` is what bounds it, and the late
+        // callbacks of a session already torn down (`call == nil`) are dropped so
+        // they cannot leak into the next one.
+        guard isRunning, call != nil else { return }
         toolsInFlight -= 1
         // Chained tools: the vortex stays until the last one is back, so a run of
         // short calls reads as one continuous "Pulse is working".
-        guard toolsInFlight == 0 else { return }
+        guard toolsInFlight <= 0 else { return }
         resolvingTask?.cancel(); resolvingTask = nil
         leaveResolving()
         // The hot window is deliberately not armed while a tool runs (it would
@@ -1204,12 +1231,12 @@ public final class PulseGuardianCoordinator {
     }
 
     private func scheduleCloseAfterHotWindow() {
-        guard call != nil, !isNarrating, !isResponding, !isPlayingResponseAudio, !ownerSpeaking, toolsInFlight == 0 else { return }
+        guard call != nil, !isNarrating, !isResponding, !isPlayingResponseAudio, !ownerSpeaking, toolsInFlight <= 0 else { return }
         closeTask?.cancel()
         closeTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(self.hotWindow * 1_000_000_000))
-            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking, self.toolsInFlight == 0 else { return }
+            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking, self.toolsInFlight <= 0 else { return }
             self.cancelVoiceReconnect()
             self.closeRealtime()
             if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }

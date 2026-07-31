@@ -564,6 +564,10 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         await realtime.emit(.responding)
         await realtime.emitAudio(Data([1, 2]))
+        // Each emit hops to the MainActor through an unstructured Task, and the
+        // runtime does not guarantee FIFO across those hops: settle so the audio
+        // is marked as sounding before response.done is processed.
+        await settle()
         await realtime.emit(.listening)
         await settle()
         let beforeDrain = await attention.ackedTerminationList()
@@ -738,7 +742,12 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         await realtime.emit(.responding)
         await realtime.emitAudio(Data([1, 2]))
+        // Settle before draining: the emits are delivered through MainActor
+        // hops, and a drain processed ahead of them would be consumed while the
+        // coordinator still believes nothing is sounding.
+        await settle()
         await realtime.emit(.listening)
+        await settle()
         voice.drainPlayback()
         await settle()
         let acked = await attention.ackedTerminationList()
@@ -866,6 +875,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        // The Realtime session opens asynchronously (mint + beginCall): wait
+        // for it before grabbing the call handle.
+        try await waitFor { await realtime.begins() == 1 }
         let callHandle = await realtime.currentCall()
         let call = try XCTUnwrap(callHandle)
         try await waitFor { await call.recordedNarrations().count == 1 }
@@ -894,6 +906,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        // The Realtime session opens asynchronously (mint + beginCall): wait
+        // for it before grabbing the call handle.
+        try await waitFor { await realtime.begins() == 1 }
         let callHandle = await realtime.currentCall()
         let call = try XCTUnwrap(callHandle)
         try await waitFor { await call.recordedNarrations().count == 1 }
@@ -906,6 +921,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         await realtime.emit(.listening)
+        // Let response.done land before draining, so the ack decision sees both
+        // signals in the order the device would.
+        await settle()
         voice.drainPlayback()
         await settle()
         let narrations = await call.recordedNarrations().count
@@ -953,6 +971,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        // The Realtime session opens asynchronously (mint + beginCall): wait
+        // for it before grabbing the call handle.
+        try await waitFor { await realtime.begins() == 1 }
         let firstHandle = await realtime.currentCall()
         let first = try XCTUnwrap(firstHandle)
         try await waitFor { await first.recordedNarrations().count == 1 }
@@ -984,6 +1005,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        // The Realtime session opens asynchronously (mint + beginCall): wait
+        // for it before grabbing the call handle.
+        try await waitFor { await realtime.begins() == 1 }
         let firstHandle = await realtime.currentCall()
         let first = try XCTUnwrap(firstHandle)
         try await waitFor { await first.recordedNarrations().count == 1 }

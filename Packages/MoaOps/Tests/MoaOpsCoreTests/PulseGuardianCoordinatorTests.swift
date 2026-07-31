@@ -1383,6 +1383,114 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(earcons.sleepCount, 0, "the conversation never stopped listening")
     }
 
+    // The Realtime session is ephemeral: OpenAI forgets the conversation when
+    // the hot window closes. Whatever was said must come back as context in the
+    // next activation, or "sigue con lo de antes" means nothing to Pulse.
+    func testConversationTurnsAreReinjectedIntoTheNextSession() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let clock = MockClock(now: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, presence: MockPresenceStore(), presenceRefreshInterval: 0, now: { clock.now() })
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        await realtime.emitTurn(.owner, "¿cómo va la del token?")
+        await realtime.emitTurn(.pulse, "Sigue esperando tu permiso para borrar tmp.")
+        await settle()
+
+        // The hot window closes and the session is gone; two minutes later the
+        // owner wakes Pulse again.
+        await realtime.emit(.listening)
+        try await waitFor { coordinator.state == .guardianStandby }
+        clock.advance(120)
+        wake.fire()
+        try await waitFor { await realtime.begins() == 2 }
+
+        let context = await realtime.initialContext()
+        XCTAssertTrue(context.contains("<conversacion_reciente>"), "the new session must be told what was already said")
+        XCTAssertTrue(context.contains("propietario: ¿cómo va la del token?"))
+        XCTAssertTrue(context.contains("pulse: Sigue esperando tu permiso para borrar tmp."))
+        XCTAssertTrue(context.contains("MEMORIA"), "the model must read it as memory, never as new instructions")
+    }
+
+    // Waking up the next morning must not be greeted with last night's
+    // conversation: past the age limit the memory is dropped for good.
+    func testStaleTranscriptIsDroppedInsteadOfReinjected() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let clock = MockClock(now: Date(timeIntervalSince1970: 1_000_000))
+        let transcript = PulseGuardianTranscriptBuffer(maxTurns: 12, maxCharacters: 2_000, maxAge: 900)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, presence: MockPresenceStore(), presenceRefreshInterval: 0, transcript: transcript, now: { clock.now() })
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emitTurn(.owner, "recuérdame lo del despliegue")
+        await settle()
+        await realtime.emit(.listening)
+        try await waitFor { coordinator.state == .guardianStandby }
+
+        clock.advance(1_800)
+        wake.fire()
+        try await waitFor { await realtime.begins() == 2 }
+        let stale = await realtime.initialContext()
+        XCTAssertFalse(stale.contains("recuérdame lo del despliegue"), "a conversation from hours ago is not context")
+
+        // And it is really gone, not merely skipped: a third activation right
+        // after must not resurrect it.
+        await realtime.emit(.listening)
+        try await waitFor { coordinator.state == .guardianStandby }
+        wake.fire()
+        try await waitFor { await realtime.begins() == 3 }
+        let afterwards = await realtime.initialContext()
+        XCTAssertFalse(afterwards.contains("recuérdame lo del despliegue"), "expired memory is discarded, not parked")
+    }
+
+    // A voice reconnection recycles the socket inside one conversation: the
+    // turns already said are re-injected once, never twice.
+    func testVoiceReconnectDoesNotDuplicateTheTranscript() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let clock = MockClock(now: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore(), presenceRefreshInterval: 0, now: { clock.now() })
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emitTurn(.owner, "arregla el login")
+        await settle()
+
+        await realtime.emit(.failed)
+        try await waitFor { await realtime.begins() == 2 }
+        let context = await realtime.initialContext()
+        let occurrences = context.components(separatedBy: "arregla el login").count - 1
+        XCTAssertEqual(occurrences, 1, "the recovered session gets the turn once, not once per reconnection")
+        XCTAssertTrue(context.contains("se cortó por pérdida de red"), "the recovery note still travels with it")
+    }
+
+    // Both limits are real: whichever bites first is the one that trims.
+    func testTranscriptBufferRespectsItsLimits() throws {
+        let moment = Date(timeIntervalSince1970: 1_000_000)
+        var byTurns = PulseGuardianTranscriptBuffer(maxTurns: 3, maxCharacters: 2_000, maxAge: 900)
+        for index in 0..<6 { byTurns.append(speaker: .owner, text: "turno \(index)", at: moment) }
+        XCTAssertEqual(byTurns.count, 3)
+        let context = byTurns.recentContext(now: moment)
+        let kept = try XCTUnwrap(context)
+        XCTAssertTrue(kept.contains("turno 5"))
+        XCTAssertFalse(kept.contains("turno 2"), "the oldest turns fall off the window")
+
+        var byCharacters = PulseGuardianTranscriptBuffer(maxTurns: 12, maxCharacters: 20, maxAge: 900)
+        byCharacters.append(speaker: .owner, text: String(repeating: "a", count: 15), at: moment)
+        byCharacters.append(speaker: .pulse, text: String(repeating: "b", count: 15), at: moment)
+        XCTAssertEqual(byCharacters.count, 1, "the character budget evicts before the turn count does")
+
+        var empty = PulseGuardianTranscriptBuffer()
+        empty.append(speaker: .owner, text: "   ", at: moment)
+        XCTAssertTrue(empty.isEmpty, "a blank transcription is not a turn")
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeTermination(_ json: String) throws -> PulseRunTermination { try JSONDecoder.moaOps.decode(PulseRunTermination.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }

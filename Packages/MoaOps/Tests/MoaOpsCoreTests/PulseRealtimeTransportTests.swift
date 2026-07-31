@@ -139,6 +139,25 @@ final class PulseRealtimeTransportTests: XCTestCase {
         await call.end()
     }
 
+    // Both sides of the conversation must come back labelled: the owner's from
+    // `input_audio_transcription.completed`, Pulse's from its own output
+    // transcript. That pairing is what the rolling memory is built out of.
+    func testTranscriptionEventsReportLabelledTurns() async throws {
+        let socket = FixtureSocket(events: [
+            #"{"type":"conversation.item.input_audio_transcription.completed","transcript":"¿cómo va la del token?"}"#,
+            #"{"type":"response.output_audio_transcript.done","transcript":"Sigue esperando permiso."}"#,
+        ])
+        let recorder = TurnRecorder()
+        let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { _ in }, onText: { _ in }, onTurn: { recorder.append($0, $1) }, onAudio: { _, _ in }, onBargeIn: {}, onUsage: { _ in })
+        await waitUntil { recorder.turns.count == 2 }
+        XCTAssertEqual(recorder.turns.first?.0, .owner)
+        XCTAssertEqual(recorder.turns.first?.1, "¿cómo va la del token?")
+        XCTAssertEqual(recorder.turns.last?.0, .pulse)
+        XCTAssertEqual(recorder.turns.last?.1, "Sigue esperando permiso.")
+        await call.end()
+    }
+
     private func credential() throws -> PulseRealtimeClientCredential {
         try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1","model":"gpt-realtime-2.1"}"#.utf8))
     }
@@ -193,6 +212,15 @@ private final class BargeInRecorder: @unchecked Sendable {
     func recordBargeIn() { lock.lock(); _bargeInCount += 1; lock.unlock() }
     func append(_ value: Data) { lock.lock(); _audio.append(value); lock.unlock() }
     func hasExpectedBargeIn() -> Bool { lock.lock(); defer { lock.unlock() }; return _bargeInCount == 1 && _audio == [Data([1, 2]), Data([5, 6])] }
+}
+
+/// Locked recorder for the labelled turns, which also fire from the read-loop
+/// task rather than from the test's context.
+private final class TurnRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [(PulseTranscriptSpeaker, String)] = []
+    var turns: [(PulseTranscriptSpeaker, String)] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func append(_ speaker: PulseTranscriptSpeaker, _ text: String) { lock.lock(); recorded.append((speaker, text)); lock.unlock() }
 }
 
 private struct FixtureSocketFactory: PulseRealtimeSocketFactory {

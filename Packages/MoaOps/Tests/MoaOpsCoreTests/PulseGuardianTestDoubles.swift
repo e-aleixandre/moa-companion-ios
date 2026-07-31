@@ -181,6 +181,7 @@ actor MockRealtime: PulseRealtimeCalling {
     private(set) var lastInitialContext = ""
     private let startsReady: Bool
     private var onState: (@Sendable (PulseRealtimeCallState) -> Void)?
+    private var onTurn: (@Sendable (PulseTranscriptSpeaker, String) -> Void)?
     private var onAudio: (@Sendable (Data, @escaping @Sendable () -> Void) -> Void)?
     private var onBargeIn: (@Sendable () -> Void)?
     private var onUsage: (@Sendable (PulseRealtimeUsage) -> Void)?
@@ -188,10 +189,11 @@ actor MockRealtime: PulseRealtimeCalling {
 
     init(startsReady: Bool = true) { self.startsReady = startsReady }
 
-    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void) async throws -> any PulseRealtimeCallControlling {
+    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onTurn: @escaping @Sendable (PulseTranscriptSpeaker, String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void) async throws -> any PulseRealtimeCallControlling {
         beginCount += 1
         lastInitialContext = initialContext
         self.onState = onState
+        self.onTurn = onTurn
         self.onAudio = onAudio
         self.onBargeIn = onBargeIn
         self.onUsage = onUsage
@@ -207,6 +209,9 @@ actor MockRealtime: PulseRealtimeCalling {
     func emitToolCallStarted() { onState?(.toolCallStarted) }
     func emitToolCallFinished() { onState?(.toolCallFinished) }
     func emitAudio(_ pcm: Data) { onAudio?(pcm, {}) }
+    /// One finished transcribed turn, the way the provider reports the owner's
+    /// `input_audio_transcription.completed` and Pulse's own output transcript.
+    func emitTurn(_ speaker: PulseTranscriptSpeaker, _ text: String) { onTurn?(speaker, text) }
     func emitUsage(_ usage: PulseRealtimeUsage) { onUsage?(usage) }
     func emitBargeIn() { onBargeIn?() }
     func begins() -> Int { beginCount }

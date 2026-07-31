@@ -166,6 +166,10 @@ public final class PulseGuardianCoordinator {
     private let costs: any PulseRealtimeCostStore
     private let catchUpGapThreshold: TimeInterval
     private let presenceRefreshInterval: TimeInterval
+    // Client-side memory of the conversation across ephemeral sessions: OpenAI
+    // forgets everything when the socket closes, so the last turns are kept
+    // here and re-injected when the next one opens.
+    private var transcript: PulseGuardianTranscriptBuffer
     private let now: @Sendable () -> Date
     private var call: (any PulseRealtimeCallControlling)?
     private var queue: [Pending] = []
@@ -269,7 +273,7 @@ public final class PulseGuardianCoordinator {
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, earcons: any PulseEarcons = SystemSoundPulseEarcons(), hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), costs: any PulseRealtimeCostStore = UserDefaultsPulseRealtimeCostStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, earcons: any PulseEarcons = SystemSoundPulseEarcons(), hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), costs: any PulseRealtimeCostStore = UserDefaultsPulseRealtimeCostStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, transcript: PulseGuardianTranscriptBuffer = .init(), now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
@@ -286,6 +290,7 @@ public final class PulseGuardianCoordinator {
         self.narrationTimeout = narrationTimeout
         self.playbackTimeout = playbackTimeout
         self.resolvingDelay = resolvingDelay
+        self.transcript = transcript
         self.now = now
         configureAudioCallbacks()
     }
@@ -646,11 +651,17 @@ public final class PulseGuardianCoordinator {
     }
 
     /// Builds the `<estado_inicial_moa>` the prompt promises so Pulse can answer
-    /// the first "¿qué pasa?" without cold tool calls. Untrusted snapshot text is
-    /// framed against delimiter injection, preserving every character as data;
-    /// this is anti-injection framing, never censorship.
+    /// the first "¿qué pasa?" without cold tool calls, plus the rolling memory of
+    /// what was said in previous (already discarded) sessions. Untrusted snapshot
+    /// text is framed against delimiter injection, preserving every character as
+    /// data; this is anti-injection framing, never censorship.
     private func guardianInitialContext(recovered: Bool) -> String {
-        Self.formatInitialContext(snapshot, recovered: recovered)
+        let snapshotContext = Self.formatInitialContext(snapshot, recovered: recovered)
+        // Reading the memory is what expires it: a buffer older than `maxAge` is
+        // dropped here, so a session opened next morning starts clean.
+        guard let recent = transcript.recentContext(now: now()) else { return snapshotContext }
+        guard !snapshotContext.isEmpty else { return recent }
+        return "\(snapshotContext)\n\(recent)"
     }
 
     static func formatInitialContext(_ snapshot: PulseGuardianSnapshot, recovered: Bool = false) -> String {
@@ -721,6 +732,16 @@ public final class PulseGuardianCoordinator {
                     Task { @MainActor in
                         guard let value, value.socketGeneration == generation else { return }
                         value.onText?(text)
+                    }
+                }, onTurn: { [weak owner] speaker, text in
+                    let value = owner
+                    Task { @MainActor in
+                        // Deliberately not gated on the socket generation: the
+                        // turn was really said, and a transcript that lands after
+                        // its socket was replaced is still part of the same
+                        // conversation the owner is having.
+                        guard let value else { return }
+                        value.transcript.append(speaker: speaker, text: text, at: value.now())
                     }
                 }, onAudio: { [weak owner] pcm, played in
                     let value = owner

@@ -729,7 +729,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(ackedAfterDrop, [], "a briefing nobody heard must never be acked")
 
         try await waitFor { await realtime.begins() == 2 }
-        let recovered = try XCTUnwrap(await realtime.currentCall())
+        let recoveredHandle = await realtime.currentCall()
+        let recovered = try XCTUnwrap(recoveredHandle)
         try await waitFor { await recovered.recordedNarrations().count == 1 }
         let retried = await recovered.recordedNarrations()
         XCTAssertTrue(retried[0].contains("catch_up"), "the interrupted briefing is told again")
@@ -865,7 +866,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
-        let call = try XCTUnwrap(await realtime.currentCall())
+        let callHandle = await realtime.currentCall()
+        let call = try XCTUnwrap(callHandle)
         try await waitFor { await call.recordedNarrations().count == 1 }
 
         // No response event, no audio: the session is simply stuck. Each timeout
@@ -892,7 +894,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
-        let call = try XCTUnwrap(await realtime.currentCall())
+        let callHandle = await realtime.currentCall()
+        let call = try XCTUnwrap(callHandle)
         try await waitFor { await call.recordedNarrations().count == 1 }
         await realtime.emit(.responding)
 
@@ -950,7 +953,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
-        let first = try XCTUnwrap(await realtime.currentCall())
+        let firstHandle = await realtime.currentCall()
+        let first = try XCTUnwrap(firstHandle)
         try await waitFor { await first.recordedNarrations().count == 1 }
 
         coordinator.stop()
@@ -961,7 +965,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         await coordinator.start()
         try await waitFor { await realtime.begins() == 2 }
-        let second = try XCTUnwrap(await realtime.currentCall())
+        let secondHandle = await realtime.currentCall()
+        let second = try XCTUnwrap(secondHandle)
         try await waitFor { await second.recordedNarrations().count == 1 }
         let retried = await second.recordedNarrations()
         XCTAssertTrue(retried[0].contains("pide borrar tmp"), "the announcement nobody heard is told after restarting")
@@ -979,7 +984,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
-        let first = try XCTUnwrap(await realtime.currentCall())
+        let firstHandle = await realtime.currentCall()
+        let first = try XCTUnwrap(firstHandle)
         try await waitFor { await first.recordedNarrations().count == 1 }
 
         voice.interruptTemporarily()
@@ -988,7 +994,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         voice.resumeCapture()
         try await waitFor { await realtime.begins() == 2 }
-        let second = try XCTUnwrap(await realtime.currentCall())
+        let secondHandle = await realtime.currentCall()
+        let second = try XCTUnwrap(secondHandle)
         try await waitFor { await second.recordedNarrations().count == 1 }
     }
 
@@ -1014,7 +1021,8 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         // The conversation drops and comes back: Pulse says it is back.
         await realtime.emit(.failed)
         try await waitFor { await realtime.begins() == 2 }
-        let recovered = try XCTUnwrap(await realtime.currentCall())
+        let recoveredHandle = await realtime.currentCall()
+        let recovered = try XCTUnwrap(recoveredHandle)
         try await waitFor { await recovered.recordedNarrations().count == 1 }
         let firstTold = await recovered.recordedNarrations()
         XCTAssertTrue(firstTold[0].contains("reconexion"))

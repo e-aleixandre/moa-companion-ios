@@ -37,7 +37,11 @@ public final class SystemSoundPulseEarcons: PulseEarcons {
     /// 1113 `begin_record.caf` / 1114 `end_record.caf`: two short, discreet and
     /// clearly distinct tones that already mean "I started/stopped capturing"
     /// on iOS.
-    public init(wakeSound: UInt32 = 1113, sleepSound: UInt32 = 1114) {
+    ///
+    /// nonisolated: it only stores two constants, and it must be callable from
+    /// the coordinator's default argument list, which is evaluated outside the
+    /// main actor.
+    public nonisolated init(wakeSound: UInt32 = 1113, sleepSound: UInt32 = 1114) {
         self.wakeSound = wakeSound
         self.sleepSound = sleepSound
     }

@@ -197,7 +197,7 @@ public final class PulseGuardianCoordinator {
     // Last resort for a session that hangs while it holds the floor: without it
     // `isNarrating` / `isPlayingResponseAudio` would stay true forever, and a
     // stuck flag means a Guardián that never speaks nor closes its socket again.
-    private enum StallKind: Sendable { case narration, playback }
+    private enum StallKind: Equatable, Sendable { case narration, playback }
     private var stallWatchdog: Task<Void, Never>?
     private var stallWatchdogKind: StallKind?
     private let narrationTimeout: TimeInterval
@@ -700,6 +700,11 @@ public final class PulseGuardianCoordinator {
                     let value = owner
                     Task { @MainActor in
                         guard let value, value.socketGeneration == generation else { return }
+                        // The playback layer rejects empty/odd-length PCM by
+                        // returning silently. Validate before marking the
+                        // response as sounding, so a rejected chunk can never
+                        // count as evidence that the owner heard anything.
+                        guard !pcm.isEmpty, pcm.count.isMultiple(of: 2) else { return }
                         value.noteResponseAudio()
                         value.voice.playPCM16(pcm, completion: played)
                     }

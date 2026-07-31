@@ -43,20 +43,139 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .guardianStandby)
     }
 
-    // A realtime failure must also return to a rearmed standby, not leave the
-    // detector permanently silent.
-    func testWakeWordIsRearmedAfterRealtimeFailure() async throws {
+    // A realtime failure that cannot be recovered must still end in a rearmed
+    // standby-like state, not leave the detector permanently silent.
+    func testWakeWordIsRearmedWhenReconnectBudgetIsExhausted() async throws {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        let service = MockGuardianService()
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.15)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        service.mintFailure = PulseCallError.operationUnavailable
+        await realtime.emit(.failed)
+        await settle()
+        XCTAssertEqual(coordinator.state, .conversationReconnecting)
+        try await waitFor { coordinator.state == .conversationLost }
+        try await waitFor { wake.startCount >= 2 }
+    }
+
+    // The main use case: coverage drops mid-conversation. The Guardián must not
+    // fall silent — it retries, comes back with the recovery context, and takes
+    // the floor briefly to say it is back.
+    func testDroppedConversationReconnectsAndAnnouncesRecovery() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[{"session_id":"s1","alias":"la del token","title":"Token","state":"waiting","pending_asks":0,"pending_perms":0}],"items":[]}"#))
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emit(.listening)
+        await settle()
+
+        await realtime.emit(.failed)
+        await settle()
+        XCTAssertEqual(coordinator.state, .conversationReconnecting)
+
+        try await waitFor { await realtime.begins() == 2 }
+        let context = await realtime.initialContext()
+        XCTAssertTrue(context.contains("se cortó por pérdida de red"), "the recovered session must know why it restarted")
+        XCTAssertTrue(context.contains("la del token"), "the snapshot context must be re-injected too")
+
+        try await waitFor { (await realtime.currentCall()?.recordedNarrations().count ?? 0) == 1 }
+        let narrations = await realtime.currentCall()?.recordedNarrations() ?? []
+        XCTAssertTrue(narrations[0].contains("reconexion"), "Pulse must take the floor to confirm it is back")
+        XCTAssertEqual(coordinator.state, .speaking)
+    }
+
+    // Owner speech during the network gap is buffered by the warmup mechanism
+    // and flushed into the recovered socket instead of being dropped.
+    func testOwnerSpeechDuringReconnectIsBufferedAndFlushed() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.05 }, voiceReconnectBudget: 5)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await settle()
+
+        await realtime.emit(.failed)
+        await settle()
+        let frames = [Data([7, 7]), Data([8, 8])]
+        for frame in frames { voice.emitPCM(frame) }
+
+        try await waitFor { await realtime.begins() == 2 }
+        try await waitFor { (await realtime.currentCall()?.appendedCount() ?? 0) >= frames.count }
+        let appended = await realtime.currentCall()?.allAppended()
+        XCTAssertEqual(appended, frames)
+    }
+
+    // A normal close (hot window elapsed) is not a drop: it must go quietly back
+    // to standby without any reconnection attempt.
+    func testNormalHotWindowCloseDoesNotReconnect() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emit(.listening)
+        try await waitFor { coordinator.state == .guardianStandby }
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(coordinator.state, .guardianStandby)
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 1, "a normal close must never reopen the expensive socket")
+    }
+
+    // Another device taking over (`inactive`) is a legitimate close too.
+    func testServerInactiveDoesNotReconnect() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        await attention.emitState(.inactive)
+        try await waitFor { coordinator.state == .inactive }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(coordinator.state, .inactive)
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 1)
+    }
+
+    // Stopping the Guardián while a drop is being retried must kill the retry.
+    func testStopCancelsPendingReconnect() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.15 }, voiceReconnectBudget: 5)
         await coordinator.start()
         await settle()
         wake.fire()
         try await waitFor { await realtime.begins() == 1 }
 
         await realtime.emit(.failed)
-        try await waitFor { wake.startCount >= 2 }
-        XCTAssertEqual(coordinator.state, .guardianStandby)
+        await settle()
+        XCTAssertEqual(coordinator.state, .conversationReconnecting)
+        coordinator.stop()
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(coordinator.state, .idle)
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 1)
     }
 
     // BUG 3: raw microphone PCM (continuous capture) must never extend the hot
@@ -180,7 +299,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
         await coordinator.start()
         await settle()
 
@@ -192,8 +311,6 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         try await waitFor { await first.appendedCount() == 1 }
 
         await realtime.emit(.failed)
-        try await waitFor { coordinator.state == .guardianStandby }
-        wake.fire()
         try await waitFor { await realtime.begins() == 2 }
         let secondCall = await realtime.currentCall()
         let second = try XCTUnwrap(secondCall)

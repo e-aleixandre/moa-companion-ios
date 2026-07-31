@@ -42,9 +42,11 @@ extension PulseGuardianState {
     var orbMode: PulseOrbMode {
         switch self {
         // Dormido/apagado: sin guardia, sin permiso de otro dispositivo, o roto.
-        case .idle, .guardianStandby, .interrupted, .inactive, .failed: .idle
+        // Conversación cortada sin recuperar: el orbe vuelve a dormirse, pero la
+        // etiqueta de estado deja el corte visible en vez de callarlo.
+        case .idle, .guardianStandby, .interrupted, .inactive, .failed, .conversationLost: .idle
         // Transiciones con expectativa: arrancando, oyó «Pulse», reconectando.
-        case .guardianStarting, .waking, .attentionReconnecting: .connecting
+        case .guardianStarting, .waking, .attentionReconnecting, .conversationReconnecting: .connecting
         case .listening: .listening
         // Resolviendo = Pulse trabajando por dentro: el vórtice de pensar.
         case .resolving: .thinking

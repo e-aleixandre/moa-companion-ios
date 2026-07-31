@@ -139,6 +139,16 @@ actor MockRealtime: PulseRealtimeCalling {
 }
 
 final class MockGuardianService: PulseCallServing, @unchecked Sendable {
+    /// When set, minting a client secret fails — the way it does when the phone
+    /// has no coverage, which is also why the Realtime socket dropped.
+    var mintFailure: Error? {
+        get { lock.withLock { storedMintFailure } }
+        set { lock.withLock { storedMintFailure = newValue } }
+    }
+
+    private let lock = NSLock()
+    private var storedMintFailure: Error?
+
     func listSessions() async throws -> [MoaServeSessionInfo] { [] }
     func attention() async throws -> MoaServeAttentionResponse { try JSONDecoder.moaOps.decode(MoaServeAttentionResponse.self, from: Data(#"{"items":[]}"#.utf8)) }
     func readSession(sessionID: String, limit: Int, cursor: String?) async throws -> MoaServeConversationPage { throw PulseCallError.operationUnavailable }
@@ -152,6 +162,9 @@ final class MockGuardianService: PulseCallServing, @unchecked Sendable {
     func resumeSession(sessionID: String) async throws -> MoaServeSessionInfo { throw PulseCallError.operationUnavailable }
     func cancelRun(sessionID: String) async throws {}
     func archiveSession(sessionID: String) async throws -> MoaServeArchiveSessionResponse { throw PulseCallError.operationUnavailable }
-    func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential { try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1","model":"gpt-realtime-2.1"}"#.utf8)) }
+    func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        if let failure = mintFailure { throw failure }
+        return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1","model":"gpt-realtime-2.1"}"#.utf8))
+    }
     func invalidate() async {}
 }

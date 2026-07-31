@@ -2,7 +2,7 @@ import Foundation
 import os
 
 public enum PulseGuardianState: Equatable, Sendable {
-    case idle, guardianStarting, guardianStandby, waking, listening, speaking, resolving, draining, attentionReconnecting, interrupted, inactive, failed
+    case idle, guardianStarting, guardianStandby, waking, listening, speaking, resolving, draining, attentionReconnecting, conversationReconnecting, conversationLost, interrupted, inactive, failed
 
     public var spanishLabel: String {
         switch self {
@@ -15,6 +15,8 @@ public enum PulseGuardianState: Equatable, Sendable {
         case .resolving: "Pulse resuelve"
         case .draining: "Terminando anuncio"
         case .attentionReconnecting: "Reconectando Guardián"
+        case .conversationReconnecting: "Reconectando conversación"
+        case .conversationLost: "Conversación cortada"
         case .interrupted: "Audio interrumpido"
         case .inactive: "Otro dispositivo es el Guardián"
         case .failed: "Guardián no disponible"
@@ -43,12 +45,15 @@ public final class PulseGuardianCoordinator {
         case item(PulseAttentionItem)
         case briefing(PulseBriefing)
         case termination(PulseRunTermination)
+        /// A recovered conversation: Pulse takes the floor briefly to tell the
+        /// owner it is back. The associated value only keeps it unique.
+        case recovered(UInt64)
 
         var acknowledgement: PulseGuardianAcknowledgement? {
             switch self {
             case let .item(item): return .item(item.id)
             case let .termination(termination): return .termination(termination.id)
-            case .briefing: return nil
+            case .briefing, .recovered: return nil
             }
         }
 
@@ -58,6 +63,7 @@ public final class PulseGuardianCoordinator {
             case let .item(item): data = try JSONEncoder.moaOps.encode(ItemEnvelope(item: item))
             case let .briefing(briefing): data = try JSONEncoder.moaOps.encode(BriefingEnvelope(briefing: briefing))
             case let .termination(termination): data = try JSONEncoder.moaOps.encode(TerminationEnvelope(termination: termination))
+            case .recovered: data = try JSONEncoder.moaOps.encode(RecoveredEnvelope())
             }
             return String(decoding: data, as: UTF8.self)
         }
@@ -67,6 +73,7 @@ public final class PulseGuardianCoordinator {
             case let .item(item): return "item:\(item.id)"
             case let .termination(termination): return "termination:\(termination.id)"
             case let .briefing(briefing): return "briefing:\(briefing.sessionID):\(briefing.kind.rawValue):\(briefing.spoken)"
+            case let .recovered(id): return "recovered:\(id)"
             }
         }
     }
@@ -75,6 +82,13 @@ public final class PulseGuardianCoordinator {
     private struct ItemEnvelope: Encodable { let type = "attention"; let item: PulseAttentionItem }
     private struct BriefingEnvelope: Encodable { let type = "briefing"; let briefing: PulseBriefing }
     private struct TerminationEnvelope: Encodable { let type = "termination"; let termination: PulseRunTermination }
+    /// Data-only envelope: it states a fact (the previous conversation dropped),
+    /// never an instruction, exactly like every other guardian event.
+    private struct RecoveredEnvelope: Encodable {
+        let type = "reconexion"
+        let reason = "perdida_de_red"
+        let spoken = "La conversación anterior se cortó por pérdida de red y acaba de restablecerse."
+    }
 
     public private(set) var state: PulseGuardianState = .idle {
         didSet {
@@ -103,6 +117,8 @@ public final class PulseGuardianCoordinator {
     private let voice: any PulseVoiceControlling
     private let wakeWord: any PulseWakeWordDetecting
     private let hotWindow: TimeInterval
+    private let voiceReconnectDelay: @Sendable (Int) -> TimeInterval
+    private let voiceReconnectBudget: TimeInterval
     private var call: (any PulseRealtimeCallControlling)?
     private var queue: [Pending] = []
     private var queuedIDs = Set<String>()
@@ -127,6 +143,13 @@ public final class PulseGuardianCoordinator {
     // prevents a cancelled sender from draining PCM belonging to a new call.
     private var socketGeneration = 0
     private var closeTask: Task<Void, Never>?
+    // A dropped conversation is retried instead of dying silently: the owner is
+    // usually walking around and coverage comes back within seconds.
+    private var voiceReconnectTask: Task<Void, Never>?
+    private var isReconnectingVoice = false
+    private var voiceReconnectAttempt = 0
+    private var voiceReconnectDeadline: Date?
+    private var recoveredCounter: UInt64 = 0
     private var isRunning = false
     private var isOpeningRealtime = false
     private var isNarrating = false
@@ -144,17 +167,19 @@ public final class PulseGuardianCoordinator {
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
         self.voice = voice
         self.wakeWord = wakeWord
         self.hotWindow = hotWindow
+        self.voiceReconnectDelay = voiceReconnectDelay
+        self.voiceReconnectBudget = voiceReconnectBudget
         configureAudioCallbacks()
     }
 
-    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel() }
+    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel() }
 
     public func start() async {
         guard !isRunning else { return }
@@ -179,6 +204,7 @@ public final class PulseGuardianCoordinator {
         isRunning = false
         disarmWakeWord()
         Task { await attention.stop() }
+        cancelVoiceReconnect()
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
         pcmTask?.cancel(); pcmTask = nil; pcmQueue.removeAll()
@@ -210,8 +236,11 @@ public final class PulseGuardianCoordinator {
         guard isRunning else { return }
         switch socketState {
         case .connected: if state == .attentionReconnecting { state = .guardianStandby }
-        case .connecting, .reconnecting: state = .attentionReconnecting
+        // A dropped voice conversation is the more specific problem: the cheap
+        // attention socket reconnecting on its own must not mask it.
+        case .connecting, .reconnecting: if !isReconnectingVoice { state = .attentionReconnecting }
         case .inactive:
+            cancelVoiceReconnect()
             closeRealtime()
             disarmWakeWord()
             state = .inactive
@@ -302,12 +331,15 @@ public final class PulseGuardianCoordinator {
     /// the first "¿qué pasa?" without cold tool calls. Untrusted snapshot text is
     /// framed against delimiter injection, preserving every character as data;
     /// this is anti-injection framing, never censorship.
-    private func guardianInitialContext() -> String {
-        Self.formatInitialContext(snapshot)
+    private func guardianInitialContext(recovered: Bool) -> String {
+        Self.formatInitialContext(snapshot, recovered: recovered)
     }
 
-    static func formatInitialContext(_ snapshot: PulseGuardianSnapshot) -> String {
+    static func formatInitialContext(_ snapshot: PulseGuardianSnapshot, recovered: Bool = false) -> String {
         var lines: [String] = []
+        // Tell the model why it is starting mid-conversation, so it does not
+        // greet the owner as if this were a fresh activation.
+        if recovered { lines.append("nota: la conversación de voz anterior se cortó por pérdida de red; el propietario puede continuar donde lo dejó.") }
         if !snapshot.sessions.isEmpty {
             lines.append("sesiones:")
             for session in snapshot.sessions {
@@ -353,7 +385,8 @@ public final class PulseGuardianCoordinator {
         socketGeneration &+= 1
         let generation = socketGeneration
         isOpeningRealtime = true
-        state = .waking
+        let recovering = isReconnectingVoice
+        state = recovering ? .conversationReconnecting : .waking
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -361,7 +394,7 @@ public final class PulseGuardianCoordinator {
                 guard self.isRunning, self.socketGeneration == generation else { return }
                 let executor = PulseGenericToolExecutor(service: self.service)
                 let owner = self
-                let initialContext = self.guardianInitialContext()
+                let initialContext = self.guardianInitialContext(recovered: recovering)
                 let opened = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: initialContext, onState: { [weak owner] event in
                     let value = owner
                     Task { @MainActor in value?.receive(event, generation: generation) }
@@ -390,11 +423,15 @@ public final class PulseGuardianCoordinator {
                 guard self.isRunning, self.socketGeneration == generation, self.call != nil else { return }
                 self.flushWarmupBuffer()
                 self.logActivation("socket ready")
+                self.finishVoiceReconnect()
                 self.signalListeningReady()
                 self.processQueue()
             } catch {
                 guard self.socketGeneration == generation else { return }
                 self.isOpeningRealtime = false
+                // Minting a fresh client secret can fail for the same reason the
+                // socket dropped (no coverage): keep retrying within the budget.
+                if self.isReconnectingVoice { self.scheduleVoiceReconnect(); return }
                 self.bufferingOwnerSpeech = false
                 self.warmupBuffer.removeAll()
                 self.state = .failed
@@ -496,6 +533,14 @@ public final class PulseGuardianCoordinator {
         guard isRunning, state != .inactive else { return }
         disarmWakeWord()
         closeTask?.cancel(); closeTask = nil
+        // Asking for Pulse while a dropped conversation is being retried means
+        // "try now": skip the remaining backoff instead of opening a second socket.
+        if isReconnectingVoice {
+            guard !isOpeningRealtime else { return }
+            voiceReconnectTask?.cancel(); voiceReconnectTask = nil
+            openRealtimeForActivation()
+            return
+        }
         if call == nil {
             // Start capturing the owner's opening words immediately; the socket
             // is still ~1.5-3s away and this audio would otherwise be discarded.
@@ -622,6 +667,7 @@ public final class PulseGuardianCoordinator {
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(self.hotWindow * 1_000_000_000))
             guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking else { return }
+            self.cancelVoiceReconnect()
             self.closeRealtime()
             if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }
         }
@@ -639,6 +685,7 @@ public final class PulseGuardianCoordinator {
     private func temporarilyInterrupted() {
         guard isRunning else { return }
         state = .interrupted
+        cancelVoiceReconnect()
         closeRealtime()
     }
 
@@ -653,6 +700,7 @@ public final class PulseGuardianCoordinator {
         if privateRouteWasPresent && !privateNow {
             // Never unexpectedly promote a locked-phone announcement to speaker.
             announcementsPausedForRoute = true
+            cancelVoiceReconnect()
             closeRealtime()
             state = .guardianStandby
             rearmWakeWord()
@@ -665,13 +713,76 @@ public final class PulseGuardianCoordinator {
 
     private func audioFailed() {
         guard isRunning else { return }
+        cancelVoiceReconnect()
         closeRealtime()
         state = .failed
         rearmWakeWord()
     }
 
+    /// An anomalous end of a live Realtime session (socket error, transport
+    /// failure). Normal closes — hot window, owner stop, server `inactive` — go
+    /// through `closeRealtime()` and never land here.
     private func realtimeFailed() {
+        let hadLiveSession = call != nil || isOpeningRealtime
         closeRealtime()
-        if isRunning && state != .inactive { state = .guardianStandby; rearmWakeWord(); processQueue() }
+        guard isRunning, state != .inactive else { return }
+        if hadLiveSession || isReconnectingVoice { scheduleVoiceReconnect(); return }
+        state = .guardianStandby; rearmWakeWord(); processQueue()
+    }
+
+    /// Retries a dropped conversation with exponential backoff until the budget
+    /// runs out. The owner's voice keeps being captured into the warmup buffer
+    /// meanwhile, so whatever they say during the gap is not lost.
+    private func scheduleVoiceReconnect() {
+        guard isRunning, state != .inactive else { return }
+        if !isReconnectingVoice {
+            isReconnectingVoice = true
+            voiceReconnectAttempt = 0
+            voiceReconnectDeadline = Date().addingTimeInterval(voiceReconnectBudget)
+        }
+        bufferingOwnerSpeech = true
+        voiceReconnectAttempt += 1
+        let delay = max(0, voiceReconnectDelay(voiceReconnectAttempt))
+        let deadline = voiceReconnectDeadline ?? Date()
+        guard Date().addingTimeInterval(delay) <= deadline else { abandonVoiceReconnect(); return }
+        state = .conversationReconnecting
+        log.info("voice reconnect attempt=\(self.voiceReconnectAttempt, privacy: .public) in \(String(format: "%.1f", delay), privacy: .public)s")
+        voiceReconnectTask?.cancel()
+        voiceReconnectTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard !Task.isCancelled, let self, self.isRunning, self.isReconnectingVoice, self.call == nil, self.state != .inactive else { return }
+            self.voiceReconnectTask = nil
+            self.openRealtimeForActivation()
+        }
+    }
+
+    /// The retried socket is up: announce the recovery so the owner hears that
+    /// their companion is back, and stop the retry machinery.
+    private func finishVoiceReconnect() {
+        guard isReconnectingVoice else { return }
+        cancelVoiceReconnect()
+        recoveredCounter &+= 1
+        log.info("voice reconnect succeeded")
+        enqueue(.recovered(recoveredCounter))
+    }
+
+    /// The budget is exhausted. Go back to a rearmed standby — but leave the
+    /// drop visible in the UI instead of failing silently.
+    private func abandonVoiceReconnect() {
+        cancelVoiceReconnect()
+        bufferingOwnerSpeech = false
+        warmupBuffer.removeAll()
+        guard isRunning, state != .inactive else { return }
+        log.info("voice reconnect gave up")
+        state = .conversationLost
+        rearmWakeWord()
+        processQueue()
+    }
+
+    private func cancelVoiceReconnect() {
+        voiceReconnectTask?.cancel(); voiceReconnectTask = nil
+        isReconnectingVoice = false
+        voiceReconnectAttempt = 0
+        voiceReconnectDeadline = nil
     }
 }

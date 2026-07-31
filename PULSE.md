@@ -83,7 +83,7 @@ decidir permisos, crear/retomar/cancelar sesiones.
 ### P4 — Voz directa iPhone ↔ OpenAI Realtime
 
 El audio va **directo del iPhone a OpenAI** (WebRTC/WS contra la API Realtime, modelo
-`gpt-realtime-2.1-mini` de partida) usando el client secret efímero que emite moa. Ventajas:
+`gpt-realtime-2.1`) usando el client secret efímero que emite moa. Ventajas:
 latencia mínima, moa no procesa audio, y el coste de la conversación de voz no pasa por el
 provider-loop de moa.
 
@@ -257,8 +257,9 @@ Notas de diseño:
 - **Ciclo de vida**: si el socket Realtime cae (cobertura), la app reconecta con un nuevo
   client secret y re-inyecta un resumen del estado; la conversación de voz es efímera por
   diseño (no se persiste transcript en moa).
-- **CarPlay** (fase 3): la misma llamada expuesta como app de audio/comunicación en CarPlay;
-  cero interacción visual obligatoria.
+- **CarPlay** (fase 2): la misma llamada expuesta vía CallKit ("modo coche") y, si Apple
+  concede el entitlement, como app de audio/comunicación en CarPlay; cero interacción
+  visual obligatoria.
 
 ## 7. Seguridad (modelo simple)
 
@@ -271,7 +272,16 @@ Notas de diseño:
 - Asunción explícita y aceptada: el contenido de las sesiones que el modelo lee viaja a
   OpenAI como contexto de la conversación Realtime.
 
-## 8. Modo app visual (fase 2 — esbozo, se detallará al llegar)
+## 8. Modo app visual — DESCARTADO como objetivo (jul 2026)
+
+Decisión: **el companion es solo voz**. Moa ya funciona en cualquier dispositivo con
+navegador; para mirar una conversación se abre la web de moa. No se construirá dashboard,
+lista de sesiones ni vista de conversación narrativa en la app, salvo que en el futuro
+aparezca algo realmente útil que solo tenga sentido nativo. La UI de la app se limita a:
+pantalla de llamada/Guardián (orbe, estado, controles), pairing y ajustes.
+
+<details>
+<summary>Esbozo original (archivado por si se retoma)</summary>
 
 - **Dashboard**: lista de sesiones ordenada por recencia con estado vivo (punto de color,
   "esperando permiso", "corriendo desde hace 12 min"), vía `/api/sessions` + WS.
@@ -282,6 +292,8 @@ Notas de diseño:
 - **Acciones táctiles**: input para enviar/steer, botones aprobar/denegar en permisos, cerrar
   sesión.
 - Botón prominente "📞 Llamar a Pulse" que inicia el modo llamada.
+
+</details>
 
 ## 9. Plan de fases
 
@@ -300,22 +312,51 @@ Notas de diseño:
 6. **Criterio de "hecho"**: salir a la calle con cascos y, sin mirar el móvil, enterarme del
    estado de todo, leer lo que ha hecho una sesión y mandarle trabajo.
 
-### Fase 2 — Feed visual
-Dashboard + conversación narrativa + acciones táctiles (§8).
+### Fase 1.5 — Robustez y confianza (jul 2026, rama `feat/voice-roadmap-r1`)
+Hecho tras el primer uso real en la calle:
+1. **Reconexión del Guardián en mitad de conversación**: una caída del socket Realtime
+   (cobertura) reintenta con backoff dentro de un presupuesto, re-acuña client secret,
+   re-inyecta contexto con nota de reconexión y Pulse confirma que ha vuelto. El audio del
+   owner durante el hueco se bufferiza. Si se agota el presupuesto, el corte queda visible
+   (`conversationLost`), nunca silencio.
+2. **Catch-up briefing**: tras un hueco real (>2 min sin Guardián), el `init` del WS de
+   atención alimenta un único resumen hablado — "mientras no estabas: X terminó bien, Z con
+   error, W espera permiso" — con `ack_termination` solo tras reproducirse de verdad.
+   Reconexiones cortas del WS siguen en silencio.
+3. **Orbe con estado `resolving`**: mientras el modelo ejecuta tools contra moa, el orbe
+   muestra el vórtice de "pensando" (con anti-parpadeo para tools rápidas), en Guardián y
+   en llamada directa.
+4. **Coste visible**: ledger local de uso Realtime (usage de `response.done` × tabla de
+   precios) con Hoy / Este mes / Última sesión en ajustes. Solo visibilidad; sin cambio de
+   modelo ni TTS.
 
-### Fase 3 — CarPlay
-Modo llamada en CarPlay.
+### Fase 2 — CarPlay / modo coche (antes "fase 3")
+CallKit como "modo coche" opcional (llamada del sistema: botones del volante, mic del
+coche, audio con prioridad correcta; trade-off aceptado: canal HFP con calidad de
+teléfono). CarPlay de verdad requiere entitlement de Apple — solicitar y ver.
 
 ### Ideas post-v1 (no comprometidas)
-- Proactividad: push cuando una sesión pide permiso/atención → "llamada entrante" de Pulse.
-- Resumen hablado al descolgar ("desde tu última llamada, la sesión X terminó y la Y espera").
-- Control de coste de la llamada (duración/uso visible, autocierre por inactividad).
+- Resumen hablado al descolgar una llamada directa ("desde tu última llamada…") — el modo
+  Guardián ya lo tiene vía catch-up briefing.
+- Autocierre por presupuesto de la llamada directa (el Guardián ya cierra por inactividad).
 
-## 10. Decisiones abiertas (a decidir cuando toquen, no bloquean fase 0)
+### Descartado / aparcado (jul 2026)
+- **Push proactivo por APNs**: los push van ligados al App ID y a la key APNs de una cuenta
+  de developer concreta. Sin un backend compartido que mantener (que no queremos), cada
+  usuario tendría que firmar su propia app y configurar su key. Aparcado; el sustituto
+  es el catch-up briefing al reconectar.
+- **TTS barato para anuncios** (gpt-4o-mini-tts u similar para narrar avisos sin abrir
+  Realtime): aparcado para más adelante. Condición del usuario si se retoma: la voz no
+  puede sonar "a veces rica, a veces pobre" — consistencia de voz por encima del ahorro.
+
+## 10. Decisiones abiertas (a decidir cuando toquen)
 
 1. **VAD fino**: umbrales de turn-detection del Realtime en entorno ruidoso (calle/coche);
    quizá toggle mute rápido desde los cascos.
-2. **Push proactivo** (post-v1): ¿APNs desde moa —pieza nueva server-side— o polling al abrir?
-3. **Multi-servidor**: ¿un Pulse emparejado con más de un `moa serve`? (hoy: uno).
-4. **Modelo Realtime**: `gpt-realtime-2.1-mini` de partida; revisar calidad/coste tras uso real.
-5. **Idioma**: prompt en español; ¿respuesta siempre en el idioma en que hablo?
+2. **Multi-servidor**: ¿un Pulse emparejado con más de un `moa serve`? (hoy: uno).
+3. **Modelo Realtime**: se usa `gpt-realtime-2.1` (el `-mini` se probó y su tool-calling no
+   fue fiable). Se puede jugar con mini en momentos concretos, pero manteniendo la misma
+   voz percibida. Revisar con los datos del ledger de coste.
+4. **Idioma**: prompt en español; ¿respuesta siempre en el idioma en que hablo?
+5. **Activación física** (complemento a la wake word): botón de acción del iPhone /
+   doble-tap de AirPods para despertar a Pulse sin escucha continua.

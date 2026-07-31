@@ -1061,7 +1061,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         // The recovery finishes and the catch-up takes the floor.
         await realtime.emit(.responding)
         await realtime.emitAudio(Data([1, 2]))
+        await settle()
         await realtime.emit(.listening)
+        await settle()
         voice.drainPlayback()
         try await waitFor { await recovered.recordedNarrations().count == 2 }
         let told = await recovered.recordedNarrations()
@@ -1070,7 +1072,9 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         await realtime.emit(.responding)
         await realtime.emitAudio(Data([3, 4]))
+        await settle()
         await realtime.emit(.listening)
+        await settle()
         voice.drainPlayback()
         await settle()
         let acked = await attention.ackedTerminationList()

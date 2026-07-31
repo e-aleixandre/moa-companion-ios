@@ -48,11 +48,15 @@ public final class PulseGuardianCoordinator {
         /// A recovered conversation: Pulse takes the floor briefly to tell the
         /// owner it is back. The associated value only keeps it unique.
         case recovered(UInt64)
+        /// One single spoken summary of everything that happened while the
+        /// Guardián was away. Never one announcement per item.
+        case catchUp(id: UInt64, envelope: CatchUpEnvelope, terminationIDs: [String])
 
         var acknowledgement: PulseGuardianAcknowledgement? {
             switch self {
             case let .item(item): return .item(item.id)
             case let .termination(termination): return .termination(termination.id)
+            case let .catchUp(_, _, terminationIDs): return terminationIDs.isEmpty ? nil : .terminations(terminationIDs)
             case .briefing, .recovered: return nil
             }
         }
@@ -64,6 +68,7 @@ public final class PulseGuardianCoordinator {
             case let .briefing(briefing): data = try JSONEncoder.moaOps.encode(BriefingEnvelope(briefing: briefing))
             case let .termination(termination): data = try JSONEncoder.moaOps.encode(TerminationEnvelope(termination: termination))
             case .recovered: data = try JSONEncoder.moaOps.encode(RecoveredEnvelope())
+            case let .catchUp(_, envelope, _): data = try JSONEncoder.moaOps.encode(envelope)
             }
             return String(decoding: data, as: UTF8.self)
         }
@@ -74,11 +79,12 @@ public final class PulseGuardianCoordinator {
             case let .termination(termination): return "termination:\(termination.id)"
             case let .briefing(briefing): return "briefing:\(briefing.sessionID):\(briefing.kind.rawValue):\(briefing.spoken)"
             case let .recovered(id): return "recovered:\(id)"
+            case let .catchUp(id, _, _): return "catch_up:\(id)"
             }
         }
     }
 
-    private enum PulseGuardianAcknowledgement: Sendable { case item(String), termination(String) }
+    private enum PulseGuardianAcknowledgement: Sendable { case item(String), termination(String), terminations([String]) }
     private struct ItemEnvelope: Encodable { let type = "attention"; let item: PulseAttentionItem }
     private struct BriefingEnvelope: Encodable { let type = "briefing"; let briefing: PulseBriefing }
     private struct TerminationEnvelope: Encodable { let type = "termination"; let termination: PulseRunTermination }
@@ -88,6 +94,36 @@ public final class PulseGuardianCoordinator {
         let type = "reconexion"
         let reason = "perdida_de_red"
         let spoken = "La conversación anterior se cortó por pérdida de red y acaba de restablecerse."
+    }
+
+    /// Data-only envelope for the catch-up: facts about what happened during the
+    /// absence, plus how long that absence was. Every nested string comes from
+    /// the server and is untrusted data, exactly like the other envelopes.
+    struct CatchUpEnvelope: Encodable, Sendable {
+        struct Finished: Encodable, Sendable {
+            let sesion: String
+            let estado: String
+            let spoken: String
+            let resumen: String
+        }
+
+        struct Pendiente: Encodable, Sendable {
+            let sesion: String
+            let tipo: String
+            let spoken: String
+        }
+
+        let type = "catch_up"
+        let spoken = "Esto ha pasado mientras el propietario no estaba escuchando."
+        let hueco: String
+        let huecoSegundos: Int
+        let terminaciones: [Finished]
+        let pendientes: [Pendiente]
+
+        enum CodingKeys: String, CodingKey {
+            case type, spoken, hueco, terminaciones, pendientes
+            case huecoSegundos = "hueco_segundos"
+        }
     }
 
     public private(set) var state: PulseGuardianState = .idle {
@@ -119,6 +155,10 @@ public final class PulseGuardianCoordinator {
     private let hotWindow: TimeInterval
     private let voiceReconnectDelay: @Sendable (Int) -> TimeInterval
     private let voiceReconnectBudget: TimeInterval
+    private let presence: any PulseGuardianPresenceStore
+    private let catchUpGapThreshold: TimeInterval
+    private let presenceRefreshInterval: TimeInterval
+    private let now: @Sendable () -> Date
     private var call: (any PulseRealtimeCallControlling)?
     private var queue: [Pending] = []
     private var queuedIDs = Set<String>()
@@ -150,6 +190,12 @@ public final class PulseGuardianCoordinator {
     private var voiceReconnectAttempt = 0
     private var voiceReconnectDeadline: Date?
     private var recoveredCounter: UInt64 = 0
+    private var catchUpCounter: UInt64 = 0
+    // Terminations covered by a catch-up that has not finished playing yet: a
+    // reconnection arriving mid-narration must not ack them behind its back.
+    private var terminationsAwaitingCatchUp = Set<String>()
+    private var attentionConnected = false
+    private var presenceTask: Task<Void, Never>?
     private var isRunning = false
     private var isOpeningRealtime = false
     private var isNarrating = false
@@ -167,7 +213,7 @@ public final class PulseGuardianCoordinator {
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
@@ -176,10 +222,14 @@ public final class PulseGuardianCoordinator {
         self.hotWindow = hotWindow
         self.voiceReconnectDelay = voiceReconnectDelay
         self.voiceReconnectBudget = voiceReconnectBudget
+        self.presence = presence
+        self.catchUpGapThreshold = catchUpGapThreshold
+        self.presenceRefreshInterval = presenceRefreshInterval
+        self.now = now
         configureAudioCallbacks()
     }
 
-    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel() }
+    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel(); presenceTask?.cancel() }
 
     public func start() async {
         guard !isRunning else { return }
@@ -197,10 +247,16 @@ public final class PulseGuardianCoordinator {
         }, onState: { [weak self] socketState in
             Task { @MainActor [weak self] in self?.receive(socketState) }
         })
+        startPresenceHeartbeat()
         state = .guardianStandby
     }
 
     public func stop() {
+        // A clean stop is the last moment the Guardián was really listening: a
+        // catch-up must measure the absence from here, not from the last tick.
+        recordPresenceIfListening()
+        presenceTask?.cancel(); presenceTask = nil
+        attentionConnected = false
         isRunning = false
         disarmWakeWord()
         Task { await attention.stop() }
@@ -235,20 +291,55 @@ public final class PulseGuardianCoordinator {
     private func receive(_ socketState: PulseAttentionWebSocket.State) {
         guard isRunning else { return }
         switch socketState {
-        case .connected: if state == .attentionReconnecting { state = .guardianStandby }
+        case .connected:
+            // Presence is only recorded once the authoritative `init` arrives:
+            // a bare connection has not caught up on anything yet, and writing
+            // here would erase the very gap the briefing measures.
+            if state == .attentionReconnecting { state = .guardianStandby }
         // A dropped voice conversation is the more specific problem: the cheap
         // attention socket reconnecting on its own must not mask it. A lost
         // conversation stays visible until the owner starts a new one (wake word
         // / Hablar) or a fresh announcement opens a session.
-        case .connecting, .reconnecting: if !isReconnectingVoice, state != .conversationLost { state = .attentionReconnecting }
+        case .connecting, .reconnecting:
+            recordPresenceIfListening()
+            attentionConnected = false
+            if !isReconnectingVoice, state != .conversationLost { state = .attentionReconnecting }
         case .inactive:
+            recordPresenceIfListening()
+            attentionConnected = false
             cancelVoiceReconnect()
             closeRealtime()
             disarmWakeWord()
             state = .inactive
-        case .failed: state = .failed
-        case .stopped: break
+        case .failed:
+            recordPresenceIfListening()
+            attentionConnected = false
+            state = .failed
+        case .stopped:
+            recordPresenceIfListening()
+            attentionConnected = false
         }
+    }
+
+    /// Keeps "the Guardián was listening until now" fresh while the attention
+    /// socket is up, so an absence is measured from the moment it really ended
+    /// (app killed, suspended by iOS) and not from the last connect.
+    private func startPresenceHeartbeat() {
+        presenceTask?.cancel()
+        guard presenceRefreshInterval > 0 else { return }
+        let interval = presenceRefreshInterval
+        presenceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.recordPresenceIfListening()
+            }
+        }
+    }
+
+    private func recordPresenceIfListening() {
+        guard isRunning, attentionConnected else { return }
+        presence.recordListening(at: now())
     }
 
     private func receive(_ message: PulseAttentionServerMessage) {
@@ -259,18 +350,25 @@ public final class PulseGuardianCoordinator {
             snapshot.items = message.items ?? []
             snapshot.sessions = message.sessions ?? []
             snapshot.terminations = message.terminations ?? []
-            // A (re)connection must not narrate the whole backlog that piled up
-            // while away. Terminations are informational, so on connect we mark
-            // them seen silently — the owner asks for a catch-up when they want
-            // one. Only asks/permissions block a worker, so those are announced,
-            // and only the first time (announcedItemIDs) so a mere reconnection
-            // never repeats one the owner already heard.
-            for termination in snapshot.terminations {
-                if !spokenTerminationIDs.contains(termination.id) {
-                    spokenTerminationIDs.insert(termination.id)
-                }
-                Task { await attention.ackTermination(terminationID: termination.id) }
+            // A short socket reconnection must not narrate the backlog; a real
+            // absence must. The gap since the Guardián last listened is what
+            // tells them apart. No stored timestamp means first launch/pairing:
+            // there is no absence to catch up on.
+            let connectedAt = now()
+            let gap = presence.lastListeningAt().map { connectedAt.timeIntervalSince($0) }
+            attentionConnected = true
+            presence.recordListening(at: connectedAt)
+            if let gap, gap > catchUpGapThreshold {
+                announceCatchUp(gap: gap)
+            } else {
+                // Terminations are informational: on a short reconnection mark
+                // them seen silently so the server stops resending them.
+                markTerminationsSeenSilently()
             }
+            // Only asks/permissions block a worker, so those are announced, and
+            // only the first time (announcedItemIDs) so a mere reconnection never
+            // repeats one the owner already heard. Anything folded into the
+            // catch-up is already marked announced and skipped here.
             for item in snapshot.items where !announcedItemIDs.contains(item.id) {
                 announcedItemIDs.insert(item.id)
                 enqueue(.item(item))
@@ -300,6 +398,63 @@ public final class PulseGuardianCoordinator {
         case .inactive: receive(.inactive)
         case .error: break
         }
+    }
+
+    private func markTerminationsSeenSilently() {
+        for termination in snapshot.terminations where !terminationsAwaitingCatchUp.contains(termination.id) {
+            spokenTerminationIDs.insert(termination.id)
+            Task { await attention.ackTermination(terminationID: termination.id) }
+        }
+    }
+
+    /// Composes the single spoken catch-up for a real absence. Terminations and
+    /// still-pending asks/permissions travel together in one envelope: the model
+    /// writes the summary, the coordinator only supplies the facts.
+    private func announceCatchUp(gap: TimeInterval) {
+        let terminations = snapshot.terminations.filter { !spokenTerminationIDs.contains($0.id) }
+        let pendingItems = snapshot.items.filter { !announcedItemIDs.contains($0.id) }
+        // Already-narrated terminations still in the backlog are acked anyway so
+        // the server purges them.
+        for termination in snapshot.terminations where spokenTerminationIDs.contains(termination.id) && !terminationsAwaitingCatchUp.contains(termination.id) {
+            Task { await attention.ackTermination(terminationID: termination.id) }
+        }
+        // Nothing happened while away: never pay for a Realtime session to say so.
+        guard !terminations.isEmpty || !pendingItems.isEmpty else {
+            log.info("catch-up skipped: nothing to report after \(String(format: "%.0f", gap), privacy: .public)s away")
+            return
+        }
+        // Marked before the narration so a second init during playback cannot
+        // duplicate the announcement, neither as a catch-up nor item by item.
+        for termination in terminations { spokenTerminationIDs.insert(termination.id) }
+        for item in pendingItems { announcedItemIDs.insert(item.id) }
+        catchUpCounter &+= 1
+        let terminationIDs = terminations.map(\.id)
+        terminationsAwaitingCatchUp.formUnion(terminationIDs)
+        let envelope = Self.catchUpEnvelope(gap: gap, terminations: terminations, pendingItems: pendingItems, sessions: snapshot.sessions)
+        enqueue(.catchUp(id: catchUpCounter, envelope: envelope, terminationIDs: terminationIDs))
+    }
+
+    static func catchUpEnvelope(gap: TimeInterval, terminations: [PulseRunTermination], pendingItems: [PulseAttentionItem], sessions: [PulseSessionBrief]) -> CatchUpEnvelope {
+        let stateBySession = Dictionary(sessions.map { ($0.sessionID, $0.state) }, uniquingKeysWith: { first, _ in first })
+        return CatchUpEnvelope(
+            hueco: describeGap(gap),
+            huecoSegundos: Int(gap.rounded()),
+            terminaciones: terminations.map {
+                .init(sesion: $0.alias, estado: stateBySession[$0.sessionID] ?? "desconocido", spoken: $0.spoken, resumen: $0.summary)
+            },
+            pendientes: pendingItems.map { .init(sesion: $0.alias, tipo: $0.kind.rawValue, spoken: $0.spoken) }
+        )
+    }
+
+    /// Approximate, spoken-friendly duration: the owner cares about "un rato",
+    /// not about seconds.
+    static func describeGap(_ gap: TimeInterval) -> String {
+        let minutes = Int((gap / 60).rounded())
+        if minutes < 60 { return "unos \(max(1, minutes)) minutos" }
+        let hours = Int((gap / 3600).rounded())
+        if hours < 24 { return hours == 1 ? "una hora" : "unas \(hours) horas" }
+        let days = Int(gap / 86_400)
+        return days == 1 ? "un día" : "\(days) días"
     }
 
     private func enqueue(_ pending: Pending) {
@@ -540,6 +695,15 @@ public final class PulseGuardianCoordinator {
         case let .termination(id):
             spokenTerminationIDs.insert(id)
             Task { await attention.ackTermination(terminationID: id) }
+        case let .terminations(ids):
+            // The catch-up was actually spoken: let the server purge every run it
+            // covered. Pending asks/permissions are NOT resolved here — they keep
+            // their own flow.
+            for id in ids {
+                spokenTerminationIDs.insert(id)
+                terminationsAwaitingCatchUp.remove(id)
+                Task { await attention.ackTermination(terminationID: id) }
+            }
         case nil: break
         }
         processQueue()
@@ -693,6 +857,10 @@ public final class PulseGuardianCoordinator {
     private func closeRealtime() {
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
+        // A catch-up cut mid-narration will never be acked by playback: release
+        // its hold so the next connection can at least purge those runs quietly
+        // instead of keeping them forever.
+        if case let .terminations(ids)? = activeAcknowledgement { terminationsAwaitingCatchUp.subtract(ids) }
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false; ownerSpeaking = false; activeAcknowledgement = nil
         bufferingOwnerSpeech = false; warmupBuffer.removeAll()
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil

@@ -52,6 +52,29 @@ final class MockVoice: PulseVoiceControlling {
     func resumeCapture() { captureResumed?() }
 }
 
+/// In-memory presence: no UserDefaults, so a test never inherits the timestamp
+/// left behind by another run.
+final class MockPresenceStore: PulseGuardianPresenceStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Date?
+
+    init(lastListeningAt: Date? = nil) { stored = lastListeningAt }
+
+    func lastListeningAt() -> Date? { lock.withLock { stored } }
+    func recordListening(at date: Date) { lock.withLock { stored = date } }
+}
+
+/// A hand-wound clock so a test can move time forward without sleeping.
+final class MockClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Date
+
+    init(now: Date) { current = now }
+
+    func now() -> Date { lock.withLock { current } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { current = current.addingTimeInterval(seconds) } }
+}
+
 actor MockAttentionChannel: PulseAttentionChanneling {
     private var eventHandler: (@Sendable (PulseAttentionServerMessage) -> Void)?
     private var stateHandler: (@Sendable (PulseAttentionWebSocket.State) -> Void)?

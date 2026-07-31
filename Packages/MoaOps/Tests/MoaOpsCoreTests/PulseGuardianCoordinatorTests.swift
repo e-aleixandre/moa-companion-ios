@@ -11,7 +11,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 0.05)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         XCTAssertEqual(wake.startCount, 1)
@@ -30,7 +30,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testWakeWordRearmsWhenTemporaryInterruptionCaptureResumes() async throws {
         let wake = MockWakeWord()
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: MockRealtime(), attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: MockRealtime(), attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -49,7 +49,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let service = MockGuardianService()
-        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.15)
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.15, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -70,7 +70,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         await attention.emit(try decodeMessage(#"{"type":"init","sessions":[{"session_id":"s1","alias":"la del token","title":"Token","state":"waiting","pending_asks":0,"pending_perms":0}],"items":[]}"#))
@@ -101,7 +101,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.05 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.05 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -124,7 +124,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testNormalHotWindowCloseDoesNotReconnect() async throws {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.05, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -143,7 +143,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -165,7 +165,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -203,7 +203,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
         let service = MockGuardianService()
-        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.1)
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.1, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -235,7 +235,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let service = MockGuardianService()
         // A backoff far longer than the budget: the old arithmetic gave up
         // immediately, leaving the whole budget unused.
-        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 10 }, voiceReconnectBudget: 0.2)
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 10 }, voiceReconnectBudget: 0.2, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -255,7 +255,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testStopCancelsPendingReconnect() async throws {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.15 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.15 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -279,7 +279,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 0.2)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 0.2, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -297,7 +297,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testSpeechKeepsCallOpenUntilSilence() async throws {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.2)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.2, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -321,7 +321,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
     func testResponseKeepsHotWindowOpenUntilResponseCompletes() async throws {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.2)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 0.2, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -343,7 +343,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         wake.fire()
@@ -366,7 +366,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime(startsReady: false)
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
 
@@ -393,7 +393,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let voice = MockVoice()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
 
@@ -474,7 +474,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         let initMessage = try decodeMessage(#"{"type":"init","sessions":[{"session_id":"s1","alias":"la del token","title":"Token","state":"waiting","pending_asks":1,"pending_perms":0}],"items":[]}"#)
@@ -494,7 +494,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         let initMessage = try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó hace rato","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#)
@@ -515,7 +515,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         let wake = MockWakeWord()
         let realtime = MockRealtime()
         let attention = MockAttentionChannel()
-        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
         await coordinator.start()
         await settle()
         let initJSON = #"{"type":"init","sessions":[],"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}]}"#
@@ -534,7 +534,154 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(afterReconnect, 1, "a reconnection must not re-announce an ask the owner already heard")
     }
 
+    // A real absence (app killed, iOS suspended it) IS narrated, once, as a
+    // single spoken catch-up, and the runs it covered are acked only after the
+    // owner actually heard it.
+    func testLongGapNarratesOneCatchUpAndAcksAfterPlayback() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let voice = MockVoice()
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: voice, wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, now: { Date(timeIntervalSince1970: 1_003_600) })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[{"session_id":"s1","alias":"la del build","title":"Build","state":"done","pending_asks":0,"pending_perms":0}],"items":[{"id":"att_1","priority":0,"kind":"permission","session_id":"s2","alias":"la del deploy","spoken":"pide desplegar","state":"pending","created_at":"2026-07-16T10:00:00Z"}],"terminations":[{"id":"run_1","session_id":"s1","alias":"la del build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}},{"id":"run_2","session_id":"s3","alias":"la de tests","spoken":"Terminó con error","summary":"fallo","created_at":"2026-07-16T10:02:00Z","ref":{"session_id":"s3","run_gen":2,"messages_url":"/api/sessions/s3/messages"}}]}"#))
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { (await realtime.currentCall()?.recordedNarrations().count ?? 0) == 1 }
+
+        let narrations = await realtime.currentCall()?.recordedNarrations() ?? []
+        XCTAssertEqual(narrations.count, 1, "a catch-up is one single announcement, never one per item")
+        XCTAssertTrue(narrations[0].contains("catch_up"))
+        XCTAssertTrue(narrations[0].contains("Terminó bien"))
+        XCTAssertTrue(narrations[0].contains("Terminó con error"))
+        XCTAssertTrue(narrations[0].contains("pide desplegar"), "the still-pending permission belongs in the same summary")
+        XCTAssertTrue(narrations[0].contains("una hora"))
+
+        // Nothing is acked until the announcement has actually been heard.
+        let beforePlayback = await attention.ackedTerminationList()
+        XCTAssertEqual(beforePlayback, [])
+
+        voice.drainPlayback()
+        await settle()
+        let acked = await attention.ackedTerminationList()
+        XCTAssertEqual(Set(acked), ["run_1", "run_2"], "the server must purge every run the catch-up covered")
+        let ackedItems = await attention.ackedItemList()
+        XCTAssertEqual(ackedItems, [], "a pending permission is not resolved by having been mentioned")
+
+        // The permission folded into the catch-up must not be announced again.
+        await settle()
+        let afterwards = await realtime.currentCall()?.recordedNarrations().count ?? 0
+        XCTAssertEqual(afterwards, 1)
+    }
+
+    // A short socket reconnection keeps the current behaviour: terminations are
+    // marked seen silently and no Realtime session is paid for.
+    func testShortGapStaysSilentAboutTerminations() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, now: { Date(timeIntervalSince1970: 1_000_030) })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó hace rato","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        await settle()
+
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 0, "a short reconnection must not narrate the backlog")
+        let acked = await attention.ackedTerminationList()
+        XCTAssertEqual(acked, ["run_1"])
+        XCTAssertEqual(coordinator.state, .guardianStandby)
+    }
+
+    // A long absence with nothing to tell must not open (and pay for) a Realtime
+    // session just to say "no ha pasado nada".
+    func testLongGapWithNothingToReportDoesNotOpenRealtime() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, now: { Date(timeIntervalSince1970: 1_009_000) })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[{"session_id":"s1","alias":"la del build","title":"Build","state":"running","pending_asks":0,"pending_perms":0}],"items":[],"terminations":[]}"#))
+        await settle()
+
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 0)
+        XCTAssertEqual(coordinator.state, .guardianStandby)
+    }
+
+    // First launch / first pairing: there is no "last time", so there is no
+    // absence to narrate either.
+    func testFirstLaunchNeverCatchesUp() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let presence = MockPresenceStore()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, now: { Date(timeIntervalSince1970: 1_009_000) })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        await settle()
+
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 0, "with no stored presence there is no gap to narrate")
+        let acked = await attention.ackedTerminationList()
+        XCTAssertEqual(acked, ["run_1"])
+        XCTAssertNotNil(presence.lastListeningAt(), "the first connection must seed the presence timestamp")
+    }
+
+    // The connection itself refreshes presence, so a second init right after
+    // (a genuine short reconnect) is no longer seen as an absence.
+    func testCatchUpDoesNotRepeatOnImmediateReconnect() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let voice = MockVoice()
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let clock = MockClock(now: Date(timeIntervalSince1970: 1_003_600))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: voice, wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, now: { clock.now() })
+        await coordinator.start()
+        await settle()
+        let initJSON = #"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#
+        await attention.emit(try decodeMessage(initJSON))
+        try await waitFor { (await realtime.currentCall()?.recordedNarrations().count ?? 0) == 1 }
+        voice.drainPlayback()
+        await settle()
+
+        clock.advance(10)
+        await attention.emit(try decodeMessage(initJSON))
+        await settle()
+        let narrations = await realtime.currentCall()?.recordedNarrations().count ?? 0
+        XCTAssertEqual(narrations, 1, "a reconnection right after the catch-up must not repeat it")
+    }
+
+    func testCatchUpEnvelopeCarriesSessionStateAndApproximateGap() throws {
+        let terminations = [try decodeTermination(#"{"id":"run_1","session_id":"s1","alias":"la del build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}"#)]
+        let items = [try decodeItem(#"{"id":"i1","priority":0,"kind":"permission","session_id":"s2","alias":"la del deploy","spoken":"pide desplegar","state":"pending","created_at":"2026-07-16T13:00:00Z"}"#)]
+        let sessions = [try decodeSession(#"{"session_id":"s1","alias":"la del build","title":"Build","state":"done","pending_asks":0,"pending_perms":0}"#)]
+
+        let envelope = PulseGuardianCoordinator.catchUpEnvelope(gap: 7_200, terminations: terminations, pendingItems: items, sessions: sessions)
+        let json = String(decoding: try JSONEncoder.moaOps.encode(envelope), as: UTF8.self)
+        XCTAssertTrue(json.contains("\"type\":\"catch_up\""))
+        XCTAssertTrue(json.contains("\"hueco_segundos\":7200"))
+        XCTAssertTrue(json.contains("unas 2 horas"))
+        XCTAssertTrue(json.contains("\"estado\":\"done\""))
+        XCTAssertTrue(json.contains("pide desplegar"))
+    }
+
+    func testGapDescriptionIsSpokenFriendly() {
+        XCTAssertEqual(PulseGuardianCoordinator.describeGap(200), "unos 3 minutos")
+        XCTAssertEqual(PulseGuardianCoordinator.describeGap(3_600), "una hora")
+        XCTAssertEqual(PulseGuardianCoordinator.describeGap(10_800), "unas 3 horas")
+        XCTAssertEqual(PulseGuardianCoordinator.describeGap(90_000), "un día")
+        XCTAssertEqual(PulseGuardianCoordinator.describeGap(200_000), "2 días")
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
+    private func decodeTermination(_ json: String) throws -> PulseRunTermination { try JSONDecoder.moaOps.decode(PulseRunTermination.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }
     private func decodeMessage(_ json: String) throws -> PulseAttentionServerMessage { try JSONDecoder.moaOps.decode(PulseAttentionServerMessage.self, from: Data(json.utf8)) }
 

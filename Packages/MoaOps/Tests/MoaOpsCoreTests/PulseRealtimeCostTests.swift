@@ -39,7 +39,9 @@ final class PulseRealtimeCostTests: XCTestCase {
         let usage = try XCTUnwrap(PulseRealtimeUsage(responseDone: json(responseDone)))
         // (2000-400) audio in @32 + 400 cached audio @0.40 + 200 audio out @64
         // + (1000-800) text in @4 + 800 cached text @0.40 + 100 text out @16.
-        let expected = (1_600 * 32.0 + 400 * 0.40 + 200 * 64.0 + 200 * 4.0 + 800 * 0.40 + 100 * 16.0) / 1_000_000
+        let audioUSD: Double = 1_600.0 * 32.0 + 400.0 * 0.40 + 200.0 * 64.0
+        let textUSD: Double = 200.0 * 4.0 + 800.0 * 0.40 + 100.0 * 16.0
+        let expected: Double = (audioUSD + textUSD) / 1_000_000.0
         XCTAssertEqual(PulseRealtimePricing.gptRealtime.costUSD(for: usage), expected, accuracy: 1e-9)
     }
 

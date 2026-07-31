@@ -157,6 +157,100 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(begins, 1)
     }
 
+    // A narration belonging to the dropped socket can fail long after the retry
+    // already recovered the conversation. That stale failure must not be read as
+    // a failure of the current session: it would close a call that is alive and
+    // cut a conversation that had just been rescued.
+    func testLateNarrationFailureFromDroppedSocketDoesNotKillRecoveredCall() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        let openedCall = await realtime.currentCall()
+        let firstCall = try XCTUnwrap(openedCall)
+        await firstCall.holdNarrations()
+
+        // An announcement takes the floor on the socket that is about to die.
+        await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        try await waitFor { await firstCall.narrationAttemptCount() == 1 }
+
+        await realtime.emit(.failed)
+        try await waitFor { await realtime.begins() == 2 }
+        let recoveredCall = await realtime.currentCall()
+        let secondCall = try XCTUnwrap(recoveredCall)
+        try await waitFor { await secondCall.recordedNarrations().count == 1 }
+
+        // Now the old narration finally reports its failure.
+        await firstCall.failNarrations(PulseCallError.operationUnavailable)
+        await firstCall.releaseNarrations()
+        await settle()
+
+        let begins = await realtime.begins()
+        XCTAssertEqual(begins, 2, "a stale narration failure must not trigger another reconnect")
+        let secondEnded = await secondCall.wasEnded()
+        XCTAssertFalse(secondEnded, "the recovered call must stay open")
+        XCTAssertEqual(coordinator.state, .speaking)
+    }
+
+    // A conversation the owner lost must stay visible: the cheap attention
+    // socket reconnecting on its own must not quietly wipe the notice.
+    func testConversationLostSurvivesAttentionSocketReconnect() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let service = MockGuardianService()
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.1)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        service.mintFailure = PulseCallError.operationUnavailable
+        await realtime.emit(.failed)
+        try await waitFor { coordinator.state == .conversationLost }
+
+        await attention.emitState(.reconnecting)
+        await settle()
+        XCTAssertEqual(coordinator.state, .conversationLost, "the drop must not be masked by the attention socket")
+        await attention.emitState(.connected)
+        await settle()
+        XCTAssertEqual(coordinator.state, .conversationLost)
+
+        // The owner asking for Pulse again is what clears the notice.
+        service.mintFailure = nil
+        wake.fire()
+        await settle()
+        XCTAssertNotEqual(coordinator.state, .conversationLost)
+    }
+
+    // The budget is a budget: when the next full backoff would overshoot it, the
+    // remaining time is still spent on one last attempt instead of being wasted.
+    func testReconnectSpendsRemainingBudgetOnLastAttempt() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let service = MockGuardianService()
+        // A backoff far longer than the budget: the old arithmetic gave up
+        // immediately, leaving the whole budget unused.
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 10 }, voiceReconnectBudget: 0.2)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        XCTAssertEqual(service.mintCount, 1)
+
+        service.mintFailure = PulseCallError.operationUnavailable
+        await realtime.emit(.failed)
+        await settle()
+        XCTAssertEqual(coordinator.state, .conversationReconnecting)
+
+        try await waitFor { coordinator.state == .conversationLost }
+        XCTAssertEqual(service.mintCount, 2, "the leftover budget must buy one final attempt")
+    }
+
     // Stopping the Guardián while a drop is being retried must kill the retry.
     func testStopCancelsPendingReconnect() async throws {
         let wake = MockWakeWord()

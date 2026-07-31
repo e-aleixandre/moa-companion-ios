@@ -237,8 +237,10 @@ public final class PulseGuardianCoordinator {
         switch socketState {
         case .connected: if state == .attentionReconnecting { state = .guardianStandby }
         // A dropped voice conversation is the more specific problem: the cheap
-        // attention socket reconnecting on its own must not mask it.
-        case .connecting, .reconnecting: if !isReconnectingVoice { state = .attentionReconnecting }
+        // attention socket reconnecting on its own must not mask it. A lost
+        // conversation stays visible until the owner starts a new one (wake word
+        // / Hablar) or a fresh announcement opens a session.
+        case .connecting, .reconnecting: if !isReconnectingVoice, state != .conversationLost { state = .attentionReconnecting }
         case .inactive:
             cancelVoiceReconnect()
             closeRealtime()
@@ -320,10 +322,19 @@ public final class PulseGuardianCoordinator {
         activeAcknowledgement = pending.acknowledgement
         isNarrating = true
         state = .speaking
+        // Pin the narration to the socket that owns it: a narration failing late
+        // belongs to a session that may already have been replaced by a
+        // reconnection, and tearing down the recovered call would cut a
+        // conversation that was just rescued.
+        let narrating = call
+        let generation = socketGeneration
         Task { [weak self] in
             guard let self else { return }
-            do { try await self.call?.requestGuardianNarration(pending.payload()) }
-            catch { self.realtimeFailed() }
+            do { try await narrating?.requestGuardianNarration(pending.payload()) }
+            catch {
+                guard self.socketGeneration == generation else { return }
+                self.realtimeFailed()
+            }
         }
     }
 
@@ -400,7 +411,10 @@ public final class PulseGuardianCoordinator {
                     Task { @MainActor in value?.receive(event, generation: generation) }
                 }, onText: { [weak owner] text in
                     let value = owner
-                    Task { @MainActor in value?.onText?(text) }
+                    Task { @MainActor in
+                        guard let value, value.socketGeneration == generation else { return }
+                        value.onText?(text)
+                    }
                 }, onAudio: { [weak owner] pcm, played in
                     let value = owner
                     Task { @MainActor in
@@ -411,7 +425,10 @@ public final class PulseGuardianCoordinator {
                     }
                 }, onBargeIn: { [weak owner] in
                     let value = owner
-                    Task { @MainActor in value?.voice.flushPlayback() }
+                    Task { @MainActor in
+                        guard let value, value.socketGeneration == generation else { return }
+                        value.voice.flushPlayback()
+                    }
                 })
                 guard self.isRunning, self.socketGeneration == generation else { await opened.end(); return }
                 self.call = opened
@@ -742,9 +759,15 @@ public final class PulseGuardianCoordinator {
         }
         bufferingOwnerSpeech = true
         voiceReconnectAttempt += 1
-        let delay = max(0, voiceReconnectDelay(voiceReconnectAttempt))
-        let deadline = voiceReconnectDeadline ?? Date()
-        guard Date().addingTimeInterval(delay) <= deadline else { abandonVoiceReconnect(); return }
+        let now = Date()
+        let deadline = voiceReconnectDeadline ?? now
+        guard now < deadline else { abandonVoiceReconnect(); return }
+        // Spend the whole budget: when the full backoff would overshoot the
+        // deadline, wait only what is left and make one last attempt right at it.
+        // A mint/beginCall still in flight may finish slightly after the deadline;
+        // that is accepted — an almost-recovered conversation is worth the extra
+        // second, and every other close path cancels the retry anyway.
+        let delay = min(max(0, voiceReconnectDelay(voiceReconnectAttempt)), deadline.timeIntervalSince(now))
         state = .conversationReconnecting
         log.info("voice reconnect attempt=\(self.voiceReconnectAttempt, privacy: .public) in \(String(format: "%.1f", delay), privacy: .public)s")
         voiceReconnectTask?.cancel()

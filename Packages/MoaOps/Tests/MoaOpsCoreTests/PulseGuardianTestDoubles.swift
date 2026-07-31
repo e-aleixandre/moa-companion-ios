@@ -78,14 +78,40 @@ actor MockAttentionChannel: PulseAttentionChanneling {
 actor MockRealtimeCall: PulseRealtimeCallControlling {
     private(set) var appendedPCM: [Data] = []
     private(set) var narrations: [String] = []
+    private(set) var narrationAttempts = 0
     private(set) var ended = false
     private var ready: Bool
     private var readyWaiters: [CheckedContinuation<Void, Never>] = []
+    // A narration can be parked and later failed on purpose, reproducing the
+    // socket that dies while Pulse has the floor and only reports it back once
+    // the coordinator has already moved on to another session.
+    private var narrationHeld = false
+    private var narrationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var narrationFailure: Error?
 
     init(startsReady: Bool = true) { self.ready = startsReady }
 
     func appendPCM16(_ pcm: Data) async throws { appendedPCM.append(pcm) }
-    func requestGuardianNarration(_ event: String) async throws { narrations.append(event) }
+    func requestGuardianNarration(_ event: String) async throws {
+        narrationAttempts += 1
+        if narrationHeld {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                if narrationHeld { narrationWaiters.append(c) } else { c.resume() }
+            }
+        }
+        if let failure = narrationFailure { throw failure }
+        narrations.append(event)
+    }
+
+    func holdNarrations() { narrationHeld = true }
+    func failNarrations(_ error: Error) { narrationFailure = error }
+    func releaseNarrations() {
+        narrationHeld = false
+        let waiters = narrationWaiters
+        narrationWaiters.removeAll()
+        for w in waiters { w.resume() }
+    }
+    func narrationAttemptCount() -> Int { narrationAttempts }
     func awaitSessionReady() async {
         if ready { return }
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
@@ -99,6 +125,8 @@ actor MockRealtimeCall: PulseRealtimeCallControlling {
         readyWaiters.removeAll()
         for w in waiters { w.resume() }
     }
+    // `end()` deliberately does not release a held narration: a dying socket is
+    // exactly the case where the narration only reports its failure much later.
     func end() async { ended = true; markReady() }
 
     func appendedCount() -> Int { appendedPCM.count }
@@ -146,8 +174,13 @@ final class MockGuardianService: PulseCallServing, @unchecked Sendable {
         set { lock.withLock { storedMintFailure = newValue } }
     }
 
+    /// How many times a client secret was requested, to assert how much of the
+    /// reconnection budget was actually spent.
+    var mintCount: Int { lock.withLock { storedMintCount } }
+
     private let lock = NSLock()
     private var storedMintFailure: Error?
+    private var storedMintCount = 0
 
     func listSessions() async throws -> [MoaServeSessionInfo] { [] }
     func attention() async throws -> MoaServeAttentionResponse { try JSONDecoder.moaOps.decode(MoaServeAttentionResponse.self, from: Data(#"{"items":[]}"#.utf8)) }
@@ -163,6 +196,7 @@ final class MockGuardianService: PulseCallServing, @unchecked Sendable {
     func cancelRun(sessionID: String) async throws {}
     func archiveSession(sessionID: String) async throws -> MoaServeArchiveSessionResponse { throw PulseCallError.operationUnavailable }
     func mintRealtimeClientSecret() async throws -> PulseRealtimeClientCredential {
+        lock.withLock { storedMintCount += 1 }
         if let failure = mintFailure { throw failure }
         return try JSONDecoder.moaOps.decode(PulseRealtimeClientCredential.self, from: Data(#"{"client_secret":"ek_fixture","expires_at":1900000000,"transport":"websocket","endpoint":"wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1","model":"gpt-realtime-2.1"}"#.utf8))
     }

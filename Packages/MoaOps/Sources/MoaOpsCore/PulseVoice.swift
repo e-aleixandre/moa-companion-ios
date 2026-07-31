@@ -364,6 +364,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         }
     }
 
+    /// Drops every buffer still queued for playback. The completions of the
+    /// dropped buffers are deliberately never invoked (the generation counter
+    /// swallows them), so this never reports a drain: the audio did not finish,
+    /// it was discarded. Whoever flushes owns deciding what that means — see
+    /// `PulseGuardianCoordinator.ownerBargedIn()`.
     public func flushPlayback() {
         playbackGeneration &+= 1
         queuedPlaybackBuffers = 0

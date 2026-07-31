@@ -49,7 +49,9 @@ public final class PulseGuardianCoordinator {
         /// owner it is back. The associated value only keeps it unique.
         case recovered(UInt64)
         /// One single spoken summary of everything that happened while the
-        /// Guardián was away. Never one announcement per item.
+        /// Guardián was away. Never one announcement per item. It carries the
+        /// terminations it claimed so an interrupted briefing can be put back
+        /// exactly as it was instead of being acked without having been heard.
         case catchUp(id: UInt64, envelope: CatchUpEnvelope, terminationIDs: [String])
 
         var acknowledgement: PulseGuardianAcknowledgement? {
@@ -60,6 +62,9 @@ public final class PulseGuardianCoordinator {
             case .briefing, .recovered: return nil
             }
         }
+
+        var isCatchUp: Bool { if case .catchUp = self { return true }; return false }
+        var isRecovered: Bool { if case .recovered = self { return true }; return false }
 
         func payload() throws -> String {
             let data: Data
@@ -167,7 +172,31 @@ public final class PulseGuardianCoordinator {
     // reconnects so a blocking ask that arrived while away is announced once,
     // but a mere reconnection never re-reads the whole pending backlog.
     private var announcedItemIDs = Set<String>()
+    // The narration that currently holds the floor, kept whole rather than just
+    // its acknowledgement: a socket dying mid-briefing has to put it back in the
+    // queue instead of losing it and acking it behind the owner's back.
+    private var activePending: Pending?
     private var activeAcknowledgement: PulseGuardianAcknowledgement?
+    // A narration is only over when the server closed the response it opened
+    // (`response.created` -> `response.done`) AND its audio finished sounding.
+    // Either signal alone is a lie: under jitter the local playback queue
+    // empties between deltas, in the middle of a sentence, and a `response.done`
+    // that was never preceded by a `response.created` belongs to something else.
+    private var narrationResponseStarted = false
+    private var narrationResponseDone = false
+    // Terminations already acknowledged to the server. An `init` arriving before
+    // the server purges them must not ack them a second time.
+    private var ackedTerminationIDs = Set<String>()
+    // How many times each announcement was put back after being cut. Retrying is
+    // right, retrying forever is a loop: a session that keeps dying would
+    // reopen the expensive socket for the same briefing indefinitely.
+    private var narrationRetries: [String: Int] = [:]
+    private let narrationRetryLimit = 3
+    // Last resort for a narration whose response events never arrive: without it
+    // `isNarrating` would stay true forever, and a stuck flag means a Guardián
+    // that never speaks nor closes its socket again.
+    private var narrationWatchdog: Task<Void, Never>?
+    private let narrationTimeout: TimeInterval = 90
     private var pcmQueue: [Data] = []
     // Larger than the previous 8 (~300 ms): tolerate brief network hiccups
     // during warmup/flush without dropping the owner's opening words.
@@ -229,7 +258,7 @@ public final class PulseGuardianCoordinator {
         configureAudioCallbacks()
     }
 
-    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel(); presenceTask?.cancel() }
+    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel(); presenceTask?.cancel(); narrationWatchdog?.cancel() }
 
     public func start() async {
         guard !isRunning else { return }
@@ -254,7 +283,10 @@ public final class PulseGuardianCoordinator {
     public func stop() {
         // A clean stop is the last moment the Guardián was really listening: a
         // catch-up must measure the absence from here, not from the last tick.
-        recordPresenceIfListening()
+        // Unconditional on purpose — this runs while the app is demonstrably
+        // alive, so it is never the suspicious jump `recordPresenceIfListening`
+        // guards against.
+        if isRunning, attentionConnected { presence.recordListening(at: now()) }
         presenceTask?.cancel(); presenceTask = nil
         attentionConnected = false
         isRunning = false
@@ -264,7 +296,11 @@ public final class PulseGuardianCoordinator {
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
         pcmTask?.cancel(); pcmTask = nil; pcmQueue.removeAll()
+        // A briefing the owner never got to hear goes back to the queue, so a
+        // later start() tells it instead of acking it silently.
+        requeueInterruptedNarration()
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false
+        narrationResponseStarted = false; narrationResponseDone = false
         voice.stopAll()
         state = .idle
         Task { await old?.end() }
@@ -339,8 +375,30 @@ public final class PulseGuardianCoordinator {
 
     private func recordPresenceIfListening() {
         guard isRunning, attentionConnected else { return }
-        presence.recordListening(at: now())
+        let moment = now()
+        guard let last = presence.lastListeningAt() else { presence.recordListening(at: moment); return }
+        let elapsed = moment.timeIntervalSince(last)
+        // Presence may only advance in small monotonic steps. A write landing far
+        // later than the heartbeat schedule means the process was frozen in
+        // between (iOS suspended the app, the device slept): that jump IS the
+        // absence, so the old timestamp is kept instead of erasing the very gap
+        // the catch-up measures. Ordering alone cannot fix this — both an overdue
+        // heartbeat tick and the socket's own `reconnecting` callback are
+        // delivered after the fact, while `attentionConnected` is still true.
+        // The `init` handler is the only place that resets presence, and only
+        // after having measured the gap.
+        guard elapsed >= 0, elapsed < presenceStaleJump else {
+            log.info("presence tick ignored: \(String(format: "%.0f", elapsed), privacy: .public)s jump looks like a suspension")
+            return
+        }
+        presence.recordListening(at: moment)
     }
+
+    /// How large a jump between two presence writes still counts as "we were
+    /// here the whole time": two heartbeats absorb normal scheduling delay. With
+    /// no heartbeat there is no independent evidence of liveness to compare
+    /// against, so nothing is rejected.
+    private var presenceStaleJump: TimeInterval { presenceRefreshInterval > 0 ? presenceRefreshInterval * 2 : .infinity }
 
     private func receive(_ message: PulseAttentionServerMessage) {
         guard isRunning else { return }
@@ -403,8 +461,15 @@ public final class PulseGuardianCoordinator {
     private func markTerminationsSeenSilently() {
         for termination in snapshot.terminations where !terminationsAwaitingCatchUp.contains(termination.id) {
             spokenTerminationIDs.insert(termination.id)
-            Task { await attention.ackTermination(terminationID: termination.id) }
+            acknowledgeTermination(termination.id)
         }
+    }
+
+    /// Single door for `ack_termination`: the server may still be resending a
+    /// run it has not purged yet, and an ack per `init` would be pure noise.
+    private func acknowledgeTermination(_ id: String) {
+        guard ackedTerminationIDs.insert(id).inserted else { return }
+        Task { await attention.ackTermination(terminationID: id) }
     }
 
     /// Composes the single spoken catch-up for a real absence. Terminations and
@@ -416,7 +481,7 @@ public final class PulseGuardianCoordinator {
         // Already-narrated terminations still in the backlog are acked anyway so
         // the server purges them.
         for termination in snapshot.terminations where spokenTerminationIDs.contains(termination.id) && !terminationsAwaitingCatchUp.contains(termination.id) {
-            Task { await attention.ackTermination(terminationID: termination.id) }
+            acknowledgeTermination(termination.id)
         }
         // Nothing happened while away: never pay for a Realtime session to say so.
         guard !terminations.isEmpty || !pendingItems.isEmpty else {
@@ -458,9 +523,29 @@ public final class PulseGuardianCoordinator {
     }
 
     private func enqueue(_ pending: Pending) {
+        // A catch-up and a "the conversation is back" are the same moment for the
+        // owner, and hearing both in a row is two interventions for one event.
+        // The catch-up wins: it already proves Pulse is back AND carries the
+        // facts, while the recovery announcement carries none.
+        if pending.isRecovered, hasPendingCatchUp {
+            log.info("recovery announcement folded into the pending catch-up")
+            processQueue()
+            return
+        }
+        if pending.isCatchUp { dropQueuedRecoveryAnnouncements() }
         guard queuedIDs.insert(pending.deduplicationID).inserted else { return }
         queue.append(pending)
         processQueue()
+    }
+
+    private var hasPendingCatchUp: Bool {
+        if activePending?.isCatchUp == true { return true }
+        return queue.contains(where: \.isCatchUp)
+    }
+
+    private func dropQueuedRecoveryAnnouncements() {
+        for pending in queue where pending.isRecovered { queuedIDs.remove(pending.deduplicationID) }
+        queue.removeAll(where: \.isRecovered)
     }
 
     private func processQueue() {
@@ -472,10 +557,18 @@ public final class PulseGuardianCoordinator {
             return
         }
         guard !isNarrating else { return }
+        // Never speak over a live turn: while the owner talks or a response is
+        // still being generated/played, they own the floor. The announcement
+        // stays queued and every drain point calls back here.
+        guard !ownerSpeaking, !isResponding, !isPlayingResponseAudio else { return }
         let pending = queue.removeFirst()
         queuedIDs.remove(pending.deduplicationID)
+        activePending = pending
         activeAcknowledgement = pending.acknowledgement
         isNarrating = true
+        narrationResponseStarted = false
+        narrationResponseDone = false
+        armNarrationWatchdog()
         state = .speaking
         // Pin the narration to the socket that owns it: a narration failing late
         // belongs to a session that may already have been replaced by a
@@ -574,15 +667,14 @@ public final class PulseGuardianCoordinator {
                     let value = owner
                     Task { @MainActor in
                         guard let value, value.socketGeneration == generation else { return }
-                        value.notePulseAudio()
-                        value.isPlayingResponseAudio = true
+                        value.noteResponseAudio()
                         value.voice.playPCM16(pcm, completion: played)
                     }
                 }, onBargeIn: { [weak owner] in
                     let value = owner
                     Task { @MainActor in
                         guard let value, value.socketGeneration == generation else { return }
-                        value.voice.flushPlayback()
+                        value.ownerBargedIn()
                     }
                 })
                 guard self.isRunning, self.socketGeneration == generation else { await opened.end(); return }
@@ -606,7 +698,10 @@ public final class PulseGuardianCoordinator {
                 if self.isReconnectingVoice { self.scheduleVoiceReconnect(); return }
                 self.bufferingOwnerSpeech = false
                 self.warmupBuffer.removeAll()
-                self.state = .failed
+                // A retried announcement failing again must not overwrite the
+                // notice the owner still needs to see: the conversation is lost,
+                // which is the more specific truth.
+                if self.state != .conversationLost { self.state = .failed }
                 self.rearmWakeWord()
             }
         }
@@ -651,15 +746,28 @@ public final class PulseGuardianCoordinator {
         case .connecting: state = .waking
         case .responding:
             isResponding = true
+            if isNarrating {
+                // The response that carries the announcement starts here. Any
+                // `response.done` seen before this one closed something else.
+                narrationResponseStarted = true
+                narrationResponseDone = false
+            }
             closeTask?.cancel(); closeTask = nil
             state = .speaking
         case .listening:
             isResponding = false
-            if isNarrating { state = .draining }
-            else if !isPlayingResponseAudio {
+            if isNarrating {
+                // response.done: the server finished generating the briefing.
+                // The last PCM is usually still sounding on the device, so the
+                // acknowledgement waits for the playback drain as well.
+                if narrationResponseStarted { narrationResponseDone = true }
+                state = .draining
+                finishNarrationIfComplete()
+            } else if !isPlayingResponseAudio {
                 // response.done ends the server's generation before the last
                 // PCM has finished sounding on the device.
                 state = .listening
+                processQueue()
                 scheduleCloseAfterHotWindow()
             }
         case .speechStarted:
@@ -670,7 +778,12 @@ public final class PulseGuardianCoordinator {
         case .speechStopped:
             // Only genuine silence after real speech may start the close timer.
             ownerSpeaking = false
-            if !isNarrating, queue.isEmpty { scheduleCloseAfterHotWindow() }
+            if !isNarrating {
+                // The owner's turn drained: an announcement that was waiting for
+                // the floor can take it now.
+                processQueue()
+                if queue.isEmpty { scheduleCloseAfterHotWindow() }
+            }
         case .ended, .failed: realtimeFailed()
         }
     }
@@ -682,19 +795,64 @@ public final class PulseGuardianCoordinator {
             isPlayingResponseAudio = false
             if !isResponding, !ownerSpeaking {
                 state = .listening
+                processQueue()
                 if queue.isEmpty { scheduleCloseAfterHotWindow() }
             }
             return
         }
+        isPlayingResponseAudio = false
         state = .draining
+        finishNarrationIfComplete()
+    }
+
+    /// More audio for the response in flight. Marking it here is what keeps a
+    /// playback queue that momentarily empties between deltas from being read as
+    /// the end of the announcement.
+    private func noteResponseAudio() {
+        notePulseAudio()
+        isPlayingResponseAudio = true
+    }
+
+    /// The owner cut Pulse off mid-announcement. The flushed buffers never call
+    /// back, so the narration would otherwise stay in flight forever: it is
+    /// treated as delivered. Barging in is a conscious "I heard enough", and the
+    /// provider already truncates the item to what actually sounded, so acking
+    /// what the owner interrupted is honest rather than lossy.
+    private func ownerBargedIn() {
+        voice.flushPlayback()
+        isPlayingResponseAudio = false
+        // The barge-in itself is owner speech; `speechStarted` follows right
+        // after. Marking it now keeps the queue from grabbing the floor back.
+        ownerSpeaking = true
+        guard isNarrating else { return }
+        finishNarration()
+    }
+
+    /// The announcement counts as delivered only once the server closed the
+    /// response and no audio of it is still sounding. A response that produced
+    /// no audio at all is complete as soon as `response.done` arrives.
+    private func finishNarrationIfComplete() {
+        guard isNarrating, narrationResponseStarted, narrationResponseDone, !isPlayingResponseAudio else { return }
+        finishNarration()
+    }
+
+    /// The announcement is over for good: acknowledge what the owner heard and
+    /// let the queue move on.
+    private func finishNarration() {
+        guard isNarrating else { return }
+        narrationWatchdog?.cancel(); narrationWatchdog = nil
         let acknowledgement = activeAcknowledgement
         activeAcknowledgement = nil
+        if let pending = activePending { narrationRetries[pending.deduplicationID] = nil }
+        activePending = nil
         isNarrating = false
+        narrationResponseStarted = false
+        narrationResponseDone = false
         switch acknowledgement {
         case let .item(id): Task { await attention.ack(itemID: id) }
         case let .termination(id):
             spokenTerminationIDs.insert(id)
-            Task { await attention.ackTermination(terminationID: id) }
+            acknowledgeTermination(id)
         case let .terminations(ids):
             // The catch-up was actually spoken: let the server purge every run it
             // covered. Pending asks/permissions are NOT resolved here — they keep
@@ -702,12 +860,25 @@ public final class PulseGuardianCoordinator {
             for id in ids {
                 spokenTerminationIDs.insert(id)
                 terminationsAwaitingCatchUp.remove(id)
-                Task { await attention.ackTermination(terminationID: id) }
+                acknowledgeTermination(id)
             }
         case nil: break
         }
         processQueue()
         if queue.isEmpty { scheduleCloseAfterHotWindow() }
+    }
+
+    private func armNarrationWatchdog() {
+        narrationWatchdog?.cancel()
+        let generation = socketGeneration
+        narrationWatchdog = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.narrationTimeout * 1_000_000_000))
+            guard !Task.isCancelled, self.isRunning, self.isNarrating, self.socketGeneration == generation else { return }
+            self.log.info("narration watchdog fired: response events never completed it")
+            self.narrationWatchdog = nil
+            self.finishNarration()
+        }
     }
 
     private func wakeFromOwner() {
@@ -857,14 +1028,43 @@ public final class PulseGuardianCoordinator {
     private func closeRealtime() {
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
-        // A catch-up cut mid-narration will never be acked by playback: release
-        // its hold so the next connection can at least purge those runs quietly
-        // instead of keeping them forever.
-        if case let .terminations(ids)? = activeAcknowledgement { terminationsAwaitingCatchUp.subtract(ids) }
+        requeueInterruptedNarration()
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false; ownerSpeaking = false; activeAcknowledgement = nil
+        narrationResponseStarted = false; narrationResponseDone = false
         bufferingOwnerSpeech = false; warmupBuffer.removeAll()
         pcmQueue.removeAll(); pcmTask?.cancel(); pcmTask = nil
         Task { await old?.end() }
+    }
+
+    /// A narration cut before it was acknowledged was never heard by the owner:
+    /// it goes back to the head of the queue so the next session retries it.
+    /// Its dedup marks (`spokenTerminationIDs`, `announcedItemIDs`) are kept on
+    /// purpose so nothing is announced twice, and `terminationsAwaitingCatchUp`
+    /// keeps shielding those runs from `markTerminationsSeenSilently()` — the
+    /// briefing is retried, never acked silently.
+    private func requeueInterruptedNarration() {
+        narrationWatchdog?.cancel(); narrationWatchdog = nil
+        guard let pending = activePending else { return }
+        activePending = nil
+        activeAcknowledgement = nil
+        // A stale "I'm back" is noise once the conversation has dropped again:
+        // the next successful reconnection enqueues its own.
+        guard !pending.isRecovered else { return }
+        let id = pending.deduplicationID
+        let attempts = (narrationRetries[id] ?? 0) + 1
+        guard attempts <= narrationRetryLimit else {
+            narrationRetries[id] = nil
+            log.info("narration \(id, privacy: .public) dropped after \(attempts, privacy: .public) interrupted attempts")
+            // Give up on telling it, but stop holding its runs hostage: the next
+            // `init` may at least purge them silently.
+            if case let .terminations(ids)? = pending.acknowledgement { terminationsAwaitingCatchUp.subtract(ids) }
+            return
+        }
+        narrationRetries[id] = attempts
+        guard queuedIDs.insert(id).inserted else { return }
+        // Front of the queue, and deliberately without calling processQueue():
+        // the caller is in the middle of tearing the session down.
+        queue.insert(pending, at: 0)
     }
 
     private func temporarilyInterrupted() {

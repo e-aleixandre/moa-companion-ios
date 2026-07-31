@@ -172,16 +172,18 @@ actor MockRealtime: PulseRealtimeCalling {
     private var onState: (@Sendable (PulseRealtimeCallState) -> Void)?
     private var onAudio: (@Sendable (Data, @escaping @Sendable () -> Void) -> Void)?
     private var onBargeIn: (@Sendable () -> Void)?
+    private var onUsage: (@Sendable (PulseRealtimeUsage) -> Void)?
     private var call: MockRealtimeCall?
 
     init(startsReady: Bool = true) { self.startsReady = startsReady }
 
-    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
+    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void) async throws -> any PulseRealtimeCallControlling {
         beginCount += 1
         lastInitialContext = initialContext
         self.onState = onState
         self.onAudio = onAudio
         self.onBargeIn = onBargeIn
+        self.onUsage = onUsage
         let call = MockRealtimeCall(startsReady: startsReady)
         self.call = call
         return call
@@ -194,10 +196,33 @@ actor MockRealtime: PulseRealtimeCalling {
     func emitToolCallStarted() { onState?(.toolCallStarted) }
     func emitToolCallFinished() { onState?(.toolCallFinished) }
     func emitAudio(_ pcm: Data) { onAudio?(pcm, {}) }
+    func emitUsage(_ usage: PulseRealtimeUsage) { onUsage?(usage) }
     func emitBargeIn() { onBargeIn?() }
     func begins() -> Int { beginCount }
     func initialContext() -> String { lastInitialContext }
     func currentCall() -> MockRealtimeCall? { call }
+}
+
+/// In-memory ledger: the totals of one test never leak into the next run, and
+/// the handler that writes them fires off the coordinator's actor, so the
+/// storage carries its own lock like the other doubles here.
+final class MockCostStore: PulseRealtimeCostStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessions = 0
+    private var recorded: [PulseRealtimeUsage] = []
+
+    func beginSession(at _: Date) { lock.withLock { sessions += 1 } }
+    func record(usage: PulseRealtimeUsage, at _: Date) { lock.withLock { recorded.append(usage) } }
+    func snapshot(at _: Date) -> PulseRealtimeCostSnapshot {
+        lock.withLock {
+            let total = recorded.reduce(PulseRealtimeUsage()) { $0 + $1 }
+            let cost = PulseRealtimePricing.gptRealtime.costUSD(for: total)
+            return .init(today: .init(costUSD: cost, sessions: sessions), month: .init(costUSD: cost, sessions: sessions), lastSessionUSD: recorded.isEmpty ? nil : cost)
+        }
+    }
+
+    var sessionCount: Int { lock.withLock { sessions } }
+    var recordedUsage: [PulseRealtimeUsage] { lock.withLock { recorded } }
 }
 
 /// Records every state the coordinator published. The handler is `@Sendable`

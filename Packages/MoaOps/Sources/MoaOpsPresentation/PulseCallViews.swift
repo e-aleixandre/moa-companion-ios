@@ -331,6 +331,19 @@ public struct PulseCallSettingsView: View {
                         .font(PulseFont.footnote)
                         .foregroundStyle(PulseColor.textSecondary)
 
+                    PulseSectionHeader("Coste de voz")
+                    VStack(spacing: 0) {
+                        settingsRow(label: "Hoy", value: PulseRealtimeCostFormatting.bucket(model.costSnapshot.today), monospaced: true)
+                        Divider().overlay(PulseColor.hairline)
+                        settingsRow(label: "Este mes", value: PulseRealtimeCostFormatting.bucket(model.costSnapshot.month), monospaced: true)
+                        Divider().overlay(PulseColor.hairline)
+                        settingsRow(label: "Última sesión", value: PulseRealtimeCostFormatting.lastSession(model.costSnapshot), monospaced: true)
+                    }
+                    .pulseCard()
+                    Text("Estimación local en dólares con los precios de gpt-realtime; no es tu factura.")
+                        .font(PulseFont.footnote)
+                        .foregroundStyle(PulseColor.textSecondary)
+
                     PulseSectionHeader("Registro")
                     if model.captions.isEmpty {
                         Text("Sin actividad todavía. Aquí quedará lo último que Pulse ha dicho y hecho, por si algo va mal.")
@@ -355,6 +368,7 @@ public struct PulseCallSettingsView: View {
             .pulseScreenBackground()
             .navigationTitle("Ajustes")
             .pulseInlineNavigationTitle()
+            .onAppear { model.refreshCostSnapshot() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cerrar") { dismiss() }

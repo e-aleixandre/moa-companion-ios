@@ -124,7 +124,15 @@ public extension PulseRealtimeCallControlling {
 }
 
 public protocol PulseRealtimeCalling: Sendable {
-    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling
+    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration, executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void) async throws -> any PulseRealtimeCallControlling
+}
+
+public extension PulseRealtimeCalling {
+    /// For callers that do not keep books (previews, focused transport tests).
+    /// Session owners pass a real `onUsage` so the ledger sees every response.
+    func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
+        try await beginCall(credential: credential, configuration: configuration, executor: executor, initialContext: initialContext, onState: onState, onText: onText, onAudio: onAudio, onBargeIn: onBargeIn, onUsage: { _ in })
+    }
 }
 
 /// Direct, persistent WebSocket for one hands-free call. Audio stays iPhone ↔
@@ -136,6 +144,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private let onText: @Sendable (String) -> Void
     private let onAudio: @Sendable (Data, @escaping @Sendable () -> Void) -> Void
     private let onBargeIn: @Sendable () -> Void
+    /// Billing side-channel: one emission per `response.done` that reports
+    /// usage. Separate from `onState` because it is bookkeeping, not a change in
+    /// what the call is doing.
+    private let onUsage: @Sendable (PulseRealtimeUsage) -> Void
     private var receiveTask: Task<Void, Never>?
     private var hasFunctionCallOutputsForCurrentResponse = false
     private var discardingInterruptedAudio = false
@@ -149,8 +161,8 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private var sessionReady = false
     private var sessionReadyWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) {
-        self.socket = socket; self.executor = executor; self.onState = onState; self.onText = onText; self.onAudio = onAudio; self.onBargeIn = onBargeIn
+    init(socket: any PulseRealtimeSocket, executor: PulseGenericToolExecutor, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void = { _ in }) {
+        self.socket = socket; self.executor = executor; self.onState = onState; self.onText = onText; self.onAudio = onAudio; self.onBargeIn = onBargeIn; self.onUsage = onUsage
     }
 
     public func start(initialContext: String) async throws {
@@ -269,6 +281,10 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                     responseAudioStartedAt = nil
                     onState(.responding)
                 case "response.done":
+                    // Report what this response cost before anything else: a
+                    // follow-up `response.create` below must not be able to
+                    // shadow the usage of the response that just closed.
+                    if let usage = PulseRealtimeUsage(responseDone: event), !usage.isEmpty { onUsage(usage) }
                     currentAudioItemID = nil
                     playedAudioBytes = 0
                     if hasFunctionCallOutputsForCurrentResponse {
@@ -330,11 +346,11 @@ public actor OpenAIRealtimeClient: PulseRealtimeCalling {
         self.socketFactory = socketFactory
     }
 
-    public func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
+    public func beginCall(credential: PulseRealtimeClientCredential, configuration: OpenAIRealtimeProviderConfiguration = .init(), executor: PulseGenericToolExecutor, initialContext: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText: @escaping @Sendable (String) -> Void, onAudio: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void) async throws -> any PulseRealtimeCallControlling {
         let credential = try credential.validated(configuration: configuration)
         var request = URLRequest(url: credential.endpoint)
         request.setValue("Bearer \(credential.clientSecret)", forHTTPHeaderField: "Authorization")
-        let call = OpenAIRealtimeCall(socket: await socketFactory.makeSocket(request: request), executor: executor, onState: onState, onText: onText, onAudio: onAudio, onBargeIn: onBargeIn)
+        let call = OpenAIRealtimeCall(socket: await socketFactory.makeSocket(request: request), executor: executor, onState: onState, onText: onText, onAudio: onAudio, onBargeIn: onBargeIn, onUsage: onUsage)
         try await call.start(initialContext: initialContext)
         return call
     }

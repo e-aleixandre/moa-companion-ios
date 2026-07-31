@@ -49,6 +49,9 @@ public final class PulseCallAppModel: ObservableObject {
     /// Guardián is the default UI mode. `startCall()` remains the explicit
     /// legacy Conversation entry point for callers that rely on it.
     @Published public var isGuardianMode = true
+    /// Estimated Realtime spend, refreshed on demand (settings) rather than
+    /// continuously: it is a number the owner consults, not a live meter.
+    @Published public private(set) var costSnapshot = PulseRealtimeCostSnapshot()
     @Published public var isMuted = false { didSet { voice.setMuted(isMuted); updateGuardianLiveActivity() } }
 
     private let store: any PulseSecureStore
@@ -56,6 +59,7 @@ public final class PulseCallAppModel: ObservableObject {
     private let serviceFactory: ServiceFactory
     private let pairingClaim: PairingClaim
     private let realtime: any PulseRealtimeCalling
+    private let costs: any PulseRealtimeCostStore
     private let reconnectDelay: @Sendable (Int) -> TimeInterval
     /// How long a Moa tool has to run before the orb shows it. Below it the
     /// resolving state would only be a flash. Injectable so tests do not sleep.
@@ -83,11 +87,12 @@ public final class PulseCallAppModel: ObservableObject {
     private var guardian: PulseGuardianCoordinator?
     private let guardianLiveActivity = PulseGuardianLiveActivityController()
 
-    public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, resolvingDelay: TimeInterval = 0.3, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
-        self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.resolvingDelay = resolvingDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
+    public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), costs: any PulseRealtimeCostStore = UserDefaultsPulseRealtimeCostStore(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, resolvingDelay: TimeInterval = 0.3, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
+        self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.costs = costs; self.reconnectDelay = reconnectDelay; self.resolvingDelay = resolvingDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
         configureVoice()
         restoreRegistration()
         registerRemoteControl()
+        refreshCostSnapshot()
     }
 
     deinit { connectionTask?.cancel(); resolvingTask?.cancel() }
@@ -133,7 +138,7 @@ public final class PulseCallAppModel: ObservableObject {
     public func startGuardian() async {
         guard hasPairedDevice, let service, let registration, !isGuardianActive, call == nil else { return }
         let attention = PulseAttentionWebSocket(registration: registration)
-        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: voice, wakeWord: PulseWakeWordDetector())
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: attention, voice: voice, wakeWord: PulseWakeWordDetector(), costs: costs)
         coordinator.onState = { [weak self] state in
             let model = self
             Task { @MainActor in
@@ -206,6 +211,18 @@ public final class PulseCallAppModel: ObservableObject {
     public func activateGuardianTalk() { guardian?.activateTalk() }
     public func reclaimGuardianAttention() { guardian?.reclaimAttention() }
 
+    /// Rereads the ledger. Called when the cost section is about to be shown,
+    /// so opening settings is always enough to see current numbers — including
+    /// the day/month rollover, which happens on read.
+    public func refreshCostSnapshot() { costSnapshot = costs.snapshot() }
+
+    private func recordUsage(_ usage: PulseRealtimeUsage) {
+        // Not gated on the call generation: the response was billed to the owner
+        // even if the call that produced it has already been retired.
+        costs.record(usage: usage)
+        refreshCostSnapshot()
+    }
+
     public func endCall() {
         if isGuardianActive { stopGuardian(); return }
         callGeneration &+= 1
@@ -238,8 +255,12 @@ public final class PulseCallAppModel: ObservableObject {
                 try Task.checkCancellation()
                 guard let self, self.owns(generation) else { return }
                 let owner = self
-                let call = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: "<estado_inicial_moa>\n\(overview.output)\n</estado_inicial_moa>", onState: { [weak owner] event in let o = owner; Task { @MainActor in o?.apply(event, generation: generation, service: service, attempt: attempt) } }, onText: { [weak owner] text in let o = owner; Task { @MainActor in o?.append(text, owner: false, generation: generation) } }, onAudio: { [weak owner] pcm, played in let o = owner; Task { @MainActor in guard o?.owns(generation) == true else { return }; o?.voice.playPCM16(pcm, completion: played) } }, onBargeIn: { [weak owner] in let o = owner; Task { @MainActor in guard o?.owns(generation) == true else { return }; o?.voice.flushPlayback() } })
+                let call = try await self.realtime.beginCall(credential: credential, configuration: .init(), executor: executor, initialContext: "<estado_inicial_moa>\n\(overview.output)\n</estado_inicial_moa>", onState: { [weak owner] event in let o = owner; Task { @MainActor in o?.apply(event, generation: generation, service: service, attempt: attempt) } }, onText: { [weak owner] text in let o = owner; Task { @MainActor in o?.append(text, owner: false, generation: generation) } }, onAudio: { [weak owner] pcm, played in let o = owner; Task { @MainActor in guard o?.owns(generation) == true else { return }; o?.voice.playPCM16(pcm, completion: played) } }, onBargeIn: { [weak owner] in let o = owner; Task { @MainActor in guard o?.owns(generation) == true else { return }; o?.voice.flushPlayback() } }, onUsage: { [weak owner] usage in let o = owner; Task { @MainActor in o?.recordUsage(usage) } })
                 guard self.owns(generation) else { await call.end(); return }
+                // One opened socket is one billed Realtime session, counted even
+                // if the microphone fails right after: OpenAI charged for it.
+                self.costs.beginSession()
+                self.refreshCostSnapshot()
                 self.call = call
                 guard await self.voice.startContinuousCapture() else {
                     guard self.owns(generation) else { await call.end(); return }

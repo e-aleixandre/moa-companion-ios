@@ -162,6 +162,7 @@ public final class PulseGuardianCoordinator {
     private let voiceReconnectDelay: @Sendable (Int) -> TimeInterval
     private let voiceReconnectBudget: TimeInterval
     private let presence: any PulseGuardianPresenceStore
+    private let costs: any PulseRealtimeCostStore
     private let catchUpGapThreshold: TimeInterval
     private let presenceRefreshInterval: TimeInterval
     private let now: @Sendable () -> Date
@@ -267,7 +268,7 @@ public final class PulseGuardianCoordinator {
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), costs: any PulseRealtimeCostStore = UserDefaultsPulseRealtimeCostStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
@@ -277,6 +278,7 @@ public final class PulseGuardianCoordinator {
         self.voiceReconnectDelay = voiceReconnectDelay
         self.voiceReconnectBudget = voiceReconnectBudget
         self.presence = presence
+        self.costs = costs
         self.catchUpGapThreshold = catchUpGapThreshold
         self.presenceRefreshInterval = presenceRefreshInterval
         self.narrationTimeout = narrationTimeout
@@ -732,8 +734,21 @@ public final class PulseGuardianCoordinator {
                         guard let value, value.socketGeneration == generation else { return }
                         value.ownerBargedIn()
                     }
+                }, onUsage: { [weak owner] usage in
+                    let value = owner
+                    Task { @MainActor in
+                        // Deliberately not gated on the socket generation: the
+                        // owner was billed for this response even if its socket
+                        // has already been replaced.
+                        guard let value else { return }
+                        value.costs.record(usage: usage, at: value.now())
+                    }
                 })
                 guard self.isRunning, self.socketGeneration == generation else { await opened.end(); return }
+                // One opened socket is one Realtime session for the ledger. A
+                // voice reconnection opens a new one and is counted as such:
+                // that is what OpenAI is charging for.
+                self.costs.beginSession(at: self.now())
                 self.call = opened
                 self.isOpeningRealtime = false
                 // BUG 2: don't stream audio until the session is actually ready to

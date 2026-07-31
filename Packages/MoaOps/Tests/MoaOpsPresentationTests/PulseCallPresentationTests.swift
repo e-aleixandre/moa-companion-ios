@@ -222,6 +222,53 @@ final class PulseCallPresentationTests: XCTestCase {
         model.endCall()
     }
 
+    // The owner must be able to see what voice is costing: every response of a
+    // direct call feeds the same ledger the Guardián writes into.
+    func testDirectCallCountsItsSessionAndRecordsUsageInTheLedger() async throws {
+        let realtime = PresentationRealtime()
+        let costs = PresentationCostStore()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, costs: costs, reconnectDelay: { _ in 0 }, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        try await waitFor { costs.sessionCount == 1 }
+        await realtime.emitUsage(.init(inputAudioTokens: 1_000, outputAudioTokens: 500))
+        try await waitFor { model.costSnapshot.today.costUSD > 0 }
+        XCTAssertEqual(costs.recordedCount, 1)
+        XCTAssertEqual(model.costSnapshot.today.sessions, 1)
+        model.endCall()
+    }
+
+    // A response billed by a socket that was already hung up still cost money.
+    func testUsageArrivingAfterHangupIsStillBilled() async throws {
+        let realtime = PresentationRealtime()
+        let costs = PresentationCostStore()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, costs: costs, reconnectDelay: { _ in 0 }, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        try await waitFor { costs.sessionCount == 1 }
+        model.endCall()
+        await settle()
+        await realtime.emitUsage(.init(inputAudioTokens: 1_000))
+        try await waitFor { costs.recordedCount == 1 }
+    }
+
+    func testAmountsAreReadableIncludingLessThanOneCent() {
+        XCTAssertEqual(PulseRealtimeCostFormatting.amount(0), "$0,00")
+        XCTAssertEqual(PulseRealtimeCostFormatting.amount(0.0004), "<$0,01")
+        XCTAssertEqual(PulseRealtimeCostFormatting.amount(0.34), "$0,34")
+        XCTAssertEqual(PulseRealtimeCostFormatting.amount(12.5), "$12,50")
+        XCTAssertEqual(PulseRealtimeCostFormatting.sessions(1), "1 sesión")
+        XCTAssertEqual(PulseRealtimeCostFormatting.sessions(4), "4 sesiones")
+    }
+
+    /// Zero maintenance: nothing recorded reads as "—", not as "free".
+    func testAnEmptyLedgerShowsPlaceholders() {
+        let empty = PulseRealtimeCostSnapshot()
+        XCTAssertEqual(PulseRealtimeCostFormatting.bucket(empty.today), "—")
+        XCTAssertEqual(PulseRealtimeCostFormatting.lastSession(empty), "—")
+        let used = PulseRealtimeCostSnapshot(today: .init(costUSD: 1.2, sessions: 3), month: .init(costUSD: 9, sessions: 20), lastSessionUSD: 0.4)
+        XCTAssertEqual(PulseRealtimeCostFormatting.bucket(used.today), "$1,20 · 3 sesiones")
+        XCTAssertEqual(PulseRealtimeCostFormatting.lastSession(used), "$0,40")
+    }
+
     private func registration() throws -> PulseDeviceRegistration { try .init(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture) }
     private func pairedStore() throws -> PresentationStore { let store = PresentationStore(); try store.saveDeviceRegistration(registration()); return store }
     private func settle() async { for _ in 0..<40 { await Task.yield() } }
@@ -278,6 +325,27 @@ private final class PresentationService: PulseCallServing, @unchecked Sendable {
     func invalidate() async {}
 }
 
+/// In-memory ledger so a test never reads or writes the device's real totals.
+/// Its writes arrive from `@Sendable` provider callbacks, hence the lock.
+private final class PresentationCostStore: PulseRealtimeCostStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessions = 0
+    private var recorded: [PulseRealtimeUsage] = []
+
+    func beginSession(at _: Date) { lock.lock(); sessions += 1; lock.unlock() }
+    func record(usage: PulseRealtimeUsage, at _: Date) { lock.lock(); recorded.append(usage); lock.unlock() }
+    func snapshot(at _: Date) -> PulseRealtimeCostSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        let total = recorded.reduce(PulseRealtimeUsage()) { $0 + $1 }
+        let cost = PulseRealtimePricing.gptRealtime.costUSD(for: total)
+        return .init(today: .init(costUSD: cost, sessions: sessions), month: .init(costUSD: cost, sessions: sessions), lastSessionUSD: recorded.isEmpty ? nil : cost)
+    }
+
+    var sessionCount: Int { lock.lock(); defer { lock.unlock() }; return sessions }
+    var recordedCount: Int { lock.lock(); defer { lock.unlock() }; return recorded.count }
+}
+
 private actor PresentationCall: PulseRealtimeCallControlling {
     func appendPCM16(_: Data) async throws {}
     private var ended = false
@@ -289,14 +357,16 @@ private actor PresentationRealtime: PulseRealtimeCalling {
     private var count = 0
     private var callback: (@Sendable (PulseRealtimeCallState) -> Void)?
     private var bargeInCallback: (@Sendable () -> Void)?
+    private var usageCallback: (@Sendable (PulseRealtimeUsage) -> Void)?
     private var lastCall: PresentationCall?
-    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext _: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio _: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void) async throws -> any PulseRealtimeCallControlling {
-        count += 1; callback = onState; bargeInCallback = onBargeIn
+    func beginCall(credential _: PulseRealtimeClientCredential, configuration _: OpenAIRealtimeProviderConfiguration, executor _: PulseGenericToolExecutor, initialContext _: String, onState: @escaping @Sendable (PulseRealtimeCallState) -> Void, onText _: @escaping @Sendable (String) -> Void, onAudio _: @escaping @Sendable (Data, @escaping @Sendable () -> Void) -> Void, onBargeIn: @escaping @Sendable () -> Void, onUsage: @escaping @Sendable (PulseRealtimeUsage) -> Void) async throws -> any PulseRealtimeCallControlling {
+        count += 1; callback = onState; bargeInCallback = onBargeIn; usageCallback = onUsage
         let call = PresentationCall(); lastCall = call
         return call
     }
     func emit(_ event: PulseRealtimeCallState) { callback?(event) }
     func emitBargeIn() { bargeInCallback?() }
+    func emitUsage(_ usage: PulseRealtimeUsage) { usageCallback?(usage) }
     func beginCount() -> Int { count }
     func lastCallEnded() async -> Bool {
         guard let lastCall else { return false }

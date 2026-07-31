@@ -1293,6 +1293,23 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         try await waitFor { coordinator.state == .listening }
     }
 
+    // The Guardián is the other session owner: every socket it opens and every
+    // response it is billed for must land in the same ledger the call mode uses.
+    func testGuardianCountsItsRealtimeSessionAndRecordsUsage() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let costs = MockCostStore()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), costs: costs)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { costs.sessionCount == 1 }
+        await realtime.emitUsage(.init(inputAudioTokens: 2_000, outputAudioTokens: 400))
+        try await waitFor { costs.recordedUsage.count == 1 }
+        XCTAssertEqual(costs.recordedUsage.first?.outputAudioTokens, 400)
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeTermination(_ json: String) throws -> PulseRunTermination { try JSONDecoder.moaOps.decode(PulseRunTermination.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }

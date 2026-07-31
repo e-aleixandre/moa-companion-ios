@@ -213,7 +213,7 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         await realtime.emit(.failed)
         try await waitFor { coordinator.state == .conversationLost }
 
-        await attention.emitState(.reconnecting)
+        await attention.emitState(.reconnecting(1))
         await settle()
         XCTAssertEqual(coordinator.state, .conversationLost, "the drop must not be masked by the attention socket")
         await attention.emitState(.connected)

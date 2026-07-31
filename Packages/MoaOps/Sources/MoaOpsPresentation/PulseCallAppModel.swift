@@ -3,7 +3,7 @@ import SwiftUI
 import MoaOpsCore
 
 public enum PulseCallState: Equatable, Sendable {
-    case disconnected, ready, connecting, reconnecting(attempt: Int), listening, responding, ended, error
+    case disconnected, ready, connecting, reconnecting(attempt: Int), listening, responding, resolving, ended, error
     public var spanishLabel: String {
         switch self {
         case .disconnected: "Sin emparejar"
@@ -12,6 +12,7 @@ public enum PulseCallState: Equatable, Sendable {
         case let .reconnecting(attempt): "Reconectando (\(attempt))"
         case .listening: "Escuchando"
         case .responding: "Pulse responde"
+        case .resolving: "Pulse resuelve"
         case .ended: "Llamada terminada"
         case .error: "Llamada no disponible"
         }
@@ -56,6 +57,9 @@ public final class PulseCallAppModel: ObservableObject {
     private let pairingClaim: PairingClaim
     private let realtime: any PulseRealtimeCalling
     private let reconnectDelay: @Sendable (Int) -> TimeInterval
+    /// How long a Moa tool has to run before the orb shows it. Below it the
+    /// resolving state would only be a flash. Injectable so tests do not sleep.
+    private let resolvingDelay: TimeInterval
     private var service: (any PulseCallServing)?
     private var call: (any PulseRealtimeCallControlling)?
     private var connectionTask: Task<Void, Never>?
@@ -64,17 +68,26 @@ public final class PulseCallAppModel: ObservableObject {
     private var callGeneration: UInt64 = 0
     private var wantsCall = false
     private var registration: PulseDeviceRegistration?
+    // Moa tools the model is running through the app. Counted, not flagged: one
+    // response commonly chains several calls.
+    private var toolsInFlight = 0
+    private var resolvingTask: Task<Void, Never>?
+    private var isResolvingVisible = false
+    /// The live-turn state the vortex is standing in for. Turn events keep
+    /// updating it while a tool runs, so the orb goes back to what the call is
+    /// actually doing instead of to a guess.
+    private var liveStateBehindResolving: PulseCallState = .listening
     private var guardian: PulseGuardianCoordinator?
     private let guardianLiveActivity = PulseGuardianLiveActivityController()
 
-    public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
-        self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
+    public init(store: any PulseSecureStore = KeychainPulseSecureStore(), voice: (any PulseVoiceControlling)? = nil, realtime: any PulseRealtimeCalling = OpenAIRealtimeClient(), reconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 30) }, resolvingDelay: TimeInterval = 0.3, pairingClaim: @escaping PairingClaim = { configuration, payload, label in try await PulsePairingClient().claim(configuration: configuration, payload: payload, deviceLabel: label) }, serviceFactory: @escaping ServiceFactory = { try MoaPulseDeviceService(registration: $0) }) {
+        self.store = store; self.voice = voice ?? NativePulseVoiceController(); self.realtime = realtime; self.reconnectDelay = reconnectDelay; self.resolvingDelay = resolvingDelay; self.pairingClaim = pairingClaim; self.serviceFactory = serviceFactory
         configureVoice()
         restoreRegistration()
         registerRemoteControl()
     }
 
-    deinit { connectionTask?.cancel() }
+    deinit { connectionTask?.cancel(); resolvingTask?.cancel() }
     public var rootDestination: PulseCallRootDestination { hasPairedDevice ? .call : .pairing }
     public var canStartCall: Bool {
         guard hasPairedDevice, !wantsCall else { return false }
@@ -195,6 +208,7 @@ public final class PulseCallAppModel: ObservableObject {
         callGeneration &+= 1
         wantsCall = false
         connectionTask?.cancel(); connectionTask = nil
+        clearToolsInFlight()
         let oldCall = call; call = nil
         isCallActive = false
         pendingPCM.removeAll(); pcmDrainGeneration = nil
@@ -236,7 +250,7 @@ public final class PulseCallAppModel: ObservableObject {
                 // The owning generation has been cancelled by hangup/retry.
             } catch {
                 guard let self, self.owns(generation) else { return }
-                self.call = nil; self.isCallActive = false; self.voice.stopAll()
+                self.call = nil; self.isCallActive = false; self.clearToolsInFlight(); self.voice.stopAll()
                 self.scheduleReconnect(generation: generation, service: service, attempt: max(1, attempt + 1))
             }
         }
@@ -260,8 +274,10 @@ public final class PulseCallAppModel: ObservableObject {
         guard owns(generation) else { return }
         switch event {
         case .connecting: state = .connecting
-        case .listening: state = .listening
-        case .responding: state = .responding
+        case .listening: applyLiveState(.listening)
+        case .responding: applyLiveState(.responding)
+        case .toolCallStarted: toolCallStarted(generation: generation)
+        case .toolCallFinished: toolCallFinished()
         case .speechStarted, .speechStopped:
             // Conversation mode already streams continuously; owner-speech
             // boundaries only matter for the Guardián hot window.
@@ -271,10 +287,75 @@ public final class PulseCallAppModel: ObservableObject {
             // ended callback and must not schedule a duplicate reconnect.
             let replacementGeneration = callGeneration &+ 1
             callGeneration = replacementGeneration
+            clearToolsInFlight()
             let old = call; call = nil; isCallActive = false; pendingPCM.removeAll(); pcmDrainGeneration = nil; voice.stopAll()
             Task { await old?.end() }
             scheduleReconnect(generation: replacementGeneration, service: service, attempt: max(1, attempt + 1))
         }
+    }
+
+    /// Assigns a live-turn state. While a Moa tool is being resolved the orb
+    /// belongs to the thinking vortex; the state matching the turn is recomputed
+    /// when the tool comes back. Connecting, reconnecting, ending and failing all
+    /// assign `state` directly and therefore outrank resolving.
+    private func applyLiveState(_ live: PulseCallState) {
+        liveStateBehindResolving = live
+        guard !isResolvingVisible else { return }
+        state = live
+    }
+
+    private func toolCallStarted(generation: UInt64) {
+        guard owns(generation) else { return }
+        toolsInFlight += 1
+        guard toolsInFlight == 1, !isResolvingVisible, resolvingTask == nil else { return }
+        let delay = resolvingDelay
+        resolvingTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard !Task.isCancelled, let self, self.owns(generation) else { return }
+            self.resolvingTask = nil
+            self.showResolvingIfStillWorking()
+        }
+    }
+
+    private func toolCallFinished() {
+        guard toolsInFlight > 0 else { return }
+        toolsInFlight -= 1
+        // Chained tools read as one continuous "Pulse is working": the vortex only
+        // leaves when the last call is back.
+        guard toolsInFlight == 0 else { return }
+        resolvingTask?.cancel(); resolvingTask = nil
+        leaveResolving()
+    }
+
+    /// A tool shorter than `resolvingDelay` never reaches the orb: a
+    /// fraction-of-a-second flash is worse than showing nothing.
+    private func showResolvingIfStillWorking() {
+        guard toolsInFlight > 0, call != nil else { return }
+        switch state {
+        case .listening, .responding: break
+        default: return
+        }
+        liveStateBehindResolving = state
+        isResolvingVisible = true
+        state = .resolving
+    }
+
+    private func leaveResolving() {
+        guard isResolvingVisible else { return }
+        isResolvingVisible = false
+        // If something more important already took the orb (hangup, drop,
+        // reconnection), it keeps it: only the vortex itself is undone.
+        guard call != nil, state == .resolving else { return }
+        state = liveStateBehindResolving
+    }
+
+    /// The socket that owned the tools is gone: nothing will report them back, so
+    /// the vortex must not outlive it.
+    private func clearToolsInFlight() {
+        toolsInFlight = 0
+        resolvingTask?.cancel(); resolvingTask = nil
+        isResolvingVisible = false
+        liveStateBehindResolving = .listening
     }
 
     private func owns(_ generation: UInt64) -> Bool { wantsCall && generation == callGeneration }
@@ -315,6 +396,7 @@ public final class PulseCallAppModel: ObservableObject {
         wantsCall = false
         self.call = nil
         isCallActive = false
+        clearToolsInFlight()
         pendingPCM.removeAll()
         pcmDrainGeneration = nil
         voice.stopAll()

@@ -14,6 +14,7 @@ extension PulseCallState {
         case .connecting, .reconnecting: .warning
         case .listening: .listening
         case .responding: .accent
+        case .resolving: .warning
         case .error: .danger
         }
     }
@@ -30,6 +31,9 @@ extension PulseCallState {
         case .connecting, .reconnecting: .connecting
         case .listening: .listening
         case .responding: .speaking
+        // Resolving = Pulse working a Moa tool out: the same thinking vortex the
+        // Guardián uses, so both modes speak one visual language.
+        case .resolving: .thinking
         case .disconnected, .ready, .ended, .error: .idle
         }
     }

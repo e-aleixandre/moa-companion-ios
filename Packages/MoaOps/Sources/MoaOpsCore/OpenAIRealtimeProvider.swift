@@ -70,7 +70,7 @@ public enum PulseRealtimeFraming {
     }
 }
 
-public enum PulseRealtimeCallState: Equatable, Sendable { case connecting, listening, responding, speechStarted, speechStopped, ended, failed }
+public enum PulseRealtimeCallState: Equatable, Sendable { case connecting, listening, responding, speechStarted, speechStopped, toolCallStarted, toolCallFinished, ended, failed }
 
 /// Narrow WebSocket boundary so the Realtime wire protocol is fixture-testable
 /// without opening a network connection.
@@ -234,8 +234,19 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 case "response.function_call_arguments.done":
                     guard let callID = event["call_id"] as? String, let name = event["name"] as? String else { throw OpenAIRealtimeClientError.decoding }
                     let arguments = Data((event["arguments"] as? String ?? "{}").utf8)
+                    // The owner must see that Pulse is working against Moa instead
+                    // of a silent orb. Finished is signalled on both paths: a send
+                    // that fails still ends the tool, and a stranded counter would
+                    // leave the orb thinking forever.
+                    onState(.toolCallStarted)
                     let result = await executor.execute(.init(id: callID, name: name, arguments: arguments))
-                    try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": callID, "output": result.output]])
+                    do {
+                        try await send(["type": "conversation.item.create", "item": ["type": "function_call_output", "call_id": callID, "output": result.output]])
+                    } catch {
+                        onState(.toolCallFinished)
+                        throw error
+                    }
+                    onState(.toolCallFinished)
                     hasFunctionCallOutputsForCurrentResponse = true
                 case "input_audio_buffer.speech_started":
                     if let responseAudioStartedAt,

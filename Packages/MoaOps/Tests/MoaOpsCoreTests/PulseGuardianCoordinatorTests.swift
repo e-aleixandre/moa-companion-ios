@@ -1103,6 +1103,141 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(PulseGuardianCoordinator.describeGap(200_000), "2 días")
     }
 
+    // The owner asked for something and Pulse is querying Moa: the orb must say
+    // "estoy en ello" instead of pretending it is still listening.
+    func testToolCallShowsResolvingAndReturnsToListening() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        await realtime.emitToolCallStarted()
+        try await waitFor { coordinator.state == .resolving }
+
+        await realtime.emitToolCallFinished()
+        try await waitFor { coordinator.state == .listening }
+    }
+
+    // A tool that answers immediately must not blink the vortex on and off.
+    func testFastToolCallNeverShowsResolving() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), resolvingDelay: 0.4)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        await realtime.emitToolCallStarted()
+        await settle()
+        await realtime.emitToolCallFinished()
+        await settle()
+        XCTAssertEqual(coordinator.state, .listening)
+
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(coordinator.state, .listening, "a tool shorter than the delay must never reach the orb")
+    }
+
+    // One response commonly chains several tools: the vortex must stay up across
+    // the whole chain instead of flickering between calls.
+    func testChainedToolCallsKeepResolvingWithoutFlicker() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        let seen = GuardianStateRecorder()
+        coordinator.onState = { state in seen.append(state) }
+
+        await realtime.emitToolCallStarted()
+        try await waitFor { coordinator.state == .resolving }
+        // A second tool opens before the first one answers.
+        await realtime.emitToolCallStarted()
+        await settle()
+        await realtime.emitToolCallFinished()
+        await settle()
+        XCTAssertEqual(coordinator.state, .resolving, "the vortex belongs to the last tool in flight, not the first")
+
+        await realtime.emitToolCallFinished()
+        try await waitFor { coordinator.state == .listening }
+        await settle()
+        XCTAssertEqual(seen.count(of: .resolving), 1, "chained tools must produce a single resolving stretch")
+    }
+
+    // Tools resolved while Pulse is already speaking go back to speaking, never
+    // to a listening state the conversation is not in.
+    func testResolvingDuringResponseReturnsToSpeaking() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: voice, wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        await realtime.emit(.responding)
+        try await waitFor { coordinator.state == .speaking }
+        await realtime.emitToolCallStarted()
+        try await waitFor { coordinator.state == .resolving }
+        await realtime.emitToolCallFinished()
+        try await waitFor { coordinator.state == .speaking }
+    }
+
+    // An announcement is a more specific truth than "working something out": a
+    // tool must never steal the orb from a briefing that is being told.
+    func testNarrationOutranksResolving() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        try await waitFor { coordinator.state == .speaking }
+
+        await realtime.emitToolCallStarted()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(coordinator.state, .speaking, "a tool must not interrupt the announcement visually")
+    }
+
+    // The socket dies with a tool still in flight: nothing will ever report it
+    // back, so the vortex must not stay stuck on screen.
+    func testDroppedCallWithToolInFlightDoesNotStrandResolving() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let service = MockGuardianService()
+        let coordinator = PulseGuardianCoordinator(service: service, realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 0.1, presence: MockPresenceStore(), resolvingDelay: 0.05)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        try await waitFor { coordinator.state == .listening }
+
+        await realtime.emitToolCallStarted()
+        try await waitFor { coordinator.state == .resolving }
+
+        service.mintFailure = PulseCallError.operationUnavailable
+        await realtime.emit(.failed)
+        try await waitFor { coordinator.state == .conversationLost }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(coordinator.state, .conversationLost, "a dead session must never leave the orb thinking forever")
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeTermination(_ json: String) throws -> PulseRunTermination { try JSONDecoder.moaOps.decode(PulseRunTermination.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }

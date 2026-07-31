@@ -72,9 +72,113 @@ final class PulseCallPresentationTests: XCTestCase {
         model.endCall()
     }
 
+    // The model is querying Moa on the owner's behalf (list_sessions, read_session…):
+    // the orb must show the thinking vortex instead of a silent listening state.
+    func testToolCallShowsResolvingAndReturnsToTheLiveTurn() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.05, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+        XCTAssertEqual(model.state, .listening)
+
+        await realtime.emit(.toolCallStarted)
+        try await waitFor { model.state == .resolving }
+        XCTAssertEqual(model.state.orbMode, .thinking)
+
+        await realtime.emit(.toolCallFinished)
+        try await waitFor { model.state == .listening }
+        model.endCall()
+    }
+
+    // A tool answering faster than the delay must not blink the vortex.
+    func testFastToolCallNeverShowsResolving() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.4, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+
+        await realtime.emit(.toolCallStarted)
+        await settle()
+        await realtime.emit(.toolCallFinished)
+        await settle()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(model.state, .listening, "a tool shorter than the delay must never reach the orb")
+        model.endCall()
+    }
+
+    // Chained tools are one single stretch of work for the owner.
+    func testChainedToolCallsKeepResolvingUntilTheLastOneReturns() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.05, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+
+        await realtime.emit(.toolCallStarted)
+        try await waitFor { model.state == .resolving }
+        await realtime.emit(.toolCallStarted)
+        await settle()
+        await realtime.emit(.toolCallFinished)
+        await settle()
+        XCTAssertEqual(model.state, .resolving, "the vortex belongs to the last tool in flight")
+
+        await realtime.emit(.toolCallFinished)
+        try await waitFor { model.state == .listening }
+        model.endCall()
+    }
+
+    // A tool run during a response goes back to responding, not to listening.
+    func testResolvingDuringResponseReturnsToResponding() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.05, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.responding)
+        await settle()
+        XCTAssertEqual(model.state, .responding)
+
+        await realtime.emit(.toolCallStarted)
+        try await waitFor { model.state == .resolving }
+        await realtime.emit(.toolCallFinished)
+        try await waitFor { model.state == .responding }
+        model.endCall()
+    }
+
+    // Hanging up with a tool still in flight: nothing will report it back, so the
+    // orb must not be left thinking forever.
+    func testHangupWithToolInFlightDoesNotStrandResolving() async throws {
+        let realtime = PresentationRealtime()
+        let model = PulseCallAppModel(store: try pairedStore(), voice: PresentationVoice(), realtime: realtime, reconnectDelay: { _ in 0 }, resolvingDelay: 0.05, serviceFactory: { _ in PresentationService() })
+        model.startCall()
+        await settle()
+        await realtime.emit(.listening)
+        await settle()
+        await realtime.emit(.toolCallStarted)
+        try await waitFor { model.state == .resolving }
+
+        model.endCall()
+        await settle()
+        XCTAssertEqual(model.state, .ended)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.state, .ended, "a dead call must never leave the orb thinking")
+    }
+
     private func registration() throws -> PulseDeviceRegistration { try .init(baseURL: URL(string: "https://moa.example")!, deviceID: "device", credential: "device.secret", expiresAt: .distantFuture) }
     private func pairedStore() throws -> PresentationStore { let store = PresentationStore(); try store.saveDeviceRegistration(registration()); return store }
     private func settle() async { for _ in 0..<40 { await Task.yield() } }
+    private func waitFor(_ condition: @escaping () async -> Bool, timeout: TimeInterval = 3) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("condition not met before timeout")
+    }
 }
 
 private final class PresentationStore: PulseSecureStore, @unchecked Sendable {

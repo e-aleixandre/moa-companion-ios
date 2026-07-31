@@ -37,6 +37,23 @@ final class PulseRealtimeTransportTests: XCTestCase {
         await call.end()
     }
 
+    // Every tool call must announce itself to the UI: started when the app takes
+    // the model's request, finished when the output goes back to the socket.
+    func testFunctionCallsEmitPairedToolCallStates() async throws {
+        let socket = FixtureSocket(events: [
+            #"{"type":"response.function_call_arguments.done","call_id":"call-1","name":"list_sessions","arguments":"{}"}"#,
+            #"{"type":"response.function_call_arguments.done","call_id":"call-2","name":"list_sessions","arguments":"{}"}"#,
+            #"{"type":"response.done"}"#,
+        ])
+        let recorder = StateRecorder()
+        let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
+        let call = try await client.beginCall(credential: credential(), executor: PulseGenericToolExecutor(service: RealtimeStub()), initialContext: "", onState: { recorder.append($0) }, onText: { _ in }, onAudio: { _, _ in }, onBargeIn: {})
+        await waitUntil { recorder.count(of: .toolCallFinished) == 2 }
+        XCTAssertEqual(recorder.count(of: .toolCallStarted), 2)
+        XCTAssertEqual(recorder.count(of: .toolCallFinished), 2)
+        await call.end()
+    }
+
     func testCancellationClosesSocketAndNeverNeedsASecondSocket() async throws {
         let socket = FixtureSocket(events: [])
         let client = OpenAIRealtimeClient(socketFactory: FixtureSocketFactory(socket: socket))
@@ -156,6 +173,15 @@ private actor FixtureSocket: PulseRealtimeSocket {
         return events.removeFirst()
     }
     func cancel() { wasCancelled = true }
+}
+
+/// Locked recorder for `onState` callbacks: they fire from the read-loop task,
+/// not from the test's context.
+private final class StateRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [PulseRealtimeCallState] = []
+    func append(_ state: PulseRealtimeCallState) { lock.lock(); states.append(state); lock.unlock() }
+    func count(of state: PulseRealtimeCallState) -> Int { lock.lock(); defer { lock.unlock() }; return states.filter { $0 == state }.count }
 }
 
 private final class BargeInRecorder: @unchecked Sendable {

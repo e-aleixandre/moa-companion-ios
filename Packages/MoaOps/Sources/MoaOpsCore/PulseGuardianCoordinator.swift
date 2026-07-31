@@ -136,9 +136,10 @@ public final class PulseGuardianCoordinator {
             onState?(state)
             // On leaving the voiced states the visual level returns to zero;
             // otherwise the last emitted level would stay frozen in the UI
-            // (halo lit while the orb is asleep).
+            // (halo lit while the orb is asleep). Resolving is not a voiced
+            // state: nobody holds the floor while a tool runs.
             switch state {
-            case .listening, .waking, .speaking, .draining, .resolving: break
+            case .listening, .waking, .speaking, .draining: break
             default: onAudioLevel?(0)
             }
         }
@@ -232,6 +233,12 @@ public final class PulseGuardianCoordinator {
     // Terminations covered by a catch-up that has not finished playing yet: a
     // reconnection arriving mid-narration must not ack them behind its back.
     private var terminationsAwaitingCatchUp = Set<String>()
+    // Moa tool calls the model is running against the paired device. A counter,
+    // not a flag: one response often chains several tools, and a bool would let
+    // the first one to finish clear a state the others still own.
+    private var toolsInFlight = 0
+    private var resolvingTask: Task<Void, Never>?
+    private let resolvingDelay: TimeInterval
     private var attentionConnected = false
     private var presenceTask: Task<Void, Never>?
     private var isRunning = false
@@ -251,7 +258,7 @@ public final class PulseGuardianCoordinator {
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
@@ -265,11 +272,12 @@ public final class PulseGuardianCoordinator {
         self.presenceRefreshInterval = presenceRefreshInterval
         self.narrationTimeout = narrationTimeout
         self.playbackTimeout = playbackTimeout
+        self.resolvingDelay = resolvingDelay
         self.now = now
         configureAudioCallbacks()
     }
 
-    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel(); presenceTask?.cancel(); stallWatchdog?.cancel() }
+    deinit { pcmTask?.cancel(); closeTask?.cancel(); wakeRearmTask?.cancel(); voiceReconnectTask?.cancel(); presenceTask?.cancel(); stallWatchdog?.cancel(); resolvingTask?.cancel() }
 
     public func start() async {
         guard !isRunning else { return }
@@ -315,6 +323,7 @@ public final class PulseGuardianCoordinator {
         // A briefing the owner never got to hear goes back to the queue, so a
         // later start() tells it instead of acking it silently.
         requeueInterruptedNarration()
+        clearToolsInFlight()
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false
         narrationResponseStarted = false; narrationResponseDone = false
         voice.stopAll()
@@ -791,7 +800,7 @@ public final class PulseGuardianCoordinator {
                 narrationResponseDone = false
             }
             closeTask?.cancel(); closeTask = nil
-            state = .speaking
+            if isNarrating { state = .speaking } else { applyLiveState(.speaking) }
         case .listening:
             isResponding = false
             if isNarrating {
@@ -804,15 +813,17 @@ public final class PulseGuardianCoordinator {
             } else if !isPlayingResponseAudio {
                 // response.done ends the server's generation before the last
                 // PCM has finished sounding on the device.
-                state = .listening
+                applyLiveState(.listening)
                 processQueue()
                 scheduleCloseAfterHotWindow()
             }
+        case .toolCallStarted: toolCallStarted()
+        case .toolCallFinished: toolCallFinished()
         case .speechStarted:
             // Real owner voice (server VAD): keep the call open through the turn.
             ownerSpeaking = true
             closeTask?.cancel(); closeTask = nil
-            if !isNarrating { state = .listening }
+            if !isNarrating { applyLiveState(.listening) }
         case .speechStopped:
             // Only genuine silence after real speech may start the close timer.
             ownerSpeaking = false
@@ -826,6 +837,82 @@ public final class PulseGuardianCoordinator {
         }
     }
 
+    /// Assigns one of the two live-conversation states. While a Moa tool is
+    /// being resolved the vortex owns the orb: the turn events keep updating the
+    /// flags, and the state that matches them is recomputed once the tool ends.
+    /// Announcements, reconnections and failures assign `state` directly, so
+    /// they always outrank resolving.
+    private func applyLiveState(_ live: PulseGuardianState) {
+        guard state != .resolving else { return }
+        state = live
+    }
+
+    /// The model started running one of Moa's tools on the device. Counted, not
+    /// flagged: a single response usually chains several, and the first one to
+    /// come back must not clear a state the others still own.
+    private func toolCallStarted() {
+        guard isRunning, call != nil else { return }
+        toolsInFlight += 1
+        // A tool in flight is live work: the socket must not be closed out from
+        // under the answer it is about to send back.
+        closeTask?.cancel(); closeTask = nil
+        guard toolsInFlight == 1, state != .resolving, resolvingTask == nil else { return }
+        let generation = socketGeneration
+        let delay = resolvingDelay
+        resolvingTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard !Task.isCancelled, let self, self.isRunning, self.socketGeneration == generation else { return }
+            self.resolvingTask = nil
+            self.showResolvingIfStillWorking()
+        }
+    }
+
+    private func toolCallFinished() {
+        guard toolsInFlight > 0 else { return }
+        toolsInFlight -= 1
+        // Chained tools: the vortex stays until the last one is back, so a run of
+        // short calls reads as one continuous "Pulse is working".
+        guard toolsInFlight == 0 else { return }
+        resolvingTask?.cancel(); resolvingTask = nil
+        leaveResolving()
+        // The hot window is deliberately not armed while a tool runs (it would
+        // close the socket the tool is answering into): this is where a session
+        // whose last event was a tool gets its close timer back.
+        if queue.isEmpty { scheduleCloseAfterHotWindow() }
+    }
+
+    /// A tool that resolves faster than `resolvingDelay` never reaches the orb:
+    /// flashing the vortex for a fraction of a second is worse than showing
+    /// nothing.
+    private func showResolvingIfStillWorking() {
+        guard isRunning, toolsInFlight > 0, call != nil, !isNarrating else { return }
+        // Only a live turn may be replaced. Announcing, draining, reconnecting or
+        // failing are all more specific truths than "working something out".
+        switch state {
+        case .listening, .speaking: break
+        default: return
+        }
+        state = .resolving
+    }
+
+    /// Back to whatever the conversation is really doing. Anything that took the
+    /// orb away from resolving meanwhile (an announcement, a drop, another
+    /// device) keeps it: only the vortex itself is undone here.
+    private func leaveResolving() {
+        guard isRunning, state == .resolving, call != nil else { return }
+        state = isResponding || isPlayingResponseAudio ? .speaking : .listening
+    }
+
+    /// The session that owned the tools is gone: nothing will ever report them
+    /// back, so the vortex must not survive it. The caller assigns the state the
+    /// teardown deserves right after; leaving `.resolving` behind would strand
+    /// the orb in a vortex nobody owns.
+    private func clearToolsInFlight() {
+        toolsInFlight = 0
+        resolvingTask?.cancel(); resolvingTask = nil
+        if isRunning, state == .resolving { state = .guardianStandby }
+    }
+
     private func playbackDrained() {
         guard isRunning else { return }
         if !isNarrating {
@@ -833,7 +920,7 @@ public final class PulseGuardianCoordinator {
             isPlayingResponseAudio = false
             cancelStallWatchdog(.playback)
             if !isResponding, !ownerSpeaking {
-                state = .listening
+                applyLiveState(.listening)
                 processQueue()
                 if queue.isEmpty { scheduleCloseAfterHotWindow() }
             }
@@ -980,7 +1067,7 @@ public final class PulseGuardianCoordinator {
         // Whatever the cause, the playback flag must not survive the stall: it
         // gates both `processQueue()` and the hot window.
         isPlayingResponseAudio = false
-        if call != nil, !isResponding, !ownerSpeaking { state = .listening }
+        if call != nil, !isResponding, !ownerSpeaking { applyLiveState(.listening) }
         processQueue()
         if queue.isEmpty { scheduleCloseAfterHotWindow() }
     }
@@ -1072,7 +1159,7 @@ public final class PulseGuardianCoordinator {
     /// Only meaningful for owner activations (no pending narration to speak).
     private func signalListeningReady() {
         guard isRunning, state != .inactive, queue.isEmpty, !isNarrating else { return }
-        state = .listening
+        applyLiveState(.listening)
         // TODO(ui): play a short earcon/tone here so the owner hears when to
         // speak. Sound synthesis belongs in the redesign UI branch; the explicit
         // .listening transition is the reliable signal in the meantime.
@@ -1117,12 +1204,12 @@ public final class PulseGuardianCoordinator {
     }
 
     private func scheduleCloseAfterHotWindow() {
-        guard call != nil, !isNarrating, !isResponding, !isPlayingResponseAudio, !ownerSpeaking else { return }
+        guard call != nil, !isNarrating, !isResponding, !isPlayingResponseAudio, !ownerSpeaking, toolsInFlight == 0 else { return }
         closeTask?.cancel()
         closeTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(self.hotWindow * 1_000_000_000))
-            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking else { return }
+            guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking, self.toolsInFlight == 0 else { return }
             self.cancelVoiceReconnect()
             self.closeRealtime()
             if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }
@@ -1133,6 +1220,7 @@ public final class PulseGuardianCoordinator {
         closeTask?.cancel(); closeTask = nil
         socketGeneration &+= 1
         requeueInterruptedNarration()
+        clearToolsInFlight()
         let old = call; call = nil; isOpeningRealtime = false; isNarrating = false; isResponding = false; isPlayingResponseAudio = false; ownerSpeaking = false; activeAcknowledgement = nil
         narrationResponseStarted = false; narrationResponseDone = false
         bufferingOwnerSpeech = false; warmupBuffer.removeAll()

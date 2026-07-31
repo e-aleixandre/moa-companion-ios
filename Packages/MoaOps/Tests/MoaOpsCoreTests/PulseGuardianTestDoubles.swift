@@ -188,11 +188,27 @@ actor MockRealtime: PulseRealtimeCalling {
     }
 
     func emit(_ state: PulseRealtimeCallState) { onState?(state) }
+    /// One Moa tool call the app runs on the model's behalf. Split in two so a
+    /// test can hold a tool "in flight" for as long as it needs, including
+    /// chaining several before any of them answers.
+    func emitToolCallStarted() { onState?(.toolCallStarted) }
+    func emitToolCallFinished() { onState?(.toolCallFinished) }
     func emitAudio(_ pcm: Data) { onAudio?(pcm, {}) }
     func emitBargeIn() { onBargeIn?() }
     func begins() -> Int { beginCount }
     func initialContext() -> String { lastInitialContext }
     func currentCall() -> MockRealtimeCall? { call }
+}
+
+/// Records every state the coordinator published. The handler is `@Sendable`
+/// and fires from the coordinator's actor, so the storage carries its own lock
+/// like the other doubles here.
+final class GuardianStateRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [PulseGuardianState] = []
+
+    func append(_ state: PulseGuardianState) { lock.withLock { states.append(state) } }
+    func count(of state: PulseGuardianState) -> Int { lock.withLock { states.filter { $0 == state }.count } }
 }
 
 final class MockGuardianService: PulseCallServing, @unchecked Sendable {

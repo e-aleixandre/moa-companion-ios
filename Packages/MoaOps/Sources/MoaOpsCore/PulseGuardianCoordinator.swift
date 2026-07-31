@@ -158,6 +158,7 @@ public final class PulseGuardianCoordinator {
     private let attention: any PulseAttentionChanneling
     private let voice: any PulseVoiceControlling
     private let wakeWord: any PulseWakeWordDetecting
+    private let earcons: any PulseEarcons
     private let hotWindow: TimeInterval
     private let voiceReconnectDelay: @Sendable (Int) -> TimeInterval
     private let voiceReconnectBudget: TimeInterval
@@ -268,12 +269,13 @@ public final class PulseGuardianCoordinator {
     private let log = Logger(subsystem: "com.moa.pulse", category: "guardian")
     private var activationStart: Date?
 
-    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), costs: any PulseRealtimeCostStore = UserDefaultsPulseRealtimeCostStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(service: any PulseCallServing, realtime: any PulseRealtimeCalling, attention: any PulseAttentionChanneling, voice: any PulseVoiceControlling, wakeWord: any PulseWakeWordDetecting, earcons: any PulseEarcons = SystemSoundPulseEarcons(), hotWindow: TimeInterval = 25, voiceReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = { min(pow(2, Double(max(0, $0 - 1))), 8) }, voiceReconnectBudget: TimeInterval = 75, presence: any PulseGuardianPresenceStore = UserDefaultsPulseGuardianPresenceStore(), costs: any PulseRealtimeCostStore = UserDefaultsPulseRealtimeCostStore(), catchUpGapThreshold: TimeInterval = 120, presenceRefreshInterval: TimeInterval = 30, narrationTimeout: TimeInterval = 90, playbackTimeout: TimeInterval = 60, resolvingDelay: TimeInterval = 0.3, now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.realtime = realtime
         self.attention = attention
         self.voice = voice
         self.wakeWord = wakeWord
+        self.earcons = earcons
         self.hotWindow = hotWindow
         self.voiceReconnectDelay = voiceReconnectDelay
         self.voiceReconnectBudget = voiceReconnectBudget
@@ -316,6 +318,10 @@ public final class PulseGuardianCoordinator {
     }
 
     public func stop() {
+        // The owner is no longer being listened to at all: that is exactly what
+        // the closing cue means, so a manual stop earns it like the hot window
+        // does. Gated on `isRunning` so a second stop() is silent.
+        if isRunning { earcons.sleep() }
         // A clean stop is the last moment the Guardián was really listening: a
         // catch-up must measure the absence from here, not from the last tick.
         // Unconditional on purpose — this runs while the app is demonstrably
@@ -1123,6 +1129,11 @@ public final class PulseGuardianCoordinator {
         if isReconnectingVoice {
             guard !isOpeningRealtime else { return }
             voiceReconnectTask?.cancel(); voiceReconnectTask = nil
+            // The owner asked for Pulse and a socket is being opened right now
+            // because of it: same promise as any other activation. Note this is
+            // the owner's own wake, not the automatic retry — that one opens
+            // without anybody having asked and stays silent.
+            earcons.wake()
             openRealtimeForActivation()
             return
         }
@@ -1132,6 +1143,10 @@ public final class PulseGuardianCoordinator {
             bufferingOwnerSpeech = true
             warmupBuffer.removeAll()
             logActivation("wake fired")
+            // Immediately, before the socket exists: the opening takes ~1-2s and
+            // this is the only thing telling the owner they were heard and may
+            // start talking (the warmup buffer keeps those words).
+            earcons.wake()
             openRealtimeForActivation()
         } else {
             state = .listening
@@ -1254,6 +1269,11 @@ public final class PulseGuardianCoordinator {
             guard !Task.isCancelled, self.queue.isEmpty, !self.isNarrating, !self.isResponding, !self.isPlayingResponseAudio, !self.ownerSpeaking, self.toolsInFlight <= 0 else { return }
             self.cancelVoiceReconnect()
             self.closeRealtime()
+            // The one close that means "I stopped listening to you". Voice
+            // reconnections and route/interruption teardowns also go through
+            // `closeRealtime()`, which is why the cue lives here and not there:
+            // the conversation is over, not being recycled.
+            self.earcons.sleep()
             if self.isRunning && self.state != .inactive { self.state = .guardianStandby; self.rearmWakeWord() }
         }
     }

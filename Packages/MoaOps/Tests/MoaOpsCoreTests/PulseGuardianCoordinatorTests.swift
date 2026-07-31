@@ -1310,6 +1310,79 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         XCTAssertEqual(costs.recordedUsage.first?.outputAudioTokens, 400)
     }
 
+    // With headphones on there is no other signal that Pulse heard the wake
+    // word: the cue must sound immediately, while the socket is still opening.
+    func testWakeEarconSoundsBeforeTheSocketIsReady() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        // A socket that never becomes ready: the cue may not wait for it.
+        let realtime = MockRealtime(startsReady: false)
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        XCTAssertEqual(earcons.wakeCount, 0)
+
+        wake.fire()
+        await settle()
+        XCTAssertEqual(earcons.wakeCount, 1, "the cue is the only immediate proof the owner was heard")
+        XCTAssertEqual(coordinator.state, .waking, "it sounds while the socket is still opening")
+        XCTAssertEqual(earcons.sleepCount, 0)
+    }
+
+    // Closing on the hot window is the moment Pulse stops listening: the owner
+    // must hear it, and must not hear the opening cue again.
+    func testSleepEarconSoundsWhenTheHotWindowCloses() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 0.05, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        await realtime.emit(.listening)
+
+        try await waitFor { earcons.sleepCount == 1 }
+        XCTAssertEqual(coordinator.state, .guardianStandby)
+        XCTAssertEqual(earcons.wakeCount, 1)
+    }
+
+    func testSleepEarconSoundsOnManualStop() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: MockRealtime(), attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+
+        coordinator.stop()
+        XCTAssertEqual(earcons.sleepCount, 1)
+        // Stopping an already stopped Guardián is not a transition.
+        coordinator.stop()
+        XCTAssertEqual(earcons.sleepCount, 1)
+    }
+
+    // A voice reconnection recycles the socket while the conversation is still
+    // alive. Nothing changed for the owner, so nothing may sound: neither the
+    // teardown of the dropped socket nor the recovered one count as
+    // transitions.
+    func testVoiceReconnectIsSilent() async throws {
+        let wake = MockWakeWord()
+        let earcons = MockEarcons()
+        let realtime = MockRealtime()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: MockAttentionChannel(), voice: MockVoice(), wakeWord: wake, earcons: earcons, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+        XCTAssertEqual(earcons.wakeCount, 1)
+
+        await realtime.emit(.failed)
+        try await waitFor { await realtime.begins() == 2 }
+        await settle()
+        XCTAssertEqual(earcons.wakeCount, 1, "a recycled socket is not a new activation")
+        XCTAssertEqual(earcons.sleepCount, 0, "the conversation never stopped listening")
+    }
+
     private func decodeSession(_ json: String) throws -> PulseSessionBrief { try JSONDecoder.moaOps.decode(PulseSessionBrief.self, from: Data(json.utf8)) }
     private func decodeTermination(_ json: String) throws -> PulseRunTermination { try JSONDecoder.moaOps.decode(PulseRunTermination.self, from: Data(json.utf8)) }
     private func decodeItem(_ json: String) throws -> PulseAttentionItem { try JSONDecoder.moaOps.decode(PulseAttentionItem.self, from: Data(json.utf8)) }

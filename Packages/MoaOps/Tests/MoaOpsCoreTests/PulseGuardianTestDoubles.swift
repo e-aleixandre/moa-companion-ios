@@ -52,6 +52,17 @@ final class MockVoice: PulseVoiceControlling {
     func resumeCapture() { captureResumed?() }
 }
 
+/// Records the audible cues instead of playing them: the coordinator decides
+/// when a transition sounds, and that is what the tests assert.
+@MainActor
+final class MockEarcons: PulseEarcons {
+    private(set) var wakeCount = 0
+    private(set) var sleepCount = 0
+
+    func wake() { wakeCount += 1 }
+    func sleep() { sleepCount += 1 }
+}
+
 /// In-memory presence: no UserDefaults, so a test never inherits the timestamp
 /// left behind by another run.
 final class MockPresenceStore: PulseGuardianPresenceStore, @unchecked Sendable {

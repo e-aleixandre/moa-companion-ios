@@ -41,9 +41,9 @@ public final class PulseCallAppModel: ObservableObject {
     @Published public private(set) var isGuardianActive = false
     @Published public private(set) var guardianState: PulseGuardianState = .idle
     @Published public private(set) var guardianSnapshot = PulseGuardianSnapshot()
-    /// Nivel 0..1 de la voz relevante (dueño o Pulse) mientras el Guardián
-    /// está activo; alimenta la reactividad del orbe. Ya llega suavizado y
-    /// limitado a ~30 Hz desde la capa de audio.
+    /// 0..1 level of the relevant voice (owner or Pulse) while the Guardian
+    /// is active; feeds the orb's reactivity. Arrives already smoothed and
+    /// capped at ~30 Hz from the audio layer.
     @Published public private(set) var audioLevel: Float = 0
     /// Guardián is the default UI mode. `startCall()` remains the explicit
     /// legacy Conversation entry point for callers that rely on it.

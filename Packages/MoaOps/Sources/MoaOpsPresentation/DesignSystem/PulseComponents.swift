@@ -1,9 +1,9 @@
 import SwiftUI
 
-// MARK: - Botones
+// MARK: - Buttons
 
-/// Botón primario: relleno de acento (o del tono dado), texto oscuro, glow sutil.
-/// La pieza protagonista (Llamar / Colgar).
+/// Primary button: accent fill (or the given tone), dark text, subtle glow.
+/// The star piece (Call / Hang up).
 public struct PulsePrimaryButtonStyle: ButtonStyle {
     public var tone: PulseTone
 
@@ -27,7 +27,7 @@ public struct PulsePrimaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Botón secundario: superficie elevada con hairline, texto claro.
+/// Secondary button: raised surface with hairline, light text.
 public struct PulseSecondaryButtonStyle: ButtonStyle {
     public var tone: PulseTone
 
@@ -52,7 +52,7 @@ public struct PulseSecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Botón circular de icono (silenciar, ajustes).
+/// Circular icon button (mute, settings).
 public struct PulseIconButtonStyle: ButtonStyle {
     public var tone: PulseTone
     public var diameter: CGFloat
@@ -74,13 +74,13 @@ public struct PulseIconButtonStyle: ButtonStyle {
     }
 }
 
-// MARK: - Pill de estado
+// MARK: - Status pill
 
-/// Badge de estado con punto de color: "Escuchando", "Reconectando (2)"…
+/// Status badge with a colored dot: "Escuchando", "Reconectando (2)"…
 public struct PulseStatusPill: View {
     public var text: String
     public var tone: PulseTone
-    /// Si el punto debe parpadear suavemente (estados transitorios).
+    /// Whether the dot should blink softly (transient states).
     public var pulses: Bool
 
     public init(_ text: String, tone: PulseTone, pulses: Bool = false) {
@@ -105,8 +105,8 @@ public struct PulseStatusPill: View {
     @ViewBuilder
     private var dot: some View {
         if pulses {
-            // Parpadeo sin @State animado: texto y flag pueden cambiar sin
-            // dejar una animación repeatForever huérfana.
+            // Blinking without animated @State: text and flag can change
+            // without leaving an orphaned repeatForever animation behind.
             TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: false)) { context in
                 let t = context.date.timeIntervalSinceReferenceDate
                 dotShape.opacity(0.65 + 0.35 * sin(t * 2 * .pi / 1.6))
@@ -124,9 +124,9 @@ public struct PulseStatusPill: View {
     }
 }
 
-// MARK: - Mensaje al usuario
+// MARK: - User-facing message
 
-/// Aviso inline (error, información) con tono semántico.
+/// Inline notice (error, information) with a semantic tone.
 public struct PulseInlineNotice: View {
     public var text: String
     public var tone: PulseTone
@@ -157,10 +157,10 @@ public struct PulseInlineNotice: View {
     }
 }
 
-// MARK: - Campo de texto
+// MARK: - Text field
 
-/// Campo de texto sobre superficie overlay; opción monoespaciada para
-/// direcciones, códigos y demás material técnico.
+/// Text field on an overlay surface; monospaced option for addresses,
+/// codes and other technical material.
 public struct PulseTextField: View {
     public var placeholder: String
     @Binding public var text: String
@@ -193,8 +193,8 @@ public struct PulseTextField: View {
 
 // MARK: - Transcript
 
-/// Burbuja de transcript: dueño a la derecha con tinte de acento, Pulse a la
-/// izquierda sobre superficie.
+/// Transcript bubble: owner on the right with an accent tint, Pulse on the
+/// left over a surface.
 public struct PulseCaptionBubble: View {
     public var text: String
     public var isOwner: Bool
@@ -225,9 +225,9 @@ public struct PulseCaptionBubble: View {
     }
 }
 
-// MARK: - Cabecera de sección
+// MARK: - Section header
 
-/// Micro-cabecera en mayúsculas para agrupar contenido ("SERVIDOR", "TRANSCRIPCIÓN").
+/// Uppercase micro-header to group content ("SERVIDOR", "TRANSCRIPCIÓN").
 public struct PulseSectionHeader: View {
     public var title: String
 

@@ -5,7 +5,7 @@ import AVFoundation
 import UIKit
 #endif
 
-// MARK: - Mapeo estado → design system
+// MARK: - State → design system mapping
 
 extension PulseCallState {
     var tone: PulseTone {
@@ -35,28 +35,29 @@ extension PulseCallState {
     }
 }
 
-/// Mapeo de presentación del estado real del Guardián al lenguaje visual del
-/// orbe. Vive aquí (no en Core) porque es una decisión de cómo se muestra:
-/// el motor no sabe qué es "dormido" ni "pensando", solo la UI.
+/// Presentation mapping from the Guardian's real state to the orb's visual
+/// language. Lives here (not in Core) because it is a decision about how
+/// things are shown: the engine doesn't know what "asleep" or "thinking"
+/// means, only the UI does.
 extension PulseGuardianState {
     var orbMode: PulseOrbMode {
         switch self {
-        // Dormido/apagado: sin guardia, sin permiso de otro dispositivo, o roto.
-        // Conversación cortada sin recuperar: el orbe vuelve a dormirse, pero la
-        // etiqueta de estado deja el corte visible en vez de callarlo.
+        // Asleep/off: no guard, no permission from another device, or broken.
+        // Conversation cut without recovery: the orb goes back to sleep, but
+        // the status label keeps the cut visible instead of hushing it up.
         case .idle, .guardianStandby, .interrupted, .inactive, .failed, .conversationLost: .idle
-        // Transiciones con expectativa: arrancando, oyó «Pulse», reconectando.
+        // Transitions with expectation: starting up, heard «Pulse», reconnecting.
         case .guardianStarting, .waking, .attentionReconnecting, .conversationReconnecting: .connecting
         case .listening: .listening
-        // Resolviendo = Pulse trabajando por dentro: el vórtice de pensar.
+        // Resolving = Pulse working internally: the thinking vortex.
         case .resolving: .thinking
-        // draining sigue sonando su voz: visualmente sigue hablando.
+        // draining still plays its voice: visually it keeps speaking.
         case .speaking, .draining: .speaking
         }
     }
 }
 
-// MARK: - Raíz
+// MARK: - Root
 
 public struct PulseCallRootView: View {
     @ObservedObject private var model: PulseCallAppModel
@@ -74,7 +75,7 @@ public struct PulseCallRootView: View {
     }
 }
 
-// MARK: - Emparejamiento
+// MARK: - Pairing
 
 public struct PulsePairingView: View {
     @ObservedObject var model: PulseCallAppModel
@@ -176,7 +177,7 @@ public struct PulsePairingView: View {
     }
 }
 
-// MARK: - Llamada
+// MARK: - Call
 
 public struct PulseCallSceneView: View {
     @ObservedObject var model: PulseCallAppModel
@@ -287,7 +288,7 @@ public struct PulseCallSceneView: View {
     }
 }
 
-// MARK: - Ajustes
+// MARK: - Settings
 
 public struct PulseCallSettingsView: View {
     @ObservedObject var model: PulseCallAppModel
@@ -381,7 +382,7 @@ public struct PulseCallSettingsView: View {
     }
 }
 
-// MARK: - Escáner QR
+// MARK: - QR scanner
 
 #if os(iOS) && canImport(AVFoundation)
 private struct PulseQRScannerView: UIViewControllerRepresentable {

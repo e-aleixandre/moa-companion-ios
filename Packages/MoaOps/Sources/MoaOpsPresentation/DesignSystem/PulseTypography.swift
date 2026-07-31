@@ -1,25 +1,25 @@
 import SwiftUI
 
-/// Escala tipográfica de Pulse.
+/// Pulse typographic scale.
 ///
-/// SF Pro para la voz de la interfaz; SF Mono para lo "técnico" (nombres de
-/// sesión, servidores, comandos). Nada de fuentes custom: solo sistema.
+/// SF Pro for the interface voice; SF Mono for the "technical" bits (session
+/// names, servers, commands). No custom fonts: system only.
 public enum PulseFont {
     // MARK: SF Pro
 
-    /// Título de pantalla (héroe).
+    /// Screen title (hero).
     public static let display = Font.system(size: 30, weight: .bold)
-    /// Título de sección o de pantalla secundaria.
+    /// Section or secondary-screen title.
     public static let title = Font.system(size: 22, weight: .semibold)
-    /// Etiqueta de estado grande, botones.
+    /// Large state label, buttons.
     public static let headline = Font.system(size: 17, weight: .semibold)
     public static let body = Font.system(size: 16, weight: .regular)
     public static let callout = Font.system(size: 15, weight: .regular)
     public static let footnote = Font.system(size: 13, weight: .regular)
-    /// Micro-etiquetas en mayúsculas (cabeceras de sección, badges).
+    /// Uppercase micro-labels (section headers, badges).
     public static let micro = Font.system(size: 11, weight: .semibold)
 
-    // MARK: SF Mono — lo técnico
+    // MARK: SF Mono — the technical bits
 
     public static let monoLarge = Font.system(size: 15, weight: .medium, design: .monospaced)
     public static let mono = Font.system(size: 13, weight: .medium, design: .monospaced)
@@ -27,7 +27,7 @@ public enum PulseFont {
 }
 
 extension View {
-    /// Micro-etiqueta en mayúsculas con tracking amplio ("SERVIDOR", "AVISO").
+    /// Uppercase micro-label with wide tracking ("SERVIDOR", "AVISO").
     public func pulseMicroCaps() -> some View {
         font(PulseFont.micro)
             .textCase(.uppercase)

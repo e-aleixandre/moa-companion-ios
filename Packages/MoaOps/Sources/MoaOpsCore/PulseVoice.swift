@@ -8,9 +8,9 @@ public protocol PulseVoiceControlling: AnyObject {
     var onPCM16: ((Data) -> Void)? { get set }
     var onInterruption: (() -> Void)? { get set }
     var onPlaybackFailure: (() -> Void)? { get set }
-    /// Nivel 0..1 de voz del micrófono (RMS con envolvente), para la UI.
+    /// 0..1 microphone voice level (RMS with envelope), for the UI.
     var onInputLevel: ((Float) -> Void)? { get set }
-    /// Nivel 0..1 de la voz reproducida de Pulse (RMS con envolvente).
+    /// 0..1 level of Pulse's played-back voice (RMS with envelope).
     var onOutputLevel: ((Float) -> Void)? { get set }
     func startContinuousCapture() async -> Bool
     func stopContinuousCapture()
@@ -120,7 +120,7 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     private var routeChangedHandler: (() -> Void)?
     private var queuedPlaybackBuffers = 0
     private var playbackGeneration: UInt64 = 0
-    // Envolventes de nivel para la UI: ataque inmediato, caída exponencial.
+    // Level envelopes for the UI: immediate attack, exponential decay.
     private var inputLevelEnvelope: Float = 0
     private var outputLevelEnvelope: Float = 0
     private var lastInputLevelEmit: TimeInterval = 0
@@ -384,9 +384,9 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
     public func playPCM16(_ pcm: Data, completion: @escaping @Sendable () -> Void) {
         guard let samples = OpenAIRealtimePCM16.float32Samples(pcm),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return }
-        // Aproximación deliberada: el nivel se mide al encolar, no al sonar.
-        // Los chunks del Realtime llegan a ritmo casi real, así que el
-        // adelanto visual es de milisegundos y no compensa un tap de salida.
+        // Deliberate approximation: the level is measured when enqueuing, not
+        // when playing. Realtime chunks arrive at near-real-time pace, so the
+        // visual lead is milliseconds and doesn't justify an output tap.
         trackOutputLevel(samples)
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { samples in
@@ -406,8 +406,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
                 completion()
                 self.queuedPlaybackBuffers = max(0, self.queuedPlaybackBuffers - 1)
                 if self.queuedPlaybackBuffers == 0 {
-                    // Sin más audio en cola no llegan más bloques que decaigan la
-                    // envolvente: se fuerza el silencio para que la UI repose.
+                    // With no more audio queued, no further blocks arrive to
+                    // decay the envelope: force silence so the UI settles down.
                     self.outputLevelEnvelope = 0
                     self.onOutputLevel?(0)
                     self.playbackDrainedHandler?()
@@ -417,11 +417,11 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         if !player.isPlaying { player.play() }
     }
 
-    // MARK: Niveles de voz para la UI
+    // MARK: Voice levels for the UI
 
-    /// RMS del bloque llevado a 0..1 de "voz": el habla normal ronda un RMS
-    /// de 0.05-0.25 sobre fondo de escala completa, así que se aplica una
-    /// ganancia de 4 y se satura, para que hablar normal ya se vea vivo.
+    /// Block RMS mapped to a 0..1 "voice" range: normal speech sits around an
+    /// RMS of 0.05-0.25 against full scale, so a gain of 4 is applied and
+    /// saturated, so that normal speech already looks alive.
     private static func voiceLevel(of samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         var sum: Float = 0
@@ -433,8 +433,8 @@ public final class NativePulseVoiceController: NSObject, PulseVoiceControlling {
         guard onInputLevel != nil, let samples = OpenAIRealtimePCM16.float32Samples(pcm) else { return }
         inputLevelEnvelope = max(Self.voiceLevel(of: samples), inputLevelEnvelope * 0.85)
         let now = Date().timeIntervalSinceReferenceDate
-        // Los bloques llegan a ~50 Hz; se emite como mucho a ~30 Hz para no
-        // inundar el MainActor con publicaciones de @Published.
+        // Blocks arrive at ~50 Hz; emit at most at ~30 Hz to avoid flooding
+        // the MainActor with @Published publications.
         guard now - lastInputLevelEmit >= 1.0 / 30.0 else { return }
         lastInputLevelEmit = now
         onInputLevel?(inputLevelEnvelope)

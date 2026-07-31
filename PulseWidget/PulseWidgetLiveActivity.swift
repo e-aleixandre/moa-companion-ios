@@ -1,5 +1,5 @@
 // Widget Extension "PulseWidgetExtension" — bundle com.ealeixandre.moa.pulse.LiveActivity.
-// La "cara" del Guardián en isla dinámica / pantalla de bloqueo. No mantiene la app viva.
+// The Guardian's "face" in the Dynamic Island / lock screen. Does not keep the app alive.
 import ActivityKit
 import AppIntents
 import MoaOpsCore

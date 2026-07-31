@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Tokens de espaciado. Escala de 4 pt.
+/// Spacing tokens. 4 pt scale.
 public enum PulseSpacing {
     public static let xxs: CGFloat = 4
     public static let xs: CGFloat = 8
@@ -11,18 +11,18 @@ public enum PulseSpacing {
     public static let xxl: CGFloat = 32
 }
 
-/// Tokens de radio de esquina.
+/// Corner radius tokens.
 public enum PulseRadius {
-    /// Controles pequeños: campos, chips.
+    /// Small controls: fields, chips.
     public static let control: CGFloat = 12
-    /// Tarjetas y superficies.
+    /// Cards and surfaces.
     public static let card: CGFloat = 16
-    /// Contenedores grandes (transcript, hojas).
+    /// Large containers (transcript, sheets).
     public static let sheet: CGFloat = 22
 }
 
 extension View {
-    /// Superficie elevada estándar: relleno raised + hairline + radio de tarjeta.
+    /// Standard raised surface: raised fill + hairline + card radius.
     public func pulseCard(padding: CGFloat = PulseSpacing.md) -> some View {
         self
             .padding(padding)
@@ -36,14 +36,14 @@ extension View {
             )
     }
 
-    /// Glow sutil del color dado; la firma lumínica de Pulse.
+    /// Subtle glow of the given color; the light signature of Pulse.
     public func pulseGlow(_ color: Color, radius: CGFloat = 18, opacity: Double = 0.35) -> some View {
         shadow(color: color.opacity(opacity), radius: radius)
     }
 
-    /// Título de navegación inline, multiplataforma-seguro
-    /// (`navigationBarTitleDisplayMode` no existe en macOS y el paquete
-    /// también declara macOS 13).
+    /// Inline navigation title, cross-platform-safe
+    /// (`navigationBarTitleDisplayMode` does not exist on macOS and the
+    /// package also declares macOS 13).
     @ViewBuilder
     public func pulseInlineNavigationTitle() -> some View {
         #if os(iOS)
@@ -53,8 +53,8 @@ extension View {
         #endif
     }
 
-    /// Fondo de pantalla completo: base casi negra con un halo cálido muy tenue
-    /// en la parte superior. Fija el esquema oscuro.
+    /// Full-screen background: near-black base with a very faint warm halo
+    /// at the top. Pins the dark color scheme.
     public func pulseScreenBackground() -> some View {
         frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(

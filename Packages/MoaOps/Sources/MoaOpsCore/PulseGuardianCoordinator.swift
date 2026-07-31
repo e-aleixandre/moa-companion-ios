@@ -93,9 +93,9 @@ public final class PulseGuardianCoordinator {
     public private(set) var state: PulseGuardianState = .idle {
         didSet {
             onState?(state)
-            // Al salir de los estados con voz el nivel visual vuelve a cero;
-            // si no, el último nivel emitido se quedaría congelado en la UI
-            // (halo encendido con el orbe dormido).
+            // On leaving the voiced states the visual level returns to zero;
+            // otherwise the last emitted level would stay frozen in the UI
+            // (halo lit while the orb is asleep).
             switch state {
             case .listening, .waking, .speaking, .draining, .resolving: break
             default: onAudioLevel?(0)
@@ -106,9 +106,9 @@ public final class PulseGuardianCoordinator {
     public var onState: StateHandler?
     public var onSnapshot: SnapshotHandler?
     public var onText: TextHandler?
-    /// Nivel 0..1 de la voz "relevante" según el estado: la del dueño
-    /// mientras Pulse escucha, la de Pulse mientras habla. Un solo canal
-    /// para que la UI no tenga que duplicar la lógica de quién suena.
+    /// 0..1 level of the "relevant" voice for the current state: the owner's
+    /// while Pulse listens, Pulse's while it speaks. A single channel so the
+    /// UI doesn't have to duplicate the logic of who is sounding.
     public var onAudioLevel: AudioLevelHandler?
 
     private let service: any PulseCallServing
@@ -485,8 +485,8 @@ public final class PulseGuardianCoordinator {
             isResponding = false
             if isNarrating { state = .draining }
             else if !isPlayingResponseAudio {
-                // response.done termina la generación del servidor antes de que
-                // el último PCM haya terminado de sonar en el dispositivo.
+                // response.done ends the server's generation before the last
+                // PCM has finished sounding on the device.
                 state = .listening
                 scheduleCloseAfterHotWindow()
             }
@@ -622,9 +622,9 @@ public final class PulseGuardianCoordinator {
         // .listening transition is the reliable signal in the meantime.
     }
 
-    /// Elige el nivel relevante según quién tiene "la palabra". Mientras
-    /// suena audio de Pulse manda la salida (el micro captaría el eco de su
-    /// propia voz por el altavoz); en el resto de estados con voz, el micro.
+    /// Picks the relevant level based on who has "the floor". While Pulse
+    /// audio is playing, the output rules (the mic would pick up the echo of
+    /// its own voice through the speaker); in the other voiced states, the mic.
     private func receiveAudioLevel(_ level: Float, fromOutput: Bool) {
         guard isRunning else { return }
         let outputHasFloor = isNarrating || isResponding || isPlayingResponseAudio

@@ -142,8 +142,8 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
     private var closed = false
     private var currentAudioItemID: String?
     private var playedAudioBytes = 0
-    // Durante este breve margen el VPIO aún puede estar convergiendo y detectar
-    // la propia voz de Pulse como si fuera una interrupción del propietario.
+    // During this brief margin the VPIO may still be converging and detect
+    // Pulse's own voice as if it were an interruption from the owner.
     private let echoGuardWindow: TimeInterval = 0.4
     private var responseAudioStartedAt: Date?
     private var sessionReady = false
@@ -240,8 +240,8 @@ public actor OpenAIRealtimeCall: PulseRealtimeCallControlling {
                 case "input_audio_buffer.speech_started":
                     if let responseAudioStartedAt,
                        Date().timeIntervalSince(responseAudioStartedAt) < echoGuardWindow {
-                        // El primer VAD tras arrancar la salida suele ser eco,
-                        // no una intervención real; no se cancela esta respuesta.
+                        // The first VAD right after output starts is usually echo,
+                        // not a real intervention; don't cancel this response.
                         break
                     }
                     discardingInterruptedAudio = true

@@ -2,16 +2,17 @@ import SwiftUI
 
 //  Guardian preview components
 //
-//  Piezas de design-system para el futuro "modo Guardián": Pulse vigilando
-//  sesiones en segundo plano y avisando al dueño. NO están cableadas a ningún
-//  motor (todavía no existe): reciben datos por parámetro y se demuestran con
-//  mocks en los #Preview. Cuando llegue el motor, solo hay que conectar datos.
+//  Design-system pieces for the future "Guardian mode": Pulse watching
+//  sessions in the background and notifying the owner. They are NOT wired
+//  to any engine (it doesn't exist yet): they receive data via parameters
+//  and are demoed with mocks in the #Previews. When the engine arrives,
+//  only the data needs to be hooked up.
 
-// MARK: - Estado del Guardián
+// MARK: - Guardian state
 
-/// Estados que el motor del Guardián expondrá.
-/// // TODO: cuando exista el motor, mapear su enum real a estos casos
-/// // (o sustituir este enum por el del motor si vive en MoaOpsCore).
+/// States that the Guardian engine will expose.
+/// // TODO: once the engine exists, map its real enum to these cases
+/// // (or replace this enum with the engine's if it lives in MoaOpsCore).
 public enum PulseGuardianMode: Hashable, Sendable, CaseIterable {
     case watching
     case listening
@@ -50,7 +51,7 @@ public enum PulseGuardianMode: Hashable, Sendable, CaseIterable {
     }
 }
 
-/// Cabecera de estado del Guardián: orbe + modo + resumen de vigilancia.
+/// Guardian status header: orb + mode + watch summary.
 public struct PulseGuardianStatusView: View {
     public var mode: PulseGuardianMode
     public var watchedSessions: Int
@@ -87,11 +88,11 @@ public struct PulseGuardianStatusView: View {
     }
 }
 
-// MARK: - Tarjeta de sesión vigilada
+// MARK: - Watched session card
 
-/// Estado resumido de una sesión que el Guardián vigila.
-/// // TODO: sustituir por el modelo real del motor (id de sesión de moa,
-/// // estado del agente, timestamps).
+/// Summarized state of a session the Guardian watches.
+/// // TODO: replace with the engine's real model (moa session id,
+/// // agent state, timestamps).
 public struct PulseGuardianSessionPreview: Identifiable, Equatable, Sendable {
     public enum Activity: Equatable, Sendable {
         case working
@@ -131,8 +132,8 @@ public struct PulseGuardianSessionPreview: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Fila/tarjeta de sesión vigilada: nombre en mono (es un identificador
-/// técnico), último detalle y pill de actividad.
+/// Watched-session row/card: name in mono (it is a technical identifier),
+/// latest detail and activity pill.
 public struct PulseGuardianSessionRow: View {
     public var session: PulseGuardianSessionPreview
 
@@ -165,10 +166,10 @@ public struct PulseGuardianSessionRow: View {
     }
 }
 
-// MARK: - Aviso / briefing entrante
+// MARK: - Incoming alert / briefing
 
-/// Aviso que el Guardián quiere contar al dueño ("Distribuciones terminó").
-/// // TODO: modelo real del motor (id, sesión origen, urgencia, timestamp).
+/// Alert the Guardian wants to tell the owner about ("Distribuciones terminó").
+/// // TODO: real engine model (id, source session, urgency, timestamp).
 public struct PulseGuardianAlertPreview: Identifiable, Equatable, Sendable {
     public let id: String
     public let title: String
@@ -185,7 +186,7 @@ public struct PulseGuardianAlertPreview: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Tarjeta de aviso entrante, con acciones opcionales (escuchar/descartar).
+/// Incoming alert card, with optional actions (listen/dismiss).
 public struct PulseGuardianAlertCard: View {
     public var alert: PulseGuardianAlertPreview
     public var onListen: (() -> Void)?
@@ -257,9 +258,9 @@ public struct PulseGuardianAlertCard: View {
     }
 }
 
-// MARK: - Contador de pendientes
+// MARK: - Pending counter
 
-/// Badge compacto de avisos pendientes, para cabeceras o tab bars.
+/// Compact badge of pending alerts, for headers or tab bars.
 public struct PulseGuardianPendingBadge: View {
     public var count: Int
 
@@ -279,7 +280,7 @@ public struct PulseGuardianPendingBadge: View {
     }
 }
 
-// MARK: - Previews (datos mock)
+// MARK: - Previews (mock data)
 
 #if os(iOS)
 private let mockSessions: [PulseGuardianSessionPreview] = [

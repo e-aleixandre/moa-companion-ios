@@ -57,11 +57,17 @@ final class MockVoice: PulseVoiceControlling {
 final class MockPresenceStore: PulseGuardianPresenceStore, @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Date?
+    private var reads = 0
 
     init(lastListeningAt: Date? = nil) { stored = lastListeningAt }
 
-    func lastListeningAt() -> Date? { lock.withLock { stored } }
+    func lastListeningAt() -> Date? { lock.withLock { reads += 1; return stored } }
     func recordListening(at date: Date) { lock.withLock { stored = date } }
+
+    /// Every presence decision starts by reading the stored timestamp, so this
+    /// counter is the observable proof that a heartbeat tick actually ran —
+    /// including the ticks that end up rejecting the write.
+    var readCount: Int { lock.withLock { reads } }
 }
 
 /// A hand-wound clock so a test can move time forward without sleeping.

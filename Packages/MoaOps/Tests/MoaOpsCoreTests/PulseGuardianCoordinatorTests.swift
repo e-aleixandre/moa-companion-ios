@@ -689,7 +689,12 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
         // iOS freezes the process for ten minutes and thaws it again: the
         // pending heartbeat tick fires before the socket reports anything.
         clock.advance(600)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // Wait for a tick that demonstrably ran after the jump: a tick already
+        // in flight accounts for at most one read, so a second one can only come
+        // from a tick started afterwards. A plain sleep would let this test pass
+        // without the heartbeat ever having executed.
+        let ticksBefore = presence.readCount
+        try await waitFor { presence.readCount >= ticksBefore + 2 }
         XCTAssertEqual(presence.lastListeningAt(), Date(timeIntervalSince1970: 1_000_000), "a tick that jumped ten minutes is evidence of a suspension, not of presence")
 
         await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
@@ -845,6 +850,199 @@ final class PulseGuardianCoordinatorTests: XCTestCase {
 
         let acked = await attention.ackedTerminationList()
         XCTAssertEqual(acked, ["run_1"], "an init arriving before the server purges must not re-ack")
+    }
+
+    // The watchdog exists for a session that hangs while holding the floor, and
+    // a timeout is not evidence that anything was heard: the briefing goes back
+    // to the queue (never acked) and the playback flags are reset so the queue
+    // can move again.
+    func testStuckNarrationIsRequeuedByTheWatchdogAndNeverAcked() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, narrationTimeout: 0.15, playbackTimeout: 5, now: { Date(timeIntervalSince1970: 1_003_600) })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        let call = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await call.recordedNarrations().count == 1 }
+
+        // No response event, no audio: the session is simply stuck. Each timeout
+        // puts the briefing back instead of acking it, up to the presentation
+        // limit — three presentations in total, never four.
+        try await waitFor { await call.recordedNarrations().count == 3 }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let presentations = await call.recordedNarrations().count
+        XCTAssertEqual(presentations, 3, "the limit is presentations, first attempt included")
+        let acked = await attention.ackedTerminationList()
+        XCTAssertEqual(acked, [], "a briefing that timed out was never heard, so it must not be acked")
+        XCTAssertNotEqual(coordinator.state, .speaking, "the floor is free again once the briefing is given up on")
+    }
+
+    // A long answer is not a hang: while audio keeps arriving the watchdog must
+    // re-arm instead of killing a healthy response mid-sentence.
+    func testWatchdogRearmsWhileTheResponseIsStillProducingAudio() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let voice = MockVoice()
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: voice, wakeWord: wake, hotWindow: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, narrationTimeout: 0.3, playbackTimeout: 5, now: { Date(timeIntervalSince1970: 1_003_600) })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        let call = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await call.recordedNarrations().count == 1 }
+        await realtime.emit(.responding)
+
+        // A briefing several watchdog windows long, but demonstrably alive:
+        // audio keeps arriving the whole time.
+        for _ in 0..<14 {
+            await realtime.emitAudio(Data([1, 2]))
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await realtime.emit(.listening)
+        voice.drainPlayback()
+        await settle()
+        let narrations = await call.recordedNarrations().count
+        XCTAssertEqual(narrations, 1, "a response that keeps producing audio must not be cut nor retried")
+        let acked = await attention.ackedTerminationList()
+        XCTAssertEqual(acked, ["run_1"], "the long briefing finishes normally and only then acks")
+    }
+
+    // A playback completion can simply never arrive. Without a timeout the flag
+    // stays up, the queue never drains and the hot window can never close.
+    func testStuckResponsePlaybackIsResetAndTheQueueDrains() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: voice, wakeWord: wake, hotWindow: 5, presence: MockPresenceStore(), narrationTimeout: 5, playbackTimeout: 0.15)
+        await coordinator.start()
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        // Pulse answers the owner and its audio starts sounding, but the drain
+        // completion is lost.
+        await realtime.emit(.responding)
+        await realtime.emitAudio(Data([1, 2]))
+        await realtime.emit(.listening)
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        await settle()
+        let blocked = await realtime.currentCall()?.recordedNarrations().count ?? 0
+        XCTAssertEqual(blocked, 0, "while the answer is believed to be sounding, the queue waits")
+
+        try await waitFor { (await realtime.currentCall()?.recordedNarrations().count ?? 0) == 1 }
+        XCTAssertEqual(coordinator.state, .speaking, "the stuck playback flag was reset and the announcement took the floor")
+    }
+
+    // stop() puts an unheard announcement back in the queue. The dedup marks
+    // keep a later init from enqueueing it again, so start() itself has to be
+    // the consumer or it would wait forever.
+    func testAnnouncementRequeuedByStopIsNarratedAfterRestart() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: MockVoice(), wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        let first = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await first.recordedNarrations().count == 1 }
+
+        coordinator.stop()
+        await settle()
+        XCTAssertEqual(coordinator.state, .idle)
+        let acked = await attention.ackedItemList()
+        XCTAssertEqual(acked, [], "stopping mid-briefing must not ack it")
+
+        await coordinator.start()
+        try await waitFor { await realtime.begins() == 2 }
+        let second = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await second.recordedNarrations().count == 1 }
+        let retried = await second.recordedNarrations()
+        XCTAssertTrue(retried[0].contains("pide borrar tmp"), "the announcement nobody heard is told after restarting")
+    }
+
+    // A temporary audio interruption (a phone call) tears the socket down and
+    // puts the announcement back. Capture coming back is the only event that
+    // follows, so it must be the one that drains the queue.
+    func testAnnouncementRequeuedByAudioInterruptionIsNarratedOnResume() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let voice = MockVoice()
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: voice, wakeWord: wake, hotWindow: 5, presence: MockPresenceStore())
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"attention","item":{"id":"att_1","priority":0,"kind":"permission","session_id":"s1","alias":"build","spoken":"pide borrar tmp","state":"pending","created_at":"2026-07-16T10:00:00Z"}}"#))
+        let first = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await first.recordedNarrations().count == 1 }
+
+        voice.interruptTemporarily()
+        await settle()
+        XCTAssertEqual(coordinator.state, .interrupted)
+
+        voice.resumeCapture()
+        try await waitFor { await realtime.begins() == 2 }
+        let second = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await second.recordedNarrations().count == 1 }
+    }
+
+    // The race the queue-level suppression cannot catch: the recovery
+    // announcement is already holding the floor when a catch-up shows up. The
+    // catch-up carries the facts, so it must never be dropped; the short "I'm
+    // back" that is already sounding is left to finish rather than cut.
+    func testCatchUpArrivingWhileRecoveryIsBeingToldIsStillNarrated() async throws {
+        let wake = MockWakeWord()
+        let realtime = MockRealtime()
+        let attention = MockAttentionChannel()
+        let voice = MockVoice()
+        let clock = MockClock(now: Date(timeIntervalSince1970: 1_000_000))
+        let presence = MockPresenceStore(lastListeningAt: Date(timeIntervalSince1970: 1_000_000))
+        let coordinator = PulseGuardianCoordinator(service: MockGuardianService(), realtime: realtime, attention: attention, voice: voice, wakeWord: wake, hotWindow: 5, voiceReconnectDelay: { _ in 0.02 }, voiceReconnectBudget: 5, presence: presence, catchUpGapThreshold: 120, presenceRefreshInterval: 0, now: { clock.now() })
+        await coordinator.start()
+        await settle()
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[]}"#))
+        await settle()
+        wake.fire()
+        try await waitFor { await realtime.begins() == 1 }
+
+        // The conversation drops and comes back: Pulse says it is back.
+        await realtime.emit(.failed)
+        try await waitFor { await realtime.begins() == 2 }
+        let recovered = try XCTUnwrap(await realtime.currentCall())
+        try await waitFor { await recovered.recordedNarrations().count == 1 }
+        let firstTold = await recovered.recordedNarrations()
+        XCTAssertTrue(firstTold[0].contains("reconexion"))
+
+        // Mid-sentence, an init proves a long absence.
+        clock.advance(3_600)
+        await attention.emit(try decodeMessage(#"{"type":"init","sessions":[],"items":[],"terminations":[{"id":"run_1","session_id":"s1","alias":"build","spoken":"Terminó bien","summary":"ok","created_at":"2026-07-16T10:01:00Z","ref":{"session_id":"s1","run_gen":4,"messages_url":"/api/sessions/s1/messages"}}]}"#))
+        await settle()
+        let midRecovery = await recovered.recordedNarrations().count
+        XCTAssertEqual(midRecovery, 1, "the catch-up waits its turn instead of talking over the recovery")
+
+        // The recovery finishes and the catch-up takes the floor.
+        await realtime.emit(.responding)
+        await realtime.emitAudio(Data([1, 2]))
+        await realtime.emit(.listening)
+        voice.drainPlayback()
+        try await waitFor { await recovered.recordedNarrations().count == 2 }
+        let told = await recovered.recordedNarrations()
+        XCTAssertTrue(told[1].contains("catch_up"), "the announcement carrying the facts must never be lost")
+        XCTAssertEqual(told.filter { $0.contains("reconexion") }.count, 1, "no second I'm-back on top of the summary")
+
+        await realtime.emit(.responding)
+        await realtime.emitAudio(Data([3, 4]))
+        await realtime.emit(.listening)
+        voice.drainPlayback()
+        await settle()
+        let acked = await attention.ackedTerminationList()
+        XCTAssertEqual(acked, ["run_1"])
     }
 
     func testCatchUpEnvelopeCarriesSessionStateAndApproximateGap() throws {
